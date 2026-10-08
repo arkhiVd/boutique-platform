@@ -74,7 +74,35 @@ if need kubeconform kubeconform && [[ -n "$MANIFESTS" ]]; then
   done <<< "$MANIFESTS"
 fi
 if need conftest conftest && [[ -d policy ]]; then
-  check "conftest test apps/ ci/ observability/" -- conftest test apps/ ci/ observability/ -p policy/
+  # Only pass directories that exist. ci/ and observability/ are later phases;
+  # passing a missing path makes conftest exit on a stat error, which would look
+  # exactly like a policy failure and would be a false FAIL.
+  CONFTEST_TARGETS=()
+  for d in apps ci observability; do
+    [[ -d "$d" ]] && CONFTEST_TARGETS+=("$d")
+  done
+  # Two categories of file are excluded by path, deliberately:
+  #
+  #   apps/boutique/upstream-kubernetes-manifests.yaml — the verbatim upstream
+  #     baseline. It is the control, not the product: it fails this policy by
+  #     construction, which is the point. The negative fixtures under
+  #     policy/tests/should-fail/ are what prove the policy has teeth; testing
+  #     the control here too would be a tautological failure.
+  #
+  #   apps/boutique/chaos/ — strategic-merge patch fragments. A fragment is not
+  #     a complete object, so validating one against a whole-resource policy
+  #     reports failures that do not exist.
+  CONFTEST_IGNORE='apps/boutique/(upstream-kubernetes-manifests\.yaml|chaos/)'
+  if [[ ${#CONFTEST_TARGETS[@]} -gt 0 ]]; then
+    check "conftest test ${CONFTEST_TARGETS[*]}" -- \
+      conftest test "${CONFTEST_TARGETS[@]}" -p policy/ --ignore "$CONFTEST_IGNORE"
+    # --combine hands the policy every document at once. That is the only mode in
+    # which a Deployment can be checked against its own HPA, because a Deployment
+    # and its HorizontalPodAutoscaler are two separate YAML documents. See the
+    # header of policy/resources.rego.
+    check "conftest test ${CONFTEST_TARGETS[*]} --combine" -- \
+      conftest test "${CONFTEST_TARGETS[@]}" -p policy/ --ignore "$CONFTEST_IGNORE" --combine
+  fi
 fi
 
 cyan "== helm =="
