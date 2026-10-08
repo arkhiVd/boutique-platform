@@ -43,15 +43,19 @@ font-weight:600;vertical-align:middle;margin-right:6px}
 </head>
 <body>
 <div class="wrap">
-<p class="meta">rendered from <code>PROGRESS.md</code> · last updated 2026-10-08 22:45 UTC ·
+<p class="meta">rendered from <code>PROGRESS.md</code> · last updated 2026-10-09 00:50 UTC ·
 auto-refreshes every 30s</p>
 <h1>boutique-platform — live progress</h1>
-<p><strong>Last updated: 2026-10-08 22:45 UTC</strong> · rendered browser view: <code>docs/progress.html</code> (regenerate with <code>python3 scripts/render-progress.py</code>)</p>
+<p><strong>Last updated: 2026-10-09 00:50 UTC</strong> · rendered browser view: <code>docs/progress.html</code> (regenerate with <code>python3 scripts/render-progress.py</code>)</p>
 <hr>
 <h2>▶ Where we are</h2>
-<p><strong>Wave A, Phase 0.</strong> The repo's guardrails and the full phased plan are written against live account evidence and against the real <code>GoogleCloudPlatform/microservices-demo</code> <code>v0.10.7</code>. Nothing has been provisioned. Three decisions from Aravind unblock the rest.</p>
-<h3>Needs a decision from you</h3>
-<table><thead><tr><th>#</th><th>Decision</th><th>Why it blocks</th><th>Cost impact</th></tr></thead><tbody><tr><td>1</td><td><strong>Node size.</strong> <code>t3.small</code> (2 GiB) cannot host Boutique + Jenkins + Prometheus + Loki + Tempo (~9.5 GiB of requests on 6 GiB of RAM). <code>t3.medium</code> (4 GiB) × 3 fits, but has <strong>zero free-tier hours</strong>.</td><td>Phase 3 provisions nodes</td><td>$85 (t3.small+no ALB) → $176 (t3.medium+ALB) over the 43-day window</td></tr><tr><td>2</td><td><strong>ALB or node-IP entry.</strong> The ALB gives the two-layer edge, WAF and access logs; it costs ~$28/mo.</td><td>Phase 5</td><td>~$40 of the window</td></tr><tr><td>3</td><td><strong>TLS path.</strong> No Route 53 zone and no ACM cert exist, so the default is a self-signed imported cert unless we use <code>&lt;lb&gt;.ip.sslip.io</code> + HTTP-01.</td><td>Phase 5</td><td>$0 either way</td></tr></tbody></table>
+<p><strong>Phase 6 is written.</strong> The manifest layer of the whole "beats upstream" claim exists and is validated by command output, on branch <code>feat/app-hardening</code>. Nothing has been provisioned, and no <code>kubectl apply</code> has been run anywhere — every number below comes from <code>kustomize build</code> on the source, not from a cluster.</p>
+<p>Measured on the rendered output, not on the source:</p>
+<table><thead><tr><th>Control</th><th>Count</th></tr></thead><tbody><tr><td><code>PodDisruptionBudget</code></td><td><strong>13</strong> (all 13 workloads)</td></tr><tr><td><code>topologySpreadConstraints</code></td><td><strong>13</strong></td></tr><tr><td><code>seccompProfile: RuntimeDefault</code></td><td><strong>13</strong></td></tr><tr><td><code>runAsNonRoot: true</code></td><td><strong>13</strong></td></tr><tr><td><code>readOnlyRootFilesystem: true</code></td><td><strong>14</strong> (13 service containers + loadgenerator's initContainer)</td></tr><tr><td><code>automountServiceAccountToken: false</code></td><td><strong>26</strong> (13 pod specs + 13 ServiceAccounts)</td></tr><tr><td><code>HorizontalPodAutoscaler</code></td><td><strong>10</strong> — redis-cart and loadgenerator are exempt, with a reason the policy checks</td></tr><tr><td><code>NetworkPolicy</code></td><td><strong>14</strong> — one default-deny plus one allow per service, every egress explicit</td></tr><tr><td><code>kube-dns</code> egress carve-out</td><td><strong>13</strong> (the rule upstream's <code>- {}</code> egress replaces)</td></tr><tr><td><code>startupProbe</code></td><td><strong>12</strong> (90s budget for adservice's JVM and cartservice's .NET cold start)</td></tr></tbody></table>
+<p>Memory requests: <strong>2312 Mi (2.26 GiB)</strong> for the <code>boutique</code> namespace — fits a t3.medium's 4 GiB with ~1.1 GiB spare. CPU requests: <strong>2820m</strong> against a t3.medium's <strong>2000m</strong> — <strong>does not fit</strong>, and that is the one number in this phase that is a finding rather than an achievement. Recorded in <code>TASKS.md</code> U1 with three named closes.</p>
+<p><strong>The negative control is the strongest evidence here:</strong> the vendored upstream baseline, run unchanged against this repo's own policy, fails with <strong>42 violations</strong> in per-document mode and <strong>54</strong> in combined mode. The control fails; the rewrite passes.</p>
+<h3>Still needs a decision from you</h3>
+<table><thead><tr><th>#</th><th>Decision</th><th>Why it blocks</th><th>Measured</th></tr></thead><tbody><tr><td>1</td><td><strong>Node shape.</strong> As before</td><td>Phase 6 can actually schedule</td><td><strong>2820m of CPU requests vs 2000m on one t3.medium.</strong> Either relax the workload-node taint (recommended, matches SPEC's own diagram) or accept Pending pods</td></tr><tr><td>2</td><td><strong>ALB or node-IP entry.</strong></td><td>Phase 5</td><td>unchanged</td></tr><tr><td>3</td><td><strong>TLS path.</strong></td><td>Phase 5</td><td>unchanged</td></tr></tbody></table>
 <hr>
 <h2>Waves and phases</h2>
 <p>Legend — phase: <span class="tag wait">not started</span> not started · <span class="tag wip">in progress</span> in progress · <span class="tag done">done</span> done · <span class="tag block">blocked</span> blocked Critic: <code>pending</code> · <code>pass</code> · <code>gap named</code></p>
@@ -60,7 +64,7 @@ auto-refreshes every 30s</p>
 <h3>Wave B — Cluster</h3>
 <ul><li><span class="tag block">blocked</span> <strong>Phase 3 — k3s HA, 3 AZ, SSM-only</strong> · blocked on decisions 1 + the first cost-bearing apply</li><li><span class="tag block">blocked</span> <strong>Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)</strong></li></ul>
 <h3>Wave C — Edge and workload</h3>
-<ul><li><span class="tag block">blocked</span> <strong>Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik</strong> · blocked on decision 2</li><li><span class="tag block">blocked</span> <strong>Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)</strong> · the phase the whole claim rests on</li></ul>
+<ul><li><span class="tag block">blocked</span> <strong>Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik</strong> · blocked on decision 2</li><li><span class="tag wip">in progress</span> <strong>Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)</strong> · the phase the whole claim rests on</li><li><span class="tag done">done</span> Upstream <code>v0.10.7</code> vendored verbatim with provenance (URL, tag, sha256, licence)</li><li><span class="tag done">done</span> <code>apps/boutique/base/</code>: 13 workloads, every control present, CPU requests == limits</li><li><span class="tag done">done</span> <code>apps/boutique/netpol/</code>: default-deny + per-service allow <strong>with the DNS egress carve-out</strong></li><li><span class="tag done">done</span> <code>policy/</code>: rego rules + 3 deliberately-failing fixtures, both conftest modes green</li><li><span class="tag done">done</span> OTel Collector with real processors (<code>memory_limiter</code>, <code>tail_sampling</code>, <code>batch</code>)</li><li><span class="tag done">done</span> <code>quota.yaml</code> sized with measured arithmetic; PSA <code>restricted</code> on <code>boutique</code></li><li><span class="tag done">done</span> <code>scripts/chaos/inject-latency.sh</code> + the runbook, with the fault surface stated honestly</li><li><span class="tag wait">not started</span> Cluster-dependent: pods <code>Available</code>, drain test, live <code>jsonpath</code> proof — blocked, see U1</li></ul>
 <h3>Wave D — CI/CD</h3>
 <ul><li><span class="tag block">blocked</span> <strong>Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)</strong></li><li><span class="tag block">blocked</span> <strong>Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback</strong></li></ul>
 <h3>Wave E — Observability</h3>
@@ -77,6 +81,28 @@ auto-refreshes every 30s</p>
 <p>  topology spread, anti-affinity, priority classes, ResourceQuota/LimitRange, deployment   <code>strategy</code>, egress DNS carve-out, private nodes, SLOs, any metrics instrumentation. Upstream's   OTel collector ships <strong>no processors at all</strong>. Upstream <code>adservice</code> tracing is commented out.</p>
 <ul><li>Verified absent and <strong>not</strong> to be built: <code>adServiceFailure</code>, <code>recommendationCacheFailure</code></li></ul>
 <p>  (checked across v0.1.4–v0.10.7), <code>ml-pipeline/</code>, Cloud CDN, Argo CD / Config Sync descriptors</p>
+<h3>Phase 6 manifest layer — 2026-10-09, from the render not the source</h3>
+<pre><code>kustomize build apps/boutique/                2942 lines, 13 Deployments
+kubeconform -strict -kubernetes-version 1.36.3 apps/ apps/boutique/netpol/ policy/tests/
+  Summary: 136 resources found in 36 files - Valid: 136, Invalid: 0, Errors: 0
+conftest test apps/boutique/base -p policy/          1044 tests, 1044 passed
+conftest test apps/boutique/base -p policy/ --combine   18 tests,   18 passed
+conftest test policy/tests/should-fail -p policy/       54 tests,   22 failures
+conftest test apps/boutique/upstream-kubernetes-manifests.yaml -p policy/
+                                                        648 tests,   42 failures  &lt;-- the control
+scripts/check.sh                             PASS: 50   FAIL: 0   MISSING: 0
+gitleaks detect --no-git                      no leaks found</code></pre>
+<p>Also verified, from the source rather than from memory, because the wiring depends on it:</p>
+<ul><li><code>src/productcatalogservice/server.go</code> is the <strong>only</strong> reader of <code>EXTRA_LATENCY</code> in the tree, so</li></ul>
+<p>  it is the only chaos target.</p>
+<ul><li><code>src/shippingservice/main.go</code> has a second empty <code>initTracing()</code> — same upstream issue #422 as</li></ul>
+<p>  adservice. It was not in the brief; it is recorded in <code>docs/adr/0004-adservice-tracing-gap.md</code>.</p>
+<ul><li><code>src/cartservice/</code> has <strong>no</strong> OpenTelemetry reference at all — not a stub, never built.</li><li>The six instrumented images read <code>COLLECTOR_SERVICE_ADDR</code> only and hard-code <code>AlwaysSample()</code>,</li></ul>
+<p>  so <code>OTEL_TRACES_SAMPLER*</code> is inert for them today. Set anyway, reason documented.</p>
+<ul><li>The OTel Collector image declares <code>USER 10001:10001</code> (registry API, <code>sha256:5f92255513d9…</code>),</li></ul>
+<p>  so the manifest follows the image rather than upstream's <code>1000</code>.</p>
+<ul><li>Upstream's collector runs an initContainer that curls <code>metadata.google.internal</code>. On AWS that</li></ul>
+<p>  fails, so the collector would never start. Replaced with a static ConfigMap.</p>
 <hr>
 <h2>Cost ledger (recomputed by <code>scripts/cost-estimate.sh</code>)</h2>
 <table><thead><tr><th>Component</th><th>Monthly</th><th>Notes</th></tr></thead><tbody><tr><td>3 × t3.medium</td><td>$91.28</td><td>0 free-tier hours → full price</td></tr><tr><td>3 × 16 GiB gp3</td><td>$1.44</td><td>30 GiB free</td></tr><tr><td>ALB + ~2 LCU</td><td>$28.11</td><td>decision 2</td></tr><tr><td>logs / snapshots / ECR</td><td>&lt;$3</td><td>retained logs have a lifecycle</td></tr><tr><td><strong>Total</strong></td><td><strong>≈$124/mo</strong></td><td><strong>≈$176 over the 43 days left in the plan window</strong></td></tr></tbody></table>
