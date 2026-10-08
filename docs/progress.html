@@ -43,22 +43,27 @@ font-weight:600;vertical-align:middle;margin-right:6px}
 </head>
 <body>
 <div class="wrap">
-<p class="meta">rendered from <code>PROGRESS.md</code> · last updated 2026-10-08 22:45 UTC ·
+<p class="meta">rendered from <code>PROGRESS.md</code> · last updated 2026-10-09 03:10 UTC ·
 auto-refreshes every 30s</p>
 <h1>boutique-platform — live progress</h1>
-<p><strong>Last updated: 2026-10-08 22:45 UTC</strong> · rendered browser view: <code>docs/progress.html</code> (regenerate with <code>python3 scripts/render-progress.py</code>)</p>
+<p><strong>Last updated: 2026-10-09 03:10 UTC</strong> · rendered browser view: <code>docs/progress.html</code> (regenerate with <code>python3 scripts/render-progress.py</code>)</p>
 <hr>
 <h2>▶ Where we are</h2>
-<p><strong>Wave A, Phase 0.</strong> The repo's guardrails and the full phased plan are written against live account evidence and against the real <code>GoogleCloudPlatform/microservices-demo</code> <code>v0.10.7</code>. Nothing has been provisioned. Three decisions from Aravind unblock the rest.</p>
+<p><strong>Wave A, Phase 2 is built and planned; nothing is provisioned.</strong> Two Terraform stacks exist on branch <code>feat/infra-bootstrap-vpc</code>: <code>bootstrap/</code> (state bucket, split OIDC roles, $30 Budget, alert SNS topic) and <code>platform/</code> (VPC, three public subnets in three AZs, IGW, four security groups, node instance profile, S3 backend with native <code>use_lockfile</code> locking). Both plan clean, both scan clean, and neither has been applied — the apply is Aravind's gate, and the state bucket the platform stack stores state in does not exist until that one-time bootstrap apply runs.</p>
+<p><strong>What the two plans say, exactly:</strong></p>
+<pre><code>terraform -chdir=bootstrap plan      Plan: 14 to add, 0 to change, 0 to destroy.
+terraform -chdir=platform  plan      Plan: 42 to add, 0 to change, 0 to destroy.</code></pre>
+<p><strong>Cost of Wave A: $0.00.</strong> VPC, IGW, subnets, route table, DHCP options, security groups, IAM roles, instance profiles, the OIDC provider, the Budget and the SNS topic are all free; the state bucket holds a state file, not data. The first billable thing in the repo is Phase 3's instances.</p>
+<p><strong>Three decisions from Aravind still unblock the rest.</strong></p>
 <h3>Needs a decision from you</h3>
 <table><thead><tr><th>#</th><th>Decision</th><th>Why it blocks</th><th>Cost impact</th></tr></thead><tbody><tr><td>1</td><td><strong>Node size.</strong> <code>t3.small</code> (2 GiB) cannot host Boutique + Jenkins + Prometheus + Loki + Tempo (~9.5 GiB of requests on 6 GiB of RAM). <code>t3.medium</code> (4 GiB) × 3 fits, but has <strong>zero free-tier hours</strong>.</td><td>Phase 3 provisions nodes</td><td>$85 (t3.small+no ALB) → $176 (t3.medium+ALB) over the 43-day window</td></tr><tr><td>2</td><td><strong>ALB or node-IP entry.</strong> The ALB gives the two-layer edge, WAF and access logs; it costs ~$28/mo.</td><td>Phase 5</td><td>~$40 of the window</td></tr><tr><td>3</td><td><strong>TLS path.</strong> No Route 53 zone and no ACM cert exist, so the default is a self-signed imported cert unless we use <code>&lt;lb&gt;.ip.sslip.io</code> + HTTP-01.</td><td>Phase 5</td><td>$0 either way</td></tr></tbody></table>
 <hr>
 <h2>Waves and phases</h2>
 <p>Legend — phase: <span class="tag wait">not started</span> not started · <span class="tag wip">in progress</span> in progress · <span class="tag done">done</span> done · <span class="tag block">blocked</span> blocked Critic: <code>pending</code> · <code>pass</code> · <code>gap named</code></p>
 <h3>Wave A — Foundation</h3>
-<ul><li><span class="tag wip">in progress</span> <strong>Phase 0 — guardrails &amp; validation harness</strong> · critic: <code>pending</code></li><li><span class="tag done">done</span> Live account evidence gathered (quota, instance types, blocked services, cost, VPC, SGs)</li><li><span class="tag done">done</span> Real Online Boutique <code>v0.10.7</code> architecture + what Google ships vs documents as guidance</li><li><span class="tag done">done</span> SPEC / ROADMAP / AGENTS / TASKS written</li><li><span class="tag wait">not started</span> GitHub repo created, CI plan gate, <code>scripts/check.sh</code> green</li><li><span class="tag wait">not started</span> Critic blind-compares the scaffold against the phase's exit criteria</li><li><span class="tag block">blocked</span> <strong>Phase 1 — cost guardrails (AWS Budget + OIDC + state bucket)</strong> · blocked on decision to allow IAM changes</li><li><span class="tag block">blocked</span> <strong>Phase 2 — network + node identity</strong> · blocked on decision 1</li></ul>
+<ul><li><span class="tag wip">in progress</span> <strong>Phase 0 — guardrails &amp; validation harness</strong> · critic: <code>pending</code></li><li><span class="tag done">done</span> Live account evidence gathered (quota, instance types, blocked services, cost, VPC, SGs)</li><li><span class="tag done">done</span> Real Online Boutique <code>v0.10.7</code> architecture + what Google ships vs documents as guidance</li><li><span class="tag done">done</span> SPEC / ROADMAP / AGENTS / TASKS written</li><li><span class="tag done">done</span> <code>scripts/check.sh</code> runs and reports pass/fail per tool with real output</li><li><span class="tag wait">not started</span> GitHub repo created and CI checks green on a real PR run</li><li><span class="tag wait">not started</span> Critic blind-compares the scaffold against the phase's exit criteria</li><li><span class="tag done">done</span> <strong>Phase 1 — cost guardrails: state bucket, split OIDC plan/apply roles, $30 Budget, alert topic</strong></li><li>built and planned; the one-time local-state apply is the remaining step</li><li><span class="tag done">done</span> <strong>Phase 2 — network + node identity: VPC, 3 public subnets, IGW, 4 SGs, node instance profile</strong></li><li>built and planned; no instance, load balancer or NAT gateway is created, so nothing bills</li></ul>
 <h3>Wave B — Cluster</h3>
-<ul><li><span class="tag block">blocked</span> <strong>Phase 3 — k3s HA, 3 AZ, SSM-only</strong> · blocked on decisions 1 + the first cost-bearing apply</li><li><span class="tag block">blocked</span> <strong>Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)</strong></li></ul>
+<ul><li><span class="tag wait">not started</span> <strong>Phase 3 — k3s HA, 3 AZ, SSM-only</strong> · next; blocked on decisions 1 + the first cost-bearing apply</li><li><span class="tag block">blocked</span> <strong>Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)</strong></li></ul>
 <h3>Wave C — Edge and workload</h3>
 <ul><li><span class="tag block">blocked</span> <strong>Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik</strong> · blocked on decision 2</li><li><span class="tag block">blocked</span> <strong>Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)</strong> · the phase the whole claim rests on</li></ul>
 <h3>Wave D — CI/CD</h3>
@@ -70,13 +75,49 @@ auto-refreshes every 30s</p>
 <hr>
 <h2>Critic verdicts</h2>
 <p>Each phase is judged by a fresh-context agent that reads the <strong>real output</strong>, never the builder's summary, and blind-compares against the real Online Boutique deployment.</p>
-<table><thead><tr><th>Phase</th><th>Builder verdict</th><th>Critic verdict</th><th>Biggest gap named</th><th>Rounds</th></tr></thead><tbody><tr><td>0</td><td>pending</td><td>pending</td><td>—</td><td>0</td></tr></tbody></table>
+<table><thead><tr><th>Phase</th><th>Builder verdict</th><th>Critic verdict</th><th>Biggest gap named</th><th>Rounds</th></tr></thead><tbody><tr><td>0</td><td>pending</td><td>pending</td><td>—</td><td>0</td></tr><tr><td>1</td><td>built, planned, not applied</td><td>pending</td><td>the apply itself</td><td>0</td></tr><tr><td>2</td><td>built, planned, not applied</td><td>pending</td><td>flow logs off for cost; ALB→NodePort rule lands in Phase 5</td><td>0</td></tr></tbody></table>
 <hr>
 <h2>What is proven so far (real evidence, not reports)</h2>
 <ul><li>Account <code>348032171026</code> / <code>us-east-1</code>, default VPC <code>vpc-0cf47bfcd22729c1a</code>, 6 public subnets across 6 AZs</li><li>Quota: <strong>8.0 vCPU</strong> running on-demand standard instances → 4 × t3-class total</li><li><code>t2.micro</code> <strong>not</strong> free-tier eligible; <code>t3.micro</code> = 1.0 GiB, <code>t3.small</code> = 2.0 GiB, <code>t3.medium</code> = 4.0 GiB</li><li>NLB blocked account-wide (<code>network-load-balancer-capacity-units = 0</code>); <strong>ALB works</strong></li><li>Route 53 zones: 0. ACM certs: 0. NAT gateways: 0. EKS clusters: 0.</li><li>Cost since account creation: <strong>$0.00 every month</strong></li><li>Online Boutique <code>v0.10.7</code> HEAD released 2026-09-18; images at <code>us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/&lt;svc&gt;:v0.10.7</code></li><li>Verified absent from upstream <code>v0.10.7</code> (so ours must add them): PodDisruptionBudget, HPA,</li></ul>
 <p>  topology spread, anti-affinity, priority classes, ResourceQuota/LimitRange, deployment   <code>strategy</code>, egress DNS carve-out, private nodes, SLOs, any metrics instrumentation. Upstream's   OTel collector ships <strong>no processors at all</strong>. Upstream <code>adservice</code> tracing is commented out.</p>
 <ul><li>Verified absent and <strong>not</strong> to be built: <code>adServiceFailure</code>, <code>recommendationCacheFailure</code></li></ul>
 <p>  (checked across v0.1.4–v0.10.7), <code>ml-pipeline/</code>, Cloud CDN, Argo CD / Config Sync descriptors</p>
+<h3>Wave A — 2026-10-09, from the plans and the scanners, not from an apply</h3>
+<pre><code>terraform -chdir=bootstrap plan -no-color
+  Plan: 14 to add, 0 to change, 0 to destroy.
+  aws_s3_bucket.tfstate, aws_s3_bucket_lifecycle_configuration.tfstate,
+  aws_s3_bucket_public_access_block.tfstate,
+  aws_s3_bucket_server_side_encryption_configuration.tfstate,
+  aws_s3_bucket_versioning.tfstate, aws_iam_openid_connect_provider.github_actions[0],
+  aws_iam_role.plan, aws_iam_role_policy.plan, aws_iam_role.apply, aws_iam_role_policy.apply,
+  aws_budgets_budget.monthly, aws_sns_topic.alerts, aws_sns_topic_policy.alerts,
+  aws_sns_topic_subscription.alerts_email
+
+terraform -chdir=platform plan -no-color
+  Plan: 42 to add, 0 to change, 0 to destroy.
+  1 VPC, 1 IGW, 1 route table, 3 route table associations, 3 subnets, 2 DHCP resources,
+  1 default security group, 4 security groups, 21 security group rules,
+  1 node role, 1 instance profile, 1 inline role policy, 1 managed policy attachment,
+  1 SSM parameter
+
+checkov -d bootstrap     Passed checks: 69, Failed checks: 0, Skipped checks: 6
+checkov -d platform      Passed checks: 103, Failed checks: 0
+terraform fmt -check -recursive            clean, both stacks
+tflint --recursive                          clean
+gitleaks detect --no-git                    no leaks found
+scripts/check.sh                            PASS: 17  FAIL: 0  MISSING: 0
+scripts/cost-estimate.sh                    $97.74/mo for the SPEC shape; Wave A itself adds $0.00</code></pre>
+<p>Also verified from the account, not from memory:</p>
+<ul><li><code>aws iam list-open-id-connect-providers</code> returned an <strong>empty list</strong>, so <code>bootstrap/</code> creates the</li></ul>
+<p>  GitHub Actions OIDC provider (guarded by <code>var.create_oidc_provider</code> for the day it already exists)</p>
+<ul><li>The TLS thumbprint is read at plan time from</li></ul>
+<p>  <code>https://token.actions.githubusercontent.com/.well-known/openid-configuration</code> →   <code>ab9d0263244dd0326eb67015705a667e79cfe998</code></p>
+<ul><li><code>AmazonSSMManagedInstanceCore</code> v2 in this account grants <code>ssmmessages:*</code>,</li></ul>
+<p>  <code>ssm:UpdateInstanceInformation</code> and <code>ec2messages:*</code> all on <code>"Resource": "*"</code> — that is the   evidence for the node role's three wildcard-resource statements</p>
+<ul><li><code>aws service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A</code> → <strong>8.0 vCPU</strong>,</li></ul>
+<p>  asserted by a plan-time check block that warns when <code>instance_type_*</code> would exceed it</p>
+<ul><li>One negative test, run and recorded: <code>terraform plan -var instance_type_worker=t3.xlarge</code> →</li></ul>
+<p>  <code>Warning: Check block assertion failed</code> with the arithmetic in the message</p>
 <hr>
 <h2>Cost ledger (recomputed by <code>scripts/cost-estimate.sh</code>)</h2>
 <table><thead><tr><th>Component</th><th>Monthly</th><th>Notes</th></tr></thead><tbody><tr><td>3 × t3.medium</td><td>$91.28</td><td>0 free-tier hours → full price</td></tr><tr><td>3 × 16 GiB gp3</td><td>$1.44</td><td>30 GiB free</td></tr><tr><td>ALB + ~2 LCU</td><td>$28.11</td><td>decision 2</td></tr><tr><td>logs / snapshots / ECR</td><td>&lt;$3</td><td>retained logs have a lifecycle</td></tr><tr><td><strong>Total</strong></td><td><strong>≈$124/mo</strong></td><td><strong>≈$176 over the 43 days left in the plan window</strong></td></tr></tbody></table>
