@@ -63,7 +63,16 @@ if need gitleaks gitleaks; then
   check "gitleaks detect --no-git" -- gitleaks detect --no-git --source "$ROOT" --redact
 fi
 if need checkov checkov && [[ -n "$TF_ROOTS" ]]; then
-  check "checkov -d . (terraform)" -- checkov -d "$ROOT" --framework terraform --quiet --compact
+  # Per TF root, not one repo-wide run. Checkov loads exactly one config file
+  # per invocation and searches the scanned directory first, then the cwd:
+  #   checkov/common/util/config_utils.py, get_default_config_paths()
+  # So a single `checkov -d .` never sees platform/.checkov.yaml or
+  # bootstrap/.checkov.yaml, and a root-level copy of either one would leak
+  # one stack's suppressions into the other's results. Same loop shape as the
+  # validate loop above.
+  while IFS= read -r dir; do
+    check "checkov -d $dir" -- checkov -d "$dir" --framework terraform --quiet --compact
+  done <<< "$TF_ROOTS"
 fi
 
 cyan "== kubernetes manifests =="
