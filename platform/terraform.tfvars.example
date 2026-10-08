@@ -1,0 +1,41 @@
+# platform — example inputs.
+#
+# Copy to terraform.tfvars, which is gitignored. Never commit the real file:
+# admin_cidr is a live address and alert_email is a live mailbox.
+
+# The operator's egress address, as the only source allowed to reach the
+# kube-apiserver. Required: there is no default, and the stack refuses to plan
+# without it.
+#
+#   curl -s https://checkip.amazonaws.com        # your current egress IP
+#   admin_cidr = "203.0.113.10/32"               # write it here
+#
+# The IP moves when you change networks. If a plan fails with a timeout reaching
+# something you could reach yesterday, check this first — a stale value is the
+# single most likely cause of "it worked before".
+admin_cidr = "203.0.113.10/32"
+
+# Where the Budget alerts already land (bootstrap) and where Phase 9's cluster
+# alarms point. It must be the same address as the bootstrap tfvars: the SNS
+# subscription to the boutique-platform-alerts topic already exists.
+alert_email = "alerts@example.com"
+
+# The bootstrap stack's state_bucket_name output. Required.
+bootstrap_state_bucket = "boutique-platform-tfstate-348032171026-us-east-1"
+
+# Traefik's NodePorts. The ALB in Phase 5 front them; these are the only ports
+# that translate from the edge into the cluster.
+traefik_nodeport_http  = 32080
+traefik_nodeport_https = 32443
+
+# Node shapes for Phase 3. Read at plan time to assert the shape against the
+# account's 8 vCPU running-on-demand quota, so a plan that cannot launch fails
+# here rather than in Cloud-Init.
+instance_type_servers = "t3.small"
+instance_type_worker = "t3.medium"
+
+# Fields with working defaults, shown here for the record:
+#
+# azs = ["us-east-1a", "us-east-1b", "us-east-1c"]   one subnet per AZ, quorum
+# vpc_cidr = "10.90.0.0/16"                          does not overlap 172.31.0.0/16
+# k3s_channel_parameter_name = "/boutique-platform/k3s/channel"
