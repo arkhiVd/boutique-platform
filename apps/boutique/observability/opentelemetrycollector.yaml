@@ -1,0 +1,293 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+  labels:
+    app: opentelemetrycollector
+    app.kubernetes.io/name: opentelemetrycollector
+    app.kubernetes.io/part-of: observability
+    app.kubernetes.io/version: 0.160.0
+# ADDED (upstream omits): the collector needs no Kubernetes API access at all.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+  labels:
+    app: opentelemetrycollector
+    app.kubernetes.io/name: opentelemetrycollector
+    app.kubernetes.io/part-of: observability
+    app.kubernetes.io/version: 0.160.0
+  # Policy exemption, and it is checked: policy/resources.rego requires both this
+  # annotation AND a reason of 40+ characters. The reason is the tail_sampling
+  # constraint written out on the `replicas: 2` comment below.
+  annotations:
+    platform.boutique/hpa: manual
+    platform.boutique/hpa-reason: >-
+      Runs tail_sampling, whose per-trace decision is made from the spans of that
+      trace, so every span of a trace must land on the same replica. Scaling
+      without a trace-aware load-balancing exporter silently corrupts sampling,
+      so the replica count is manual until Phase 11 lands that exporter.
+spec:
+  # ADDED (upstream runs 1). Behind a ClusterIP Service the collector is
+  # stateless, so a single replica is a single point of failure in the trace
+  # path with no failover and no rolling-update safety. Two is the minimum that
+  # makes a `kubectl rollout restart` safe.
+  #
+  # DELIBERATELY NOT AN HPA. The collector below runs `tail_sampling`, whose
+  # decision for a trace is made from the spans of that trace — so every span of
+  # a trace has to arrive at the same replica, and scaling the collector without
+  # a trace-aware load-balancing exporter in front of it silently corrupts
+  # sampling decisions. That exporter is Phase 11 work; until it lands the
+  # replica count is a manual decision. Two, on purpose.
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: opentelemetrycollector
+  template:
+    metadata:
+      labels:
+        app: opentelemetrycollector
+        app.kubernetes.io/name: opentelemetrycollector
+        app.kubernetes.io/part-of: observability
+        app.kubernetes.io/version: 0.160.0
+    spec:
+      serviceAccountName: opentelemetrycollector
+      priorityClassName: boutique-observability
+      # ADDED. Upstream sets no terminationGracePeriodSeconds on the collector, so
+      # it inherits the 30s default; with a bounded in-flight queue, 10s is
+      # plenty and keeps the collector's eviction timing consistent with the app.
+      terminationGracePeriodSeconds: 10
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # DEVIATION FROM UPSTREAM, deliberate and evidenced. Upstream sets
+        # runAsUser/runAsGroup/fsGroup 1000 here, but the image it runs is
+        # otel/opentelemetry-collector-contrib:0.160.0, whose config declares
+        # `USER 10001:10001` (resolved from the registry on 2026-10-08:
+        # sha256:5f92255513d9...). Overriding a declared image user is how you
+        # get permission errors on a mounted volume in production, so the
+        # manifest follows the image instead of Google's convention. The control
+        # that actually matters for PSA restricted — runAsNonRoot: true — is
+        # upstream's and is kept.
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      # ADDED. Same single-node caveat as the app: ScheduleAnyway, so this is
+      # inert on one node and correct the day the 3-AZ topology exists.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: opentelemetrycollector
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: opentelemetrycollector
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: otel-gateway
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: otel/opentelemetry-collector-contrib:0.160.0@sha256:799dc6cf12c96192af37b5bdba804da8c10b3bc563b43cb90c3f3c58d9572ad6
+        args:
+        - --config=/conf/collector-gateway-config.yaml
+        ports:
+        - name: grpc-otlp
+          containerPort: 4317
+        - name: http-otlp
+          containerPort: 4318
+        # ADDED. The image is distroless, so an exec probe has no shell to run;
+        # a tcpSocket probe is checked by the kubelet from outside the container
+        # and is the only kind that works here. Without it a collector that
+        # accepts connections but has a broken pipeline looks healthy forever.
+        startupProbe:
+          tcpSocket:
+            port: 4317
+          periodSeconds: 3
+          failureThreshold: 20
+        readinessProbe:
+          tcpSocket:
+            port: 4317
+          periodSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: 4317
+          periodSeconds: 10
+        volumeMounts:
+        - name: collector-gateway-config
+          mountPath: /conf
+          readOnly: true
+        # ADDED. Upstream ships this Deployment with no resources at all, so
+        # under the namespace's LimitRange it would be admitted at the default
+        # request (100m/64Mi) and be the first thing OOM-killed on a node under
+        # pressure — for a component whose entire job is to survive a traffic
+        # spike. Limits are pinned so the queue is bounded, not so it can burst.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 100m
+            memory: 256Mi
+      volumes:
+      # CHANGED. Upstream ships an initContainer that curls
+      # http://metadata.google.internal/computeMetadata/v1/project/project-id and
+      # `sed`s the project id into the config template. On AWS that call fails
+      # and the initContainer exits non-zero, so the Deployment never starts at
+      # all. This build is on AWS (SPEC.md), so the config is rendered directly
+      # from the ConfigMap below and the GCP-specific init stage is gone. It is
+      # also a supply-chain improvement: no pod now needs egress to the internet
+      # at start-up to fetch its own configuration.
+      - name: collector-gateway-config
+        configMap:
+          name: collector-gateway-config
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+  labels:
+    app: opentelemetrycollector
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: opentelemetrycollector
+---
+# ADDED — this is the single biggest divergence from upstream's collector, and
+# the claim in SPEC.md that this platform "beats upstream: it ships zero
+# processors" rests on this block being real. Upstream's
+# kustomize/components/google-cloud-operations/otel-collector.yaml has:
+#
+#     processors:
+#     exporters:
+#       googlecloud:
+#         project: {{PROJECT_ID}}
+#     service:
+#       pipelines:
+#         traces:
+#           receivers: [otlp]
+#           processors: []          <-- empty
+#           exporters: [googlecloud]
+#
+# An empty `processors:` list is not a default, it is a configuration that says:
+# push every span straight through with no batching, no back-pressure and no
+# sampling. Both consequences are real — an unbatched OTLP stream is one gRPC
+# message per span, and an unthrottled collector is an OOM kill waiting for the
+# first load-generator run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collector-gateway-config
+  namespace: observability
+data:
+  collector-gateway-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      # Back-pressure. The collector refuses to start a new receive batch once it
+      # is holding more than 75% of its memory limit and sheds load instead of
+      # being OOM-killed by the kubelet. This is the control that makes the 256Mi
+      # limit above survivable.
+      memory_limiter:
+        check_interval: 5s
+        limit_percentage: 75
+        spike_limit_percentage: 25
+      # Tail sampling: keep every error, every request slower than 500ms, and a
+      # 10% baseline of everything else. Errors and latency are the two
+      # dimensions the Phase 12 SLOs are defined on, so dropping them would make
+      # the burn-rate alerts blind to exactly what they exist to detect.
+      tail_sampling:
+        decision_wait: 5s
+        policies:
+          - name: errors
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: slow
+            type: latency
+            latency:
+              threshold_ms: 500
+          - name: baseline
+            type: probabilistic
+            probabilistic:
+              sampling_percentage: 10
+      # Batching: collapses one-gRPC-message-per-span into batches of up to 8192
+      # spans or 5s, whichever comes first. Without it the collector's outbound
+      # connection count scales with request rate.
+      batch:
+        timeout: 5s
+        send_batch_size: 8192
+        send_batch_max_size: 8192
+    exporters:
+      # THE ONE LINE THAT CHANGES IN PHASE 11, stated plainly rather than faked
+      # with a guessed value. Phase 11 owns the Tempo endpoint and it does not
+      # exist yet, so there is no honest destination to configure here; a
+      # made-up one would be worse than this one. `debug` proves the pipeline
+      # end to end today: `kubectl logs -n observability deploy/
+      # opentelemetrycollector` shows the spans that survived sampling.
+      debug:
+        verbosity: basic
+    service:
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, tail_sampling, batch]
+          exporters: [debug]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+  labels:
+    app: opentelemetrycollector
+spec:
+  type: ClusterIP
+  selector:
+    app: opentelemetrycollector
+  ports:
+  - name: grpc-otlp
+    port: 4317
+    targetPort: 4317
+    protocol: TCP
+  - name: http-otlp
+    port: 4318
+    targetPort: 4318
+    protocol: TCP

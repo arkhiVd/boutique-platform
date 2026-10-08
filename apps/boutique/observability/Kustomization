@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No `namespace:` directive: every resource in this directory declares its
+# namespace explicitly, and a namespace directive here would be invisible anyway
+# because the parent (apps/boutique/Kustomization) does not set one either.
+resources:
+- namespace.yaml
+- opentelemetrycollector.yaml

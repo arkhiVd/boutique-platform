@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    # Declared here because apps/boutique/observability/opentelemetrycollector.yaml
+    # deploys into it and an unanchored manifest is a broken manifest. The
+    # contents of this namespace are Phase 11's (kube-prometheus-stack, Loki,
+    # Tempo); this declaration only puts the namespace and its Pod Security
+    # Admission baseline in place so the collector's posture is enforced from
+    # the first apply rather than retrofitted.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    kubernetes.io/metadata.name: observability
