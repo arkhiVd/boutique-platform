@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# STRATEGIC-MERGE PATCH — not a complete object.
+#
+# This file is intentionally a fragment. Applying it with
+#   kubectl patch -n boutique deploy/productcatalogservice \
+#     --patch-file apps/boutique/chaos/latency-patch.yaml --type=strategic
+# adds the EXTRA_LATENCY environment variable to the productcatalogservice
+# container and nothing else; the rest of the Deployment stays as
+# apps/boutique/base/productcatalogservice.yaml wrote it. Because it is a
+# fragment it is deliberately excluded from the conftest gate in
+# scripts/check.sh — validating a patch fragment against a policy written for
+# whole resources would report a failure that does not exist.
+#
+# WHY productcatalogservice AND NOTHING ELSE. Verified by grep across the whole
+# upstream tree at v0.10.7 — EXTRA_LATENCY appears in exactly one place that
+# reads it, src/productcatalogservice/server.go:
+#
+#     if s := os.Getenv("EXTRA_LATENCY"); s != "" {
+#         if v, err := time.ParseDuration(s); err != nil { ... } else { ... }
+#     }
+#
+# It injects a sleep of the given duration on every call. The service's README
+# documents `EXTRA_LATENCY="5.5s"`.
+#
+# WHAT DOES NOT EXIST AND IS NOT BUILT. `adServiceFailure` and
+# `recommendationCacheFailure` are not flags in this application. Verified absent
+# across every tag from v0.1.4 to v0.10.7 — a grep for either string returns
+# nothing in src/. SPEC.md lists them as an explicit non-goal and it is not
+# possible to inject a failure that the code has no branch for. The fault
+# injection surface of this application is EXTRA_LATENCY plus pod and node
+# deletion, full stop.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productcatalogservice
+spec:
+  # Present so this fragment also validates as a Deployment under
+  # kubeconform -strict (which check.sh runs over every file under apps/).
+  # A strategic-merge patch is allowed to omit both of these; including them
+  # costs nothing and means the file is checked like any other.
+  selector:
+    matchLabels:
+      app: productcatalogservice
+  template:
+    metadata:
+      labels:
+        app: productcatalogservice
+    spec:
+      containers:
+      - name: server
+        env:
+        - name: EXTRA_LATENCY
+          # 2s on a service whose normal p95 is well under a millisecond. Chosen
+          # to be long enough that every latency SLO and recording rule in
+          # Phase 12 sees it, and short enough that the locust rate limiter
+          # (USERS=10, RATE=1) does not turn it into a total outage that the
+          # experiment then cannot distinguish from a crash.
+          value: "2s"
