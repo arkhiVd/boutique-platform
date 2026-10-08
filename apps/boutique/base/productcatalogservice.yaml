@@ -1,0 +1,187 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app: productcatalogservice
+    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app: productcatalogservice
+    app.kubernetes.io/name: productcatalogservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: productcatalogservice
+  template:
+    metadata:
+      labels:
+        app: productcatalogservice
+        app.kubernetes.io/name: productcatalogservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: productcatalogservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: productcatalogservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: productcatalogservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/productcatalogservice:v0.10.7
+        ports:
+        - containerPort: 3550
+        startupProbe:
+          grpc:
+            port: 3550
+          periodSeconds: 5
+          failureThreshold: 12
+        readinessProbe:
+          grpc:
+            port: 3550
+        livenessProbe:
+          grpc:
+            port: 3550
+        env:
+        - name: PORT
+          value: "3550"
+        - name: DISABLE_PROFILER
+          value: "1"
+        # ADDED. OTel wiring; see base/frontend.yaml for why both the
+        # spec-standard and upstream-native forms are set.
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "productcatalogservice"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: "opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 200m→100m): see base/frontend.yaml.
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app: productcatalogservice
+spec:
+  type: ClusterIP
+  selector:
+    app: productcatalogservice
+  ports:
+  - name: grpc
+    port: 3550
+    targetPort: 3550
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app: productcatalogservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: productcatalogservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+  labels:
+    app: productcatalogservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: productcatalogservice
+  minReplicas: 2
+  # ADDED. Read by every request path (frontend, checkoutservice and
+  # recommendationservice all call it), so it gets the widest band.
+  maxReplicas: 6
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+# NOTE (chaos target): verified in src/productcatalogservice/server.go, this is
+# the only service in the whole upstream tree that reads EXTRA_LATENCY. It
+# sleeps for the given duration on every call. That makes it the target of
+# scripts/chaos/inject-latency.sh — and the reason no other service is offered.

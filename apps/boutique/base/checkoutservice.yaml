@@ -1,0 +1,211 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app: checkoutservice
+    app.kubernetes.io/name: checkoutservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits): no Boutique container calls the Kubernetes API, so the
+# projected token is a credential with no consumer. See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app: checkoutservice
+    app.kubernetes.io/name: checkoutservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: checkoutservice
+  template:
+    metadata:
+      labels:
+        app: checkoutservice
+        app.kubernetes.io/name: checkoutservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: checkoutservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits): required by Pod Security Admission restricted,
+        # enforced on the namespace in apps/boutique/namespace.yaml.
+        seccompProfile:
+          type: RuntimeDefault
+      # ADDED. ScheduleAnyway on purpose: this platform has ONE workload node, so
+      # a hard zone constraint would make the pod permanently Pending. See
+      # base/frontend.yaml for the full reasoning.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: checkoutservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: checkoutservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice:v0.10.7
+        ports:
+        - containerPort: 5050
+        # ADDED. Upstream's readiness and liveness probes have no delay at all.
+        # A gRPC health probe against a server that is still binding its port
+        # fails, so a pod that takes longer than the first period to start is
+        # killed by its own liveness probe and enters the restart loop. 12 x 5s
+        # = 60s of startup budget before liveness is armed.
+        startupProbe:
+          grpc:
+            port: 5050
+          periodSeconds: 5
+          failureThreshold: 12
+        readinessProbe:
+          grpc:
+            port: 5050
+        livenessProbe:
+          grpc:
+            port: 5050
+        env:
+        - name: PORT
+          value: "5050"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: "productcatalogservice:3550"
+        - name: SHIPPING_SERVICE_ADDR
+          value: "shippingservice:50051"
+        - name: PAYMENT_SERVICE_ADDR
+          value: "paymentservice:50051"
+        # Downstream value kept exactly as upstream ships it: the emailservice
+        # Service publishes 5000 and targets the pod's 8080.
+        - name: EMAIL_SERVICE_ADDR
+          value: "emailservice:5000"
+        - name: CURRENCY_SERVICE_ADDR
+          value: "currencyservice:7000"
+        - name: CART_SERVICE_ADDR
+          value: "cartservice:7070"
+        # ADDED. OTel wiring; see base/frontend.yaml for why both the
+        # spec-standard OTEL_EXPORTER_OTLP_ENDPOINT and the upstream-native
+        # COLLECTOR_SERVICE_ADDR are set.
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "checkoutservice"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: "opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 200m→100m): CPU limits lowered to equal
+            # the requests so the container lands in Guaranteed QoS. Memory
+            # numbers are upstream's, untouched.
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app: checkoutservice
+spec:
+  # maxUnavailable: 1 (2 replicas): one voluntary eviction is tolerated, two are
+  # not. See base/frontend.yaml for the full reasoning.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: checkoutservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app: checkoutservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: checkoutservice
+  minReplicas: 2
+  # ADDED (upstream ships no HPA for any service). checkoutservice fans out to
+  # five backends and is on the critical path of every order, so it gets the
+  # same wide band as the frontend.
+  maxReplicas: 6
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkoutservice
+  namespace: boutique
+  labels:
+    app: checkoutservice
+spec:
+  type: ClusterIP
+  selector:
+    app: checkoutservice
+  ports:
+  - name: grpc
+    port: 5050
+    targetPort: 5050

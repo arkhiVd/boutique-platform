@@ -1,0 +1,182 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app: cartservice
+    app.kubernetes.io/name: cartservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app: cartservice
+    app.kubernetes.io/name: cartservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: cartservice
+  template:
+    metadata:
+      labels:
+        app: cartservice
+        app.kubernetes.io/name: cartservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: cartservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: cartservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: cartservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/cartservice:v0.10.7
+        ports:
+        - containerPort: 7070
+        # ADDED — the second cold-start case the startupProbe exists for.
+        # cartservice is .NET, where the first request pays for JIT and the gRPC
+        # host build. Upstream's liveness probe starts at t=15s with a 10s
+        # period, so on a slow first boot the pod is killed and re-JITs forever.
+        # 30 x 3s = 90s before liveness is armed.
+        startupProbe:
+          grpc:
+            port: 7070
+          periodSeconds: 3
+          failureThreshold: 30
+        readinessProbe:
+          initialDelaySeconds: 15
+          grpc:
+            port: 7070
+        livenessProbe:
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          grpc:
+            port: 7070
+        env:
+        - name: REDIS_ADDR
+          value: "redis-cart:6379"
+        # DELIBERATELY NOT SET: no OTel variables. Verified in-tree — there is no
+        # OpenTelemetry reference anywhere under src/cartservice/. Unlike
+        # adservice and shippingservice, this is not a stubbed TODO; the .NET
+        # image was simply never instrumented, so an OTLP endpoint here would
+        # reach nothing and the trace would have a hole in it regardless. The
+        # gap is recorded in TASKS.md rather than papered over.
+        resources:
+          requests:
+            # CHANGED (upstream limits 300m→200m): see base/frontend.yaml.
+            cpu: 200m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app: cartservice
+spec:
+  type: ClusterIP
+  selector:
+    app: cartservice
+  ports:
+  - name: grpc
+    port: 7070
+    targetPort: 7070
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app: cartservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: cartservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cartservice
+  namespace: boutique
+  labels:
+    app: cartservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cartservice
+  minReplicas: 2
+  # ADDED. cartservice fronts redis-cart on every page render and every cart
+  # mutation; upstream gives it 200m CPU, three times what the Go services
+  # request, so the wider band tracks that weight.
+  maxReplicas: 6
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

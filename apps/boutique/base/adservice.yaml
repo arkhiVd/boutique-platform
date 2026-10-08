@@ -1,0 +1,204 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app: adservice
+    app.kubernetes.io/name: adservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app: adservice
+    app.kubernetes.io/name: adservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: adservice
+  template:
+    metadata:
+      labels:
+        app: adservice
+        app.kubernetes.io/name: adservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: adservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: adservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: adservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/adservice:v0.10.7
+        ports:
+        - containerPort: 9555
+        # ADDED — this is the clearest instance of the cold-start kill loop the
+        # startupProbe exists to fix. adservice is a JVM/Gradle service; JVM
+        # class loading plus Spring initialisation on a 2 vCPU node routinely
+        # takes 10-30s. Upstream's liveness probe starts at t=20s with a 15s
+        # period, so a slow (but perfectly healthy) start is killed once, and
+        # every restart restarts the clock at the same 20s. 30 x 3s = 90s of
+        # startup budget before the liveness probe is armed at all.
+        startupProbe:
+          grpc:
+            port: 9555
+          periodSeconds: 3
+          failureThreshold: 30
+        readinessProbe:
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          grpc:
+            port: 9555
+        livenessProbe:
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          grpc:
+            port: 9555
+        env:
+        - name: PORT
+          value: "9555"
+        # ADDED. See docs/adr/0004-adservice-tracing-gap.md for the full
+        # position. Verified in-tree: AdService.initTracing() logs
+        # "Tracing enabled but temporarily unavailable" and its body is a TODO
+        # referencing upstream issue #422. We do NOT claim to have fixed this.
+        # Setting DISABLE_TRACING=1 makes the container stop emitting the false
+        # claim; the spec-standard OTEL_* variables are set so an instrumented
+        # successor (or the OTel Java agent, if the ADR's conditions are met)
+        # picks them up with no manifest change.
+        - name: DISABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "adservice"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        # COLLECTOR_SERVICE_ADDR is deliberately NOT set here: like
+        # shippingservice, the image reads no collector environment variable at
+        # all, so setting it would be decoration.
+        resources:
+          requests:
+            # CHANGED (upstream limits 300m→200m): CPU limits lowered to equal
+            # the requests so the container lands in Guaranteed QoS. adservice
+            # is the CPU-heaviest service upstream sizes, and it is the one
+            # whose JVM startup a fixed quota hurts — which is exactly why the
+            # startupProbe above is generous rather than tight.
+            cpu: 200m
+            memory: 180Mi
+          limits:
+            cpu: 200m
+            memory: 300Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app: adservice
+spec:
+  type: ClusterIP
+  selector:
+    app: adservice
+  ports:
+  - name: grpc
+    port: 9555
+    targetPort: 9555
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app: adservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: adservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: adservice
+  namespace: boutique
+  labels:
+    app: adservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: adservice
+  minReplicas: 2
+  # ADDED. adservice serves one text ad per product page; it is CPU-bound on
+  # image decoding and starts the JVM per pod, so it gets the narrowest band of
+  # the JVM-class services.
+  maxReplicas: 4
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

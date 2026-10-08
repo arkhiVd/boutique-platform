@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# NOTE: no `namespace:` directive here, on purpose. The OTel Collector is one of
+# the resources this build emits and it belongs to the `observability` namespace
+# (SPEC.md wires every service to
+# http://opentelemetrycollector.observability.svc.cluster.local:4317). A
+# kustomize `namespace:` field overwrites the namespace of *every* resource it
+# touches, including ones that already declare one, so setting it here would
+# silently relocate the collector into `boutique` and break the OTLP endpoint
+# the whole app now points at. `base/` carries its own namespace directive; this
+# file only aggregates.
+resources:
+# --- the application -------------------------------------------------------
+- base
+# --- namespace, policy and scheduling baseline ------------------------------
+- namespace.yaml
+- priorityclass.yaml
+- quota.yaml
+# --- network policy, including the DNS egress carve-out upstream omits ------
+- netpol/deny-all.yaml
+- netpol/adservice.yaml
+- netpol/cartservice.yaml
+- netpol/checkoutservice.yaml
+- netpol/currencyservice.yaml
+- netpol/emailservice.yaml
+- netpol/frontend.yaml
+- netpol/loadgenerator.yaml
+- netpol/opentelemetrycollector.yaml
+- netpol/paymentservice.yaml
+- netpol/productcatalogservice.yaml
+- netpol/recommendationservice.yaml
+- netpol/redis-cart.yaml
+- netpol/shippingservice.yaml
+# --- traces: the collector gateway that receives all of the above -----------
+- observability

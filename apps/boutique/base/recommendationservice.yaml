@@ -1,0 +1,192 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app: recommendationservice
+    app.kubernetes.io/name: recommendationservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app: recommendationservice
+    app.kubernetes.io/name: recommendationservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: recommendationservice
+  template:
+    metadata:
+      labels:
+        app: recommendationservice
+        app.kubernetes.io/name: recommendationservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: recommendationservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: recommendationservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: recommendationservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/recommendationservice:v0.10.7
+        ports:
+        - containerPort: 8080
+        # ADDED. Python + gRPC + instrumentation import order is the slow part of
+        # this container's start; 12 x 5s = 60s of budget before liveness arms.
+        startupProbe:
+          grpc:
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 12
+        readinessProbe:
+          periodSeconds: 5
+          grpc:
+            port: 8080
+        livenessProbe:
+          periodSeconds: 5
+          grpc:
+            port: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: "productcatalogservice:3550"
+        - name: DISABLE_PROFILER
+          value: "1"
+        # ADDED. OTel wiring; see base/frontend.yaml.
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "recommendationservice"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: "opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 200m→100m): see base/frontend.yaml.
+            # recommendationservice is upstream's memory outlier by design
+            # (220Mi request / 450Mi limit) because it keeps a recommendation
+            # cache in-process; both memory numbers are upstream's and untouched.
+            cpu: 100m
+            memory: 220Mi
+          limits:
+            cpu: 100m
+            memory: 450Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app: recommendationservice
+spec:
+  type: ClusterIP
+  selector:
+    app: recommendationservice
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app: recommendationservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: recommendationservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: recommendationservice
+  namespace: boutique
+  labels:
+    app: recommendationservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: recommendationservice
+  minReplicas: 2
+  # ADDED. Called on every product page render, and the only service whose
+  # upstream memory limit (450Mi) is more than double its next-largest peer, so
+  # it gets the same wide band as the frontend.
+  maxReplicas: 6
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

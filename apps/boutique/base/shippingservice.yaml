@@ -1,0 +1,196 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app: shippingservice
+    app.kubernetes.io/name: shippingservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app: shippingservice
+    app.kubernetes.io/name: shippingservice
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: shippingservice
+  template:
+    metadata:
+      labels:
+        app: shippingservice
+        app.kubernetes.io/name: shippingservice
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: shippingservice
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: shippingservice
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: shippingservice
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/shippingservice:v0.10.7
+        ports:
+        - containerPort: 50051
+        startupProbe:
+          grpc:
+            port: 50051
+          periodSeconds: 5
+          failureThreshold: 12
+        readinessProbe:
+          periodSeconds: 5
+          grpc:
+            port: 50051
+        livenessProbe:
+          grpc:
+            port: 50051
+        env:
+        - name: PORT
+          value: "50051"
+        - name: DISABLE_PROFILER
+          value: "1"
+        # ADDED, and deliberately the opposite of upstream's default. Verified
+        # in-tree: src/shippingservice/main.go calls initTracing(), whose entire
+        # body is `// TODO(arbrown) Implement OpenTelemetry tracing`. So while
+        # DISABLE_TRACING is unset, this container logs
+        # "Tracing enabled, but temporarily unavailable" on every start — a log
+        # line that claims a capability it does not have, pointing at the same
+        # open upstream issue #422 as adservice. Setting DISABLE_TRACING=1 makes
+        # the container report what is actually true. See
+        # docs/adr/0004-adservice-tracing-gap.md.
+        - name: DISABLE_TRACING
+          value: "1"
+        # Spec-standard OTel variables are still set so that an instrumented
+        # successor image picks them up with no manifest change. Note what is
+        # NOT set: COLLECTOR_SERVICE_ADDR. Upstream's own
+        # google-cloud-operations kustomize component never sets it for this
+        # service either, and verified in-tree the image reads no collector
+        # environment variable at all.
+        - name: OTEL_SERVICE_NAME
+          value: "shippingservice"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 200m→100m): see base/frontend.yaml.
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app: shippingservice
+spec:
+  type: ClusterIP
+  selector:
+    app: shippingservice
+  ports:
+  - name: grpc
+    port: 50051
+    targetPort: 50051
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app: shippingservice
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: shippingservice
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shippingservice
+  namespace: boutique
+  labels:
+    app: shippingservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: shippingservice
+  minReplicas: 2
+  # ADDED. shippingservice computes a shipping quote and tracks shipments; it is
+  # called on every page render that shows a delivery estimate, so it gets a
+  # narrower band than the frontend but the same floor.
+  maxReplicas: 4
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

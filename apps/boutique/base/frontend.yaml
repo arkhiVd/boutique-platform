@@ -1,0 +1,307 @@
+---
+# Source of truth for the values in this file: the vendored upstream baseline at
+# apps/boutique/upstream-kubernetes-manifests.yaml. Upstream values are kept
+# verbatim; everything we add is commented with the reason.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app: frontend
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED: upstream ships the ServiceAccount without this. Nothing in any Boutique
+# container calls the Kubernetes API, so the token is a credential with no
+# consumer. Refusing to mount it removes the `kubectl exec`-from-a-compromised-
+# pod path entirely rather than relying on RBAC to deny it.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app: frontend
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+spec:
+  # ADDED: minReplicas must be 2 for the drain test in docs/chaos-experiments.md
+  # to be a real test. With one replica, "survives losing a pod" is unfalsifiable.
+  replicas: 2
+  # ADDED: upstream leaves all four of these at their defaults, so a rollback
+  # gets one ReplicaSet of history and a stuck rollout is declared failed at the
+  # 600s default without the value ever being written down.
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      # ADDED: 0 means a rollout never takes capacity away before the replacement
+      # is Ready. On a 2-replica deployment this costs one extra pod for the
+      # duration of the rollout; the alternative (the implicit 25%) drops a
+      # serving pod during every deploy.
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      serviceAccountName: frontend
+      # ADDED: see apps/boutique/priorityclass.yaml. Upstream ships no priority
+      # class at all, so every Boutique pod competes with kube-proxy, the CNI
+      # agent and the metrics stack at the same priority 0 and a node under
+      # memory pressure can evict the request path ahead of the noise.
+      priorityClassName: boutique-app
+      terminationGracePeriodSeconds: 5
+      # ADDED (upstream omits): paired with the ServiceAccount's
+      # automountServiceAccountToken: false. Belt and braces — if a future
+      # ServiceAccount reference is changed to the namespace default SA, the
+      # token still does not appear in the container filesystem.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits): Pod Security Admission restricted requires
+        # seccompProfile.type: RuntimeDefault, and it is the only control that
+        # reduces the kernel syscall surface of the container runtime itself.
+        seccompProfile:
+          type: RuntimeDefault
+      # ADDED: `ScheduleAnyway`, not `DoNotSchedule`. This platform has exactly
+      # ONE workload node, so a hard zone constraint would make every pod
+      # permanently Pending. `ScheduleAnyway` records the zone preference, is a
+      # no-op on a single node, and becomes a real spreading constraint the day
+      # the 3-AZ topology in SPEC.md exists. Verified against upstream: this key
+      # appears nowhere in the shipped manifests.
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: frontend
+      # ADDED: preferred, weight 100, on `app: frontend`. Combined with the
+      # topology constraint above it means: spread across zones if there are
+      # zones, and never pile two frontends onto one node if there are two nodes.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: frontend
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: server
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/frontend:v0.10.7
+        ports:
+        - containerPort: 8080
+        # ADDED. This is the fix for the cold-start kill loop, not decoration:
+        # the liveness probe below has initialDelaySeconds 10, so a pod that is
+        # still starting at t=10s gets killed and restarted forever, and the
+        # Deployment never becomes Available. A startupProbe with
+        # failureThreshold 12 x periodSeconds 5 = a 60s budget before the
+        # liveness probe is armed at all. frontend is a Go binary and normally
+        # starts in well under a second, so this budget is deliberately generous
+        # headroom for a cold image pull and a busy node, not for normal runs.
+        startupProbe:
+          httpGet:
+            path: "/_healthz"
+            port: 8080
+            httpHeaders:
+            - name: "Cookie"
+              value: "shop_session-id=x-readiness-probe"
+          periodSeconds: 5
+          failureThreshold: 12
+        readinessProbe:
+          initialDelaySeconds: 10
+          httpGet:
+            path: "/_healthz"
+            port: 8080
+            httpHeaders:
+            - name: "Cookie"
+              value: "shop_session-id=x-readiness-probe"
+        livenessProbe:
+          initialDelaySeconds: 10
+          httpGet:
+            path: "/_healthz"
+            port: 8080
+            httpHeaders:
+            - name: "Cookie"
+              value: "shop_session-id=x-liveness-probe"
+        env:
+        - name: PORT
+          value: "8080"
+        - name: PRODUCT_CATALOG_SERVICE_ADDR
+          value: "productcatalogservice:3550"
+        - name: CURRENCY_SERVICE_ADDR
+          value: "currencyservice:7000"
+        - name: CART_SERVICE_ADDR
+          value: "cartservice:7070"
+        - name: RECOMMENDATION_SERVICE_ADDR
+          value: "recommendationservice:8080"
+        - name: SHIPPING_SERVICE_ADDR
+          value: "shippingservice:50051"
+        - name: CHECKOUT_SERVICE_ADDR
+          value: "checkoutservice:5050"
+        - name: AD_SERVICE_ADDR
+          value: "adservice:9555"
+        - name: SHOPPING_ASSISTANT_SERVICE_ADDR
+          value: "shoppingassistantservice:80"
+        - name: ENABLE_PROFILER
+          value: "0"
+        # ADDED. OTel wiring. Upstream only exposes tracing behind the opt-in
+        # kustomize/components/google-cloud-operations component and sets the
+        # app-specific COLLECTOR_SERVICE_ADDR only. We set both forms:
+        #
+        #   OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_TRACES_SAMPLER* are the OTel
+        #   specification's standard environment variables. They are honoured by
+        #   any SDK that auto-configures from the environment — including the
+        #   OTel Java agent we would attach to adservice (see
+        #   docs/adr/0004-adservice-tracing-gap.md) and every future
+        #   auto-instrumentation drop-in.
+        #
+        #   COLLECTOR_SERVICE_ADDR is what the six v0.10.7 service images
+        #   actually read. Verified in-tree: frontend/main.go, checkoutservice/
+        #   main.go and productcatalogservice/server.go all do
+        #   mustMapEnv(&collectorAddr, "COLLECTOR_SERVICE_ADDR") and then hand a
+        #   pre-built grpc.ClientConn to otlptracegrpc.WithGRPCConn(), so the
+        #   endpoint handed to the exporter is that string and nothing else.
+        #   The same holds for currencyservice/paymentservice (Node:
+        #   new OTLPTraceExporter({url: process.env.COLLECTOR_SERVICE_ADDR})) and
+        #   emailservice/recommendationservice (Python:
+        #   os.getenv("COLLECTOR_SERVICE_ADDR", "localhost:4317")).
+        #
+        # Setting both costs nothing and means the manifests are correct for
+        # both today's images and an instrumented successor, instead of being
+        # silently wrong the moment one of them is upgraded.
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "frontend"
+        - name: COLLECTOR_SERVICE_ADDR
+          value: "opentelemetrycollector.observability.svc.cluster.local:4317"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://opentelemetrycollector.observability.svc.cluster.local:4317"
+        # parentbased_traceidratio with ARG=1: keep every trace the caller chose
+        # to start. Honest caveat recorded in TASKS.md — the six instrumented
+        # v0.10.7 images hard-code sdktrace.AlwaysSample() and never read these
+        # two variables, so the real sampling decision lives in the collector's
+        # tail_sampling processor. They are set to the value that is already
+        # true so that the day the images do read them, nothing is dropped at
+        # the source.
+        - name: OTEL_TRACES_SAMPLER
+          value: "parentbased_traceidratio"
+        - name: OTEL_TRACES_SAMPLER_ARG
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 200m→100m): CPU limits are lowered to
+            # equal the CPU requests. requests == limits for CPU is what puts
+            # the container in the Guaranteed QoS class, which is the only class
+            # whose CFS quota is not borrowed by burstable pods and which the
+            # kubelet will not OOM-kill ahead of every other pod under pressure.
+            # Memory numbers are upstream's, untouched.
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+---
+# DROPPED: upstream's `frontend-external` type: LoadBalancer Service. SPEC.md
+# pins NLB as blocked account-wide (network-load-balancer-capacity-units = 0)
+# and requires the two-layer ALB + Traefik edge, so an in-cluster cloud load
+# balancer would both fail to provision and bypass the Web ACL. Ingress to the
+# frontend is Traefik; see apps/boutique/netpol/frontend.yaml, which allows it
+# by namespace label instead of leaving ingress wide open the way upstream's
+# network-policy-frontend.yaml does (`ingress: - {}`).
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app: frontend
+spec:
+  # maxUnavailable: 1 rather than minAvailable: 1. frontend runs 2 replicas, so
+  # minAvailable: 1 would allow both to be evicted in the same voluntary
+  # disruption window and take the edge down; maxUnavailable: 1 allows exactly
+  # one and leaves the other serving. This is also what makes the drain
+  # assertion in docs/chaos-experiments.md meaningful.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: frontend
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: boutique
+  labels:
+    app: frontend
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2
+  # ADDED (upstream ships no HPA for any service). Sized per service from the
+  # CPU limit the Deployment now holds: frontend is the only user-facing pod and
+  # carries the whole checkout journey, so it gets the widest band.
+  maxReplicas: 6
+  metrics:
+  # ADDED, and not decoration: autoscaling/v2 removed
+  # spec.targetCPUUtilizationPercentage. The API server still accepts it as a
+  # legacy alias, but it is not in the v2 schema and kubeconform -strict rejects
+  # it. The explicit form is also the honest one — it names the metric and the
+  # target rather than relying on a default that the schema does not carry.
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      # 5 minutes of stability before removing a replica. Without this an HPA
+      # on a low-traffic sample app oscillates and produces a Deployment that
+      # is never quiet, which makes the Phase 12 recording rules noise.
+      stabilizationWindowSeconds: 300

@@ -1,0 +1,184 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadgenerator
+  namespace: boutique
+  labels:
+    app: loadgenerator
+    app.kubernetes.io/name: loadgenerator
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+# ADDED (upstream omits). See base/frontend.yaml.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgenerator
+  namespace: boutique
+  labels:
+    app: loadgenerator
+    app.kubernetes.io/name: loadgenerator
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+  # Policy exemption, and it is checked: policy/resources.rego requires both this
+  # annotation AND a reason of 40+ characters. The full argument is on the
+  # `replicas: 1` comment below.
+  annotations:
+    platform.boutique/hpa: manual
+    platform.boutique/hpa-reason: >-
+      Traffic source, not capacity: USERS=10 locust users at RATE=1 per pod, so
+      a second replica multiplies demand on every other service instead of adding
+      capacity. Traffic shaping is config, not an autoscaler.
+spec:
+  # Stays at 1, and this is not an oversight to be fixed by an HPA. This pod IS
+  # the load: USERS=10 locust users at RATE=1/s each. Scaling it does not add
+  # capacity, it multiplies the demand on every other service, so the HPA that
+  # would otherwise be required here would be a load amplifier with no ceiling
+  # except maxReplicas. Traffic shaping is a Phase 12 concern and belongs in the
+  # loadgenerator's own configuration, not in the Kubernetes autoscaler.
+  replicas: 1
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: loadgenerator
+  template:
+    metadata:
+      labels:
+        app: loadgenerator
+        app.kubernetes.io/name: loadgenerator
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+      # DROPPED: upstream's `sidecar.istio.io/rewriteAppHTTPProbers: "true"`
+      # annotation. SPEC.md names a service mesh an explicit non-goal, so an
+      # Istio sidecar hint on this pod is a vestigial pointer to infrastructure
+      # this platform does not run.
+    spec:
+      serviceAccountName: loadgenerator
+      # ADDED: lowest of the three classes. Under memory pressure the kubelet
+      # should be evicting the traffic source, not the request path serving it.
+      priorityClassName: boutique-batch
+      terminationGracePeriodSeconds: 5
+      restartPolicy: Always
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: loadgenerator
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: loadgenerator
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+      # ADDED: upstream ships this initContainer with no resources at all, which
+      # means it would fall into the namespace LimitRange's defaultRequest and be
+      # admitted at a request the author never chose. Explicit values with CPU
+      # requests == limits keep it inside the same policy as every other
+      # container and inside the ResourceQuota arithmetic in quota.yaml.
+      - command:
+        - /bin/sh
+        - -exc
+        - |
+          MAX_RETRIES=12
+          RETRY_INTERVAL=10
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i: Pinging frontend: ${FRONTEND_ADDR}..."
+            STATUSCODE=$(wget --server-response http://${FRONTEND_ADDR} 2>&1 | awk '/^  HTTP/{print $2}')
+            if [ $STATUSCODE -eq 200 ]; then
+                echo "Frontend is reachable."
+                exit 0
+            fi
+            echo "Error: Could not reach frontend - Status code: ${STATUSCODE}"
+            sleep $RETRY_INTERVAL
+          done
+          echo "Failed to reach frontend after $MAX_RETRIES attempts."
+          exit 1
+        name: frontend-check
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: busybox:1.38.0@sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616
+        env:
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 50m
+            memory: 32Mi
+      containers:
+      - name: main
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/loadgenerator:v0.10.7
+        env:
+        - name: FRONTEND_ADDR
+          value: "frontend:80"
+        - name: USERS
+          value: "10"
+        - name: RATE
+          value: "1"
+        resources:
+          requests:
+            # CHANGED (upstream limits 500m→300m): see base/frontend.yaml.
+            cpu: 300m
+            memory: 256Mi
+          limits:
+            cpu: 300m
+            memory: 512Mi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: loadgenerator
+  namespace: boutique
+  labels:
+    app: loadgenerator
+spec:
+  # maxUnavailable: 1 even though there is one replica. Unlike redis-cart, an
+  # evicted loadgenerator loses nothing: locust restarts and resumes. Keeping
+  # this pod evictable is what lets a node drain finish at all — a
+  # minAvailable: 1 here would hang every drain in the cluster until an operator
+  # manually deleted the budget. The trade-off (a short gap in load, and
+  # therefore in error-rate signal) is the one the drain runbook measures for.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: loadgenerator
+# DELIBERATELY ABSENT: HorizontalPodAutoscaler. See the `replicas: 1` comment on
+# the Deployment above — an autoscaler on the load source is a demand amplifier,
+# not a capacity control.

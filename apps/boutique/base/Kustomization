@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The namespace directive here is a guard, not a convenience: every resource in
+# this directory already declares `namespace: boutique` explicitly, so if any
+# future service file forgets it, kustomize fails loudly instead of dropping the
+# object into `default`.
+namespace: boutique
+resources:
+- adservice.yaml
+- cartservice.yaml
+- checkoutservice.yaml
+- currencyservice.yaml
+- emailservice.yaml
+- frontend.yaml
+- loadgenerator.yaml
+- paymentservice.yaml
+- productcatalogservice.yaml
+- recommendationservice.yaml
+- redis-cart.yaml
+- shippingservice.yaml

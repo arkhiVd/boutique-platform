@@ -1,0 +1,183 @@
+---
+# ADDED. Upstream ships redis-cart with NO ServiceAccount at all — it is the only
+# workload in the baseline that runs under the namespace's `default`
+# ServiceAccount, which in turn gets the default token projected into every
+# container that references it. It now gets a dedicated, token-less one like
+# every other service.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app: redis-cart
+    app.kubernetes.io/name: redis-cart
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app: redis-cart
+    app.kubernetes.io/name: redis-cart
+    app.kubernetes.io/part-of: online-boutique
+    app.kubernetes.io/version: v0.10.7
+  # Policy exemption, and it is checked: policy/resources.rego requires both this
+  # annotation AND a reason of 40+ characters, and rejects the opt-out outright if
+  # the reason is missing. The same argument is written out in full at the bottom
+  # of this file.
+  annotations:
+    platform.boutique/hpa: manual
+    platform.boutique/hpa-reason: >-
+      Stateful single-instance store: the cart data lives in this pod's own
+      emptyDir, so a second replica would serve a second, empty and divergent
+      cart set. Scaling it is a data-model change, not an autoscaling decision.
+spec:
+  # Stays at 1. This is the one workload in the namespace that is genuinely
+  # stateful: the cache lives in the pod's emptyDir (see the volume at the
+  # bottom), so there is exactly one copy of every cart in the cluster. A second
+  # replica is not a second cache; it is a second, divergent, wrong one.
+  replicas: 1
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: redis-cart
+  template:
+    metadata:
+      labels:
+        app: redis-cart
+        app.kubernetes.io/name: redis-cart
+        app.kubernetes.io/part-of: online-boutique
+        app.kubernetes.io/version: v0.10.7
+    spec:
+      # ADDED (upstream omits entirely): see the ServiceAccount above.
+      serviceAccountName: redis-cart
+      priorityClassName: boutique-app
+      automountServiceAccountToken: false
+      # ADDED. Upstream sets no terminationGracePeriodSeconds here, so the pod
+      # inherits the 30s default. Redis can flush its RDB in far less than that
+      # and, with an emptyDir backing store, has nothing to checkpoint anyway;
+      # 5s matches the other twelve workloads and keeps eviction timings uniform.
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        # ADDED (upstream omits).
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: redis-cart
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: redis-cart
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: redis
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+        # CHANGED (upstream `redis:alpine`): pinned by digest so the image cannot
+        # move under a running cluster. Same channel upstream tracks; the digest
+        # is the pin, resolved via the registry API on 2026-10-08.
+        image: redis:alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+        ports:
+        - containerPort: 6379
+        startupProbe:
+          tcpSocket:
+            port: 6379
+          periodSeconds: 3
+          # ADDED. Redis starts in milliseconds, but the probe replaces the
+          # upstream readiness/liveness pair at t=0 with something that cannot
+          # race a slow image pull. 30 x 3s = 90s budget.
+          failureThreshold: 30
+        readinessProbe:
+          periodSeconds: 5
+          tcpSocket:
+            port: 6379
+        livenessProbe:
+          periodSeconds: 5
+          tcpSocket:
+            port: 6379
+        volumeMounts:
+        - mountPath: /data
+          name: redis-data
+        resources:
+          requests:
+            # CHANGED (upstream limits cpu 125m→70m): see base/frontend.yaml.
+            # Memory numbers are upstream's, untouched.
+            cpu: 70m
+            memory: 200Mi
+          limits:
+            cpu: 70m
+            memory: 256Mi
+      volumes:
+      - name: redis-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app: redis-cart
+spec:
+  type: ClusterIP
+  selector:
+    app: redis-cart
+  ports:
+  - name: tcp-redis
+    port: 6379
+    targetPort: 6379
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-cart
+  namespace: boutique
+  labels:
+    app: redis-cart
+spec:
+  # minAvailable: 1, NOT maxUnavailable: 1, and this is the deliberate exception
+  # to the other twelve workloads. With one replica, maxUnavailable: 1 would make
+  # the pod freely evictable — a node drain, a scale-down, or a
+  # cluster-autoscaler optimisation would all empty every cart in the cluster,
+  # and the loss is silent because carts are client-side state until checkout.
+  # minAvailable: 1 makes the disruption budget refuse all voluntary evictions,
+  # which turns a silent data-loss event into a loud, visible blocked drain that
+  # an operator has to acknowledge. The drain runbook handles it explicitly.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: redis-cart
+# DELIBERATELY ABSENT: HorizontalPodAutoscaler. Every other workload gets one.
+# redis-cart cannot scale: the store is a single emptyDir in a single pod with
+# no replication, so a second replica would serve a second, empty, incompatible
+# cart set. Scaling it is a data-model change, not an autoscaling decision — see
+# TASKS.md for the persistence work that would have to land first.
