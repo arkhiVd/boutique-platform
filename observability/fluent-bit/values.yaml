@@ -1,0 +1,330 @@
+# Fluent Bit — values for ONE t3.medium (4 GiB RAM, 2 vCPU)
+# -----------------------------------------------------------------------------
+# A DaemonSet, so every request value happens once per node. On the SPEC's
+# 4-node shape that is 4 x 32Mi = 128Mi of memory and 4 x 25m = 100m of CPU,
+# which is why the numbers are at the floor rather than at a comfortable-looking
+# place.
+#
+# The configuration lives in the chart's classic-mode keys (`config.service`,
+# `config.inputs`, `config.filters`, `config.outputs`), and the parsers live in
+# observability/fluent-bit/boutique-parsers.yaml, which is mounted by the chart
+# via `config.extraFiles`.
+fluent-bit:
+
+  kind: DaemonSet
+
+  ## ---------------------------------------------------------------------------
+  ## The parsers are a ConfigMap, not a value
+  ## ---------------------------------------------------------------------------
+  ## The seven Boutique parsers live in observability/fluent-bit/boutique-parsers.yaml
+  ## and are mounted as their own volume (see `daemonSetVolumes` below) at
+  ## /fluent-bit/etc/parsers, which is what the third `Parsers_File` line in the
+  ## SERVICE block points at. They are kept out of values.yaml because a parser
+  ## is the artifact an on-call engineer edits during an incident, and "grep the
+  ## parsers" has to resolve to one file rather than to a Helm value.
+  config:
+    service: |
+      [SERVICE]
+          Daemon Off
+          Flush {{ .Values.flush }}
+          Log_Level {{ .Values.logLevel }}
+          Parsers_File /fluent-bit/etc/parsers.conf
+          Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+          # The seven Boutique parsers, from
+          # observability/fluent-bit/boutique-parsers.yaml.
+          Parsers_File /fluent-bit/etc/parsers/boutique-parsers.conf
+          HTTP_Server On
+          HTTP_Listen 0.0.0.0
+          HTTP_Port {{ .Values.metricsPort }}
+          Health_Check On
+
+  ## ---------------------------------------------------------------------------
+  ## Input
+  ## ---------------------------------------------------------------------------
+    inputs: |
+      [INPUT]
+          Name tail
+          Path /var/log/containers/*.log
+          # The docker/cri multiline parser is what merges .NET's two-line format
+          # (info: <category>[<n>]\n      <message>) into ONE record, so the
+          # `(?s:.*)` branch in boutique-dotnet-plain has something to match. It is
+          # also what keeps a stack trace's continuation lines attached to the line
+          # that threw it.
+          multiline.parser docker, cri
+          Tag kube.*
+          Mem_Buf_Limit 5MB
+          # Skip_Long_Lines On, because a single 1MB line of base64 in a broken
+          # request body would otherwise buffer against the node's memory budget.
+          Skip_Long_Lines On
+          # Rotate_Wait and the refresh interval are the chart's defaults; they are
+          # what makes a new pod's log file appear within a second of it being
+          # created.
+
+    ## ---------------------------------------------------------------------------
+    ## THE FILTERS CHAIN, AND THE CARDINALITY RULE
+    ## ---------------------------------------------------------------------------
+    ## The rule this chain is written to, in one sentence: the labels on the Loki
+    ## stream must be bounded by the number of DEPLOYMENTS, not by the number of
+    ## pods that ever existed.
+    ##
+    ## What that means concretely, with the arithmetic (the same arithmetic is in
+    ## observability/loki/values.yaml):
+    ##
+    ##   labels {namespace, pod, container}   -> 138 streams today, ~550 over a
+    ##                                           7-day window as rollouts and HPA
+    ##                                           scaling create and destroy pods.
+    ##   labels {namespace, app, container}   -> 90 streams, bounded by the number
+    ##                                           of Deployments and does not grow.
+    ##
+    ## So: `pod` and `pod-template-hash` are NOT labels. The kubernetes filter adds
+    ## both by default (K8S-Logging.Exclude On removes `pod-template-hash`, but
+    ## `pod_name` is added regardless), and the Loki output's `Labels` list is
+    ## what actually decides. Only three keys become labels here. Everything else
+    ## the kubernetes filter adds — docker_id, host, pod_name — is DROPPED by the
+    ## output's `remove_keys`.
+    ##
+    ## `pod_name` is not thrown away: it goes into Loki's STRUCTURED METADATA,
+    ## which is indexed per log line and creates no stream. That is exactly what
+    ## Loki 3.x structured metadata is for
+    ## (https://grafana.com/docs/loki/latest/get-started/labels/structured-metadata/),
+    ## and the runbook queries it with `| pod_name="..."`.
+    filters: |
+      # ---- 1. Kubernetes metadata ------------------------------------------
+      [FILTER]
+          Name kubernetes
+          Match kube.*
+          Merge_Log On
+          Keep_Log Off
+          # Adds namespace, pod_name, container_name, labels{}, annotations{},
+          # host, docker_id, pod_id.
+          K8S-Logging.Parser On
+          # The `logging.fluentbit.io/parser` annotation would let each Boutique
+          # pod choose its own parser. The app manifests do not carry that
+          # annotation (they are Phase 6's, and adding one to each is a separate
+          # change), so the routing below uses rewrite_tag instead — a filter-only
+          # route that needs no change to any pod template.
+          K8S-Logging.Exclude On
+          # Annotations are excluded: they would carry the pod-template-hash, which
+          # is a per-ReplicaSet label value and a stream multiplier.
+          Annotations Off
+          Labels On
+
+      # ---- 2. Route by service, so each service gets its own parser --------
+      # One rewrite_tag filter with seven rules, rather than seven filters. The
+      # docs are explicit that a rule must be matched in order and the FIRST match
+      # wins, and that the filter's `Match` must not match the tags it produces —
+      # which is why the rules produce `boutique.*` tags and the filter matches
+      # only `kube.*`.
+      #
+      # Grouped by FORMAT rather than by service, so six parser filters cover all
+      # 11 Boutique services and adding a service costs nothing.
+      [FILTER]
+          Name rewrite_tag
+          Match kube.*
+          Emitter_Name boutique_service_route
+          Rule $kubernetes['labels']['app'] ^(frontend|checkoutservice|productcatalogservice|shippingservice)$ boutique.go false
+          Rule $kubernetes['labels']['app'] ^(currencyservice|paymentservice)$ boutique.node false
+          Rule $kubernetes['labels']['app'] ^(emailservice|recommendationservice)$ boutique.python false
+          Rule $kubernetes['labels']['app'] ^adservice$ boutique.java false
+          Rule $kubernetes['labels']['app'] ^cartservice$ boutique.dotnet false
+          Rule $kubernetes['labels']['app'] ^loadgenerator$ boutique.locust false
+          # Everything not matched — redis-cart, kube-system, loki's own logs,
+          # jenkins agent pods — keeps its original `kube.*` tag and is parsed by
+          # the fall-through parser in step 3.
+          Rule $kubernetes['labels']['app'] ^.+$ boutique.plain false
+
+      # ---- 3a. Parse the tagged formats -------------------------------------
+      # Preserve_Log Off (the default) DELETES the raw `log` key after parsing, so
+      # the record sent to Loki carries the parsed `message` rather than both
+      # copies. On a node where every byte is a cost, shipping both would double
+      # the ingestion rate.
+      [FILTER]
+          Name parser
+          Match boutique.go
+          Parser boutique-go-json
+          Parser_Cri On
+          Key_Name log
+          Reserve_Data On
+
+      [FILTER]
+          Name parser
+          Match boutique.node
+          Parser boutique-node-json
+          Parser_Cri On
+          Key_Name log
+          Reserve_Data On
+
+      [FILTER]
+          Name parser
+          Match boutique.python
+          Parser boutique-python-json
+          Parser_Cri On
+          Key_Name log
+          Reserve_Data On
+
+      [FILTER]
+          Name parser
+          Match boutique.java
+          Parser boutique-java-json
+          Parser_Cri On
+          Key_Name log
+          Reserve_Data On
+
+      [FILTER]
+          Name parser
+          Match boutique.dotnet
+          Parser boutique-dotnet-plain
+          Key_Name log
+          Reserve_Data On
+
+      [FILTER]
+          Name parser
+          Match boutique.locust
+          Parser boutique-locust-plain
+          Key_Name log
+          Reserve_Data On
+
+      # ---- 3b. Parse everything untagged ------------------------------------
+      [FILTER]
+          Name parser
+          Match kube.*
+          Parser boutique-plain
+          Key_Name log
+          Reserve_Data On
+
+      # ---- 4. Normalise severity across the five formats --------------------
+      # logrus and log4j2 both emit `severity` as a string, pino emits lowercase,
+      # python emits UPPERCASE, and .NET emits lowercase level names. A query that
+      # says `severity="ERROR"` must match all of them, so this filter rewrites
+      # the value to a single uppercase form instead of making every query a regex.
+      #
+      # Commented out ON PURPOSE, and the reason is a cardinality one: this filter
+      # adds a key to every record, and the Loki output's `line_format json` already
+      # ships the record's own `severity`. Rewriting it in-place rather than adding
+      # a key would need a `modify` filter with a `Set`, which is what the next
+      # block does conditionally. It is left disabled because a level filter in a
+      # LogQL query (`| severity="ERROR"`) is cheap and correct either way, and an
+      # extra filter stage on a 2 vCPU node is not free.
+      #[FILTER]
+      #    Name modify
+      #    Match *
+      #    ...
+
+      # ---- 5. Noise that never reaches Loki ---------------------------------
+      # Fluent Bit's own log lines are NOT filtered here, and that is a deliberate
+      # choice rather than an omission. A `grep` filter would have to exclude
+      # either the raw `log` key — which Preserve_Log Off has already deleted for
+      # every parsed record, so the rule would silently never fire — or the parsed
+      # `message`, which differs per format and would need six rules. Neither
+      # works, and Fluent Bit's own logs are one stream in one namespace with
+      # `app="fluent-bit"`, separable in LogQL with
+      #     {namespace="observability", app!="fluent-bit"}
+      # which costs nothing and cannot silently drop an application log line.
+      # A filter that drops the wrong line is worse than no filter.
+
+      # ---- 6. Why there is no `nest` filter here ---------------------------
+      # There is no `nest` filter, and that is worth stating because it is the
+      # obvious next thing to add. Fluent Bit's Loki output takes its `Labels`
+      # and `Structured_Metadata` values as RECORD ACCESSORS, and a record
+      # accessor reaches into a nested map directly:
+      #     $kubernetes['namespace_name'], $kubernetes['labels']['app']
+      #     $kubernetes['pod_name'], $kubernetes['container_name']
+      # So the kubernetes map needs no flattening before the output reads it, and
+      # a `nest` or `lift` filter would be an extra stage per record on a 2 vCPU
+      # node for nothing. The cardinality bound in this chain is the output's
+      # `Labels` list below — three keys and nothing else — and not a filter.
+
+
+          # ---- batching ---------------------------------------------------
+          # 5s / 1MiB / 1000 records, whichever first. At the measured 60 lines/s
+          # the record count fires every ~17s, so this is really a 1MiB cap. The
+          # values exist so that a log storm is batched into 1MiB POSTs rather than
+          # one POST per line, which on this node is the difference between Loki
+          # seeing a steady stream and seeing 60 requests a second.
+          Batch_Size 1000
+          Batch_Wait 5s
+          Auto_Format_JSON On
+          Line_Format json
+          # Drop_Single_Key raw: after the labels and structured metadata are
+          # extracted, the remaining record is a map, and `raw` ships the single
+          # remaining string value unquoted instead of `"the message"`. This is why
+          # a log line in Grafana reads as text rather than as a JSON blob.
+          Drop_Single_Key raw
+          # Retry, not discard. Loki being briefly unavailable is normal on a
+          # single-node platform; a lost log line during an incident is the one
+          # thing that cannot be recovered.
+          Retry_Limit 5
+          Workers 1
+          # gzip. Halves the wire cost of every POST at the price of ~2% CPU, and
+          # on a public-subnet node with no NAT every byte leaving the cluster
+          # crosses the IGW.
+          Compress gzip
+
+  ## ---------------------------------------------------------------------------
+  ## Resources
+  ## ---------------------------------------------------------------------------
+  # 25m / 32Mi requests. A DaemonSet, so 4 nodes = 100m / 128Mi. The limit of
+  # 100m / 64Mi is what stops a parser rewrite-loop (the classic Fluent Bit
+  # failure: a rewrite_tag rule whose output tag matches its own `Match`) from
+  # consuming a core forever.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+  ## Flush every 5s. A 1s flush would produce six flushes a second of one batch
+  #  each, and at 60 lines/s that is a Loki POST every second per node.
+  flush: 5
+  logLevel: info
+  metricsPort: 2020
+
+  ## The chart's default tolerations let fluent-bit run on the control-plane
+  #  nodes, which is what makes the k3s server nodes' logs appear here at all.
+  #  Left on: the SPEC's three k3s servers run etcd and their logs are the ones
+  #  the etcd-restore runbook needs.
+  tolerations:
+    - operator: Exists
+
+  ## Mount the parser ConfigMap as its own volume. The chart's own config ConfigMap
+  #  is mounted at /fluent-bit/etc/conf and holds fluent-bit.conf plus the chart's
+  #  default custom_parsers.conf; the Boutique parsers go beside it, not inside it.
+  daemonSetVolumes:
+    - name: boutique-parsers
+      configMap:
+        name: fluent-bit-boutique-parsers
+  daemonSetVolumeMounts:
+    - name: boutique-parsers
+      mountPath: /fluent-bit/etc/parsers
+      readOnly: true
+
+  ## ---------------------------------------------------------------------------
+  ## Security context, and the reason this namespace is `baseline` not `restricted`
+  ## ---------------------------------------------------------------------------
+  #  Fluent Bit reads /var/log/containers, which is owned by root and mode 0755 on
+  #  every node. It therefore CANNOT run as a non-root user, and it therefore
+  #  cannot satisfy the `restricted` PSA profile. That is a property of the
+  #  component, not a choice: the alternative is to run fluent-bit as a
+  #  privileged sidecar per pod, which is a sidecar per pod on a 4 GiB node.
+  #  The three controls that DO matter are set, and seccompProfile is set
+  #  explicitly rather than left to the namespace default.
+  podSecurityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
+  securityContext:
+    runAsNonRoot: false
+    privileged: false
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  ## Priority class: the log pipeline is evicted BEFORE the application during
+  #  node pressure. A lost log line is recoverable from the source; a lost request
+  #  is not.
+  priorityClassName: boutique-batch

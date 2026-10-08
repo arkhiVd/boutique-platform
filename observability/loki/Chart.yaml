@@ -1,0 +1,14 @@
+apiVersion: v2
+name: loki
+description: >-
+  Platform wrapper around the upstream Loki chart 7.3.0 (app 3.6.12), in
+  SingleBinary mode, sized for the single t3.medium workload node. Filesystem
+  storage on a gp3 PVC, with an explicit cardinality bound.
+type: application
+version: 0.1.0
+appVersion: "3.6.12"
+kubeVersion: ">=1.25.0-0"
+dependencies:
+  - name: loki
+    version: 7.3.0
+    repository: https://grafana.github.io/helm-charts
