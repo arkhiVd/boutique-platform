@@ -1,0 +1,43 @@
+# blackbox_exporter ServiceMonitor
+# -----------------------------------------------------------------------------
+# The exporter's OWN /metrics endpoint — is the exporter process alive. The other
+# half of blackbox observability, the PROBE it performs, is in
+# observability/blackbox/templates/external-probe.yaml, because the probe target
+# is a Phase 5 output and the chart gates it on a value.
+#
+# `serviceMonitor.selfMonitor.enabled` in the chart's values is deliberately
+# false: that would create a second ServiceMonitor for exactly this endpoint,
+# and two targets for one series double-counts every `probe_success` sample.
+#
+# What the exporter exposes on /metrics, for reference:
+#   blackbox_exporter_build_info            info
+#   blackbox_exporter_config_last_reload_*  gauge, the exporter's own config
+#   blackbox_exporter_*_duration_seconds    process/HTTP-level timings
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: blackbox-exporter
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: synthetic
+spec:
+  # `job` becomes "prometheus-blackbox-exporter", the Service's
+  # app.kubernetes.io/name. The probe's own job is "frontend-external" and comes
+  # from a different ServiceMonitor, so the two are separable in an alert
+  # expression — which matters, because "the exporter is down" and "the site is
+  # down" need different responses.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - observability
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-blackbox-exporter
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s

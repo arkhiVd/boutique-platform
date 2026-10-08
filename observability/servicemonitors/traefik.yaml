@@ -1,0 +1,60 @@
+# ServiceMonitors for the three non-Boutique metric sources
+# -----------------------------------------------------------------------------
+# The 11 Boutique services have no /metrics endpoint (verified across the
+# vendored upstream v0.10.7 tree), so the only workload metrics that exist are
+# the ones these three sources produce plus kube-state-metrics, node-exporter
+# and cAdvisor, which the kube-prometheus-stack chart already scrapes.
+#
+# ALL THREE carry `release: kube-prometheus-stack`. The Prometheus Operator's
+# serviceMonitorSelector defaults to `{release: <release name>}`
+# (serviceMonitorSelectorNilUsesHelmValues: true), so a ServiceMonitor without
+# that label is silently ignored — which is why the TargetDown alert in
+# observability/rules/boutique-alerts.yaml uses `absent(up{job="traefik"})`
+# rather than `up == 0`: no series at all is the symptom of this mistake.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: traefik
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: edge
+spec:
+  # `job` will be "traefik", not "serviceMonitor/kube-system/traefik-metrics/0",
+  # because jobLabel points at a Service label rather than letting the operator
+  # synthesise a name. That is what makes `up{job="traefik"}` in the TargetDown
+  # alert readable rather than a spelunking exercise.
+  jobLabel: app.kubernetes.io/name
+
+  # Traefik ships as part of k3s, in kube-system, and is not deployed by this
+  # chart. Nothing in this repo owns that Service, which is exactly why the
+  # port is bound by NAME rather than by number.
+  namespaceSelector:
+    matchNames:
+      - kube-system
+
+  # Selects the chart's dedicated metrics Service, created only when
+  # `metrics.prometheus.service.enabled: true`. See the note below.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+      app.kubernetes.io/instance: traefik
+
+  endpoints:
+    # `port: metrics` binds to the NAME of a port on the selected Service, not to
+    # a number. That is deliberate and it is the single most important line in
+    # this file: the traefik chart's `ports.metrics.port` defaults to 9100 in
+    # the published values.yaml, but k3s v1.36.5+k3s1 sets a pod annotation
+    # `prometheus.io/port: "8082"` in manifests/traefik.yaml, which suggests the
+    # rancher build uses a different number. Binding by name means this monitor
+    # is correct either way, and the number never has to be reconciled.
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      # Traefik's metrics endpoint serves the full registry on one connection;
+      # honorLabels would let a relabelled series through unmerged. Left off
+      # (the default) so two series with the same name and labels are merged
+      # rather than duplicated.

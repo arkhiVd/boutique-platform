@@ -1,0 +1,13 @@
+apiVersion: v2
+name: prometheus-blackbox-exporter
+description: >-
+  Platform wrapper around the upstream prometheus-blackbox-exporter 11.20.0,
+  plus the external synthetic probe that measures the Boutique frontend from the
+  public hostname. Sized for the single t3.medium workload node.
+type: application
+version: 0.1.0
+appVersion: "v0.29.0"
+dependencies:
+  - name: prometheus-blackbox-exporter
+    version: 11.20.0
+    repository: https://prometheus-community.github.io/helm-charts

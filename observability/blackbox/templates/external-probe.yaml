@@ -1,0 +1,95 @@
+{{- /*
+The external synthetic probe: a Service plus a ServiceMonitor that point
+blackbox_exporter at the PUBLIC hostname.
+
+Rendered only when `platform.externalProbe.url` is set. See the long note at the
+bottom of observability/blackbox/values.yaml for why that value is empty today
+and what fills it in.
+
+Two things are created here rather than in observability/servicemonitors/:
+
+  1. The `Service` with an ExternalName-style single target. blackbox_exporter's
+     /probe endpoint takes the target as a `?target=` query parameter, which
+     means Prometheus needs an Endpoints object to scrape. The Service gives it
+     one, and the annotation is what the operator's relabelling turns into the
+     query parameter.
+  2. The `ServiceMonitor` itself, with `release: kube-prometheus-stack` so the
+     Prometheus Operator's default selector picks it up.
+*/ -}}
+{{- if .Values.platform.externalProbe.url }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-blackbox-exporter-frontend-external
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: prometheus-blackbox-exporter
+    app.kubernetes.io/instance: prometheus-blackbox-exporter
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/probe: external
+  annotations:
+    # The relabelling in the ServiceMonitor below reads these two keys to build
+    # the `target` and `module` query parameters. Keeping them as annotations
+    # rather than hard-coding them in the ServiceMonitor means the probe target
+    # can be changed by editing THIS template's input value alone.
+    prometheus.io/probe-target: {{ .Values.platform.externalProbe.url | quote }}
+    prometheus.io/probe-module: http_2xx_external
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: http
+      port: 9115
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: blackbox-exporter-frontend-external
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: synthetic
+spec:
+  # jobLabel here is what makes the scraped series addressable:
+  # `up{job="frontend-external"}` and
+  # `probe_success{job="frontend-external"}`. That is the job the SLO recording
+  # rule `synthetic:availability_ratio_rate5m` reads, and the label on the
+  # Service below is what the operator substitutes for the synthesised name.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-blackbox-exporter
+      app.kubernetes.io/instance: prometheus-blackbox-exporter
+  endpoints:
+    - port: http
+      path: /probe
+      interval: {{ .Values.platform.externalProbe.interval }}
+      scheme: http
+      params:
+        target:
+          - {{ .Values.platform.externalProbe.url | quote }}
+        module:
+          - http_2xx_external
+      relabelings:
+        # `job` comes from jobLabel -> app.kubernetes.io/name on the Service.
+        # The target label is set from the Service's own metadata so the
+        # Prometheus series carry which hostname was probed, which is the whole
+        # reason a synthetic probe is useful.
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+          targetLabel: probe_target_name
+          action: replace
+      metricRelabelings:
+        # Every blackbox metric except these two is a per-probe duplicate of
+        # information the probe itself already carries in `instance`. Dropping
+        # them keeps the series count to 4 per target instead of 12.
+        - action: keep
+          sourceLabels: [__name__]
+          regex: 'probe_success|probe_duration_seconds|probe_http_duration_seconds|probe_http_status_code|probe_ssl_earliest_cert_expiry'
+{{- end }}

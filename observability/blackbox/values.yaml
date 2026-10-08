@@ -1,0 +1,201 @@
+# blackbox_exporter — values for the external synthetic probe
+# -----------------------------------------------------------------------------
+# Everything under `prometheus-blackbox-exporter:` is the upstream chart. The
+# `platform:` key at the bottom is this wrapper's own, and it is the ONE value
+# that cannot be filled in yet, for a reason stated there.
+prometheus-blackbox-exporter:
+  ## A Deployment, not a DaemonSet. The probe's job is to leave the cluster and
+  ## come back, so it does not matter which node it runs on; a DaemonSet would
+  ## run the same probe four times and quadruple the series for no information.
+  kind: Deployment
+  replicas: 1
+
+  ## --- the probe modules -----------------------------------------------------
+  ## This is the module library, and it is the single source of truth: the chart
+  ## renders it into its own ConfigMap and mounts it at /config, which is what
+  ## `--config.file=/config/blackbox.yaml` reads. A second copy of these modules
+  ## anywhere else would be a drift bug waiting for the first incident.
+  ##
+  ## The 5s timeout on every module is the point of the whole config. On a 2 vCPU
+  ## node a probe that hangs stacks goroutines against a Prometheus scrape
+  ## timeout, and blackbox_exporter has no concurrency control other than
+  ## `timeout` and the scrape timeout. 5s is longer than the frontend's own 1.2s
+  ## latency objective with room for a cold ALB connection, and short enough that
+  ## a hung probe cannot outlive a 30s scrape window.
+  config:
+    modules:
+      ## The module the brief names: http_2xx, 5s timeout. It is the generic
+      ## "the endpoint answers and it is not an error" check, and it is the
+      ## default for self-monitoring.
+      http_2xx:
+        prober: http
+        timeout: 5s
+        http:
+          valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+          valid_status_codes: [200]
+          method: GET
+          # SPEC's edge criterion is `curl -sSI https://<host>/` -> 200. A 301 to
+          # https is the correct behaviour for the http:// listener, so for an
+          # https probe a redirect is a FAILURE: if the https endpoint redirects
+          # anything, the two-layer edge is not doing what SPEC says it does.
+          follow_redirects: false
+          fail_not_https: true
+          fail_if_not_ssl: true
+          preferred_ip_protocol: "ip4"
+          # The probe leaves the cluster. On a public-subnet node with no NAT
+          # (SPEC) the only egress path is the IGW, so a timeout here points at
+          # the VPC route table before it points at the application.
+
+      ## The external synthetic probe: the same shape plus TLS, because the thing
+      ## that actually breaks on a free-tier platform with no ACM cert is the
+      ## certificate, not the HTTP status.
+      http_2xx_external:
+        prober: http
+        timeout: 5s
+        http:
+          valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+          valid_status_codes: [200]
+          method: GET
+          follow_redirects: false
+          fail_not_https: true
+          fail_if_not_ssl: true
+          preferred_ip_protocol: "ip4"
+          # TLS 1.2 minimum, matching SPEC's trust-boundary-1 requirement. A
+          # server that only speaks TLS 1.1 would otherwise pass a plain
+          # status-code check.
+          tls_config:
+            min_version: "TLS12"
+            insecure_skip_verify: false
+
+      ## Certificate expiry, measured rather than assumed. blackbox emits
+      ## probe_ssl_earliest_cert_expiry as seconds until expiry, so the alert is
+      ## a plain threshold. This is the SPEC Phase 13 cert-expiry runbook's data
+      ## source.
+      ssl_cert_expiry:
+        prober: http
+        timeout: 5s
+        http:
+          method: GET
+          fail_if_not_ssl: true
+          preferred_ip_protocol: "ip4"
+
+      ## An in-cluster control probe to the frontend Service, bypassing the ALB
+      ## and Traefik entirely. When the external probe fails and this one
+      ## succeeds, the failure is the edge and not the application — that
+      ## distinction is the single most useful thing a synthetic probe can say.
+      http_2xx_internal:
+        prober: http
+        timeout: 5s
+        http:
+          valid_status_codes: [200, 405]
+          method: GET
+          preferred_ip_protocol: "ip4"
+
+      ## A bare TCP check for redis-cart, which has no HTTP surface at all. Used
+      ## by the "is the session store reachable" half of the checkout runbook.
+      tcp_connect:
+        prober: tcp
+        timeout: 5s
+        tcp:
+          preferred_ip_protocol: "ip4"
+
+  ## --- the probe contract, as a ConfigMap -------------------------------------
+  ## observability/blackbox/probe-config.yaml is the human-readable record of
+  ## WHICH target is probed, with WHICH module, and what "success" means for
+  ## that target. It is mounted read-only into the exporter pod at /etc/probes
+  ## so that during an incident `kubectl exec ... cat /etc/probes/targets.yaml`
+  ## answers what was being asked, without reading a Helm release.
+  extraConfigmapMounts:
+    - name: probe-config
+      mountPath: /etc/probes
+      configMap: blackbox-external-probe-config
+      readOnly: true
+      defaultMode: 420
+
+  ## --- resources --------------------------------------------------------------
+  ## Requests are small on purpose: the exporter is an HTTP client, not a data
+  ## store. The limits are what matter on a 4 GiB node — an unbounded exporter
+  ## process is the one thing that could take the kubelet with it, and this
+  ## component is the least important thing on the box.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 24Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+  ## The exporter holds no state worth persisting, and a PVC that is never read
+  ## is 1Gi of gp3 a month for nothing.
+  persistentVolume:
+    enabled: false
+
+  ## The exporter's own /metrics ServiceMonitor is DISABLED here, and the one in
+  ## observability/servicemonitors/blackbox-exporter.yaml is the single target.
+  ## Two ServiceMonitors for one endpoint double-counts every sample, and the
+  ## duplication is invisible in a dashboard.
+  serviceMonitor:
+    enabled: false
+    selfMonitor:
+      enabled: false
+
+  ## The external probe target is NOT created by the chart. It is rendered by
+  ## this wrapper's templates/external-probe.yaml, because its target URL is a
+  ## Phase 5 output (see `platform:` below). The chart's own
+  ## `serviceMonitor.targets` list would freeze the URL into values.yaml, which
+  ## is exactly the file this repo keeps free of anything that has to be
+  ## reconciled later.
+  #
+  ## PSA: the chart's own securityContext does not set seccompProfile, and this
+  ## namespace is labelled `baseline` (see the note in
+  ## observability/kube-prometheus-stack/values.yaml about why it is not
+  ## `restricted`). Set explicitly so this component is not the reason the label
+  ## has to be relaxed later.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  ## Priority class so the exporter is evicted AFTER the application during node
+  ## pressure. apps/boutique/priorityclass.yaml defines `boutique-batch` for
+  ## exactly this shape.
+  priorityClassName: boutique-batch
+
+## -----------------------------------------------------------------------------
+## The one value that is not knowable yet, said plainly
+## -----------------------------------------------------------------------------
+## The external probe measures the public hostname. On this platform the public
+## hostname is created in ROADMAP Phase 5 (the ALB), and its DNS name is a
+## Terraform output — it is `<alb-dns>` or `<hash>.ip.sslip.io` per SPEC
+## unresolved question 2. It does not exist yet, so there is no honest literal to
+## put here: writing one would be inventing a fact and then having to reconcile
+## it, which is precisely what this repo's "recorded, not guessed" rule forbids.
+##
+## templates/external-probe.yaml renders nothing while this is empty, so the
+## chart installs and validates cleanly, and the probe appears the moment Phase 5
+## provides the value. To enable it:
+##
+##   helm upgrade --install prometheus-blackbox-exporter observability/blackbox \
+##     -n observability \
+##     --set platform.externalProbe.url="https://<phase5-alb-dns>/"
+##
+## The probe MODULE and its 5s timeout are fully configured in
+## observability/blackbox/probe-config.yaml — only the URL is outstanding.
+platform:
+  externalProbe:
+    url: ""
+    ## Interval for the external probe. 60s, not 30s: the probe leaves the
+    ## cluster, crosses the ALB and comes back, so it costs more than a local
+    ## scrape and it measures a public endpoint that no amount of frequency
+    ## makes healthier.
+    interval: 60s
+    ## Job label applied by templates/external-probe.yaml, which is what
+    ## `synthetic:availability_ratio_rate5m` in observability/rules reads.
+    jobLabel: frontend-external
