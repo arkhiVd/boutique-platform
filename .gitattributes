@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+# never let git mangle anything that matters
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.pem binary
+*.key binary
+
+# keep generated manifests stable
+apps/boutique/base/*.yaml linguist-generated
+release/*.yaml linguist-generated

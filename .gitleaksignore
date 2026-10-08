@@ -1,0 +1,4 @@
+// .gitleaksignore — fingerprints only, never values.
+// Reviewed false positives go here with the reason on the same line.
+//
+// Format: <path>:<rule-id>:<line-or-fingerprint>

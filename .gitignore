@@ -1,0 +1,51 @@
+# secrets and state
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl.bak
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# kube / cluster credentials
+kubeconfig*
+*.kubeconfig
+.kube/
+k3s-token*
+*.pem
+*.key
+!*.pub
+
+# env
+.env
+.env.*
+*.env.local
+
+# evidence raw output (copied from tool runs, may contain identifiers)
+docs/evidence/raw/
+
+# editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# node / python
+node_modules/
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# helm packaged artifacts
+*.tgz
+charts/*/charts/
+Chart.lock
+
+# logs
+*.log
