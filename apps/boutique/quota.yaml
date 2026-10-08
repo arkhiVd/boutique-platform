@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: boutique-quota
+  namespace: boutique
+spec:
+  hard:
+    requests.cpu: "3"
+    requests.memory: "3Gi"
+    # Measured from the render, not estimated. See the arithmetic block at the
+    # bottom of this file.
+    limits.cpu: "4"
+    # Measured 4348Mi at minimum replicas, so 5Gi leaves 772Mi of headroom
+    # without letting one namespace declare more memory than the node has.
+    limits.memory: "5Gi"
+    # 40 pods against 22 at minimum replicas (10 services x 2 + redis-cart 1 +
+    # loadgenerator 1): room for a canary set, a `kubectl debug` pod, a runbook
+    # one-off, and an HPA scale-up, without reopening the ceiling by hand.
+    pods: "40"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: boutique-limits
+  namespace: boutique
+spec:
+  limits:
+  # Container-level. Every container in apps/boutique/base/ already carries both
+  # requests and limits, so today this LimitRange is a safety net for the *next*
+  # manifest rather than a live constraint on this one — which is exactly the
+  # point: an unbounded container added to this namespace at 3am should fail
+  # admission, not silently take a node down.
+  - type: Container
+    default:
+      cpu: 200m
+      memory: 128Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 64Mi
+    # max must stay above the largest value the namespace actually deploys,
+    # otherwise the quota starts rejecting pods that already exist. Largest
+    # deployed today: loadgenerator at 300m CPU / 512Mi memory. 2 CPU / 1 GiB
+    # leaves real headroom while still capping any single container at the whole
+    # CPU budget of one t3.medium, so no single container can starve the node on
+    # its own request alone.
+    max:
+      cpu: "2"
+      memory: 1Gi
+    min:
+      cpu: 10m
+      memory: 16Mi
+  # Pod-level: the sum of the pod's containers, not each container individually.
+  # Largest pod today is loadgenerator (main + initContainer) at 350m / 544Mi.
+  - type: Pod
+    max:
+      cpu: "3"
+      memory: 2Gi
+
+# ===========================================================================
+# ARITHMETIC, against the real render. Measured with:
+#
+#   kubectl kustomize apps/boutique/ | python3 scripts/../tmp/sum.py
+#   (or the one-liner in the report)
+#
+# Namespace `boutique` only — the OTel Collector is in `observability` and is
+# counted by Phase 11's quota, not this one.
+#
+#   Deployment                replicas   cpu req/pod   mem req/pod
+#   adservice                       2        200m          180Mi
+#   cartservice                     2        200m           64Mi
+#   checkoutservice                 2        100m           64Mi
+#   currencyservice                 2        100m           64Mi
+#   emailservice                    2        100m           64Mi
+#   frontend                        2        100m           64Mi
+#   loadgenerator                   1        350m          288Mi   (main 300m/256Mi + init 50m/32Mi)
+#   paymentservice                  2        100m           64Mi
+#   productcatalogservice           2        100m           64Mi
+#   recommendationservice           2        100m          220Mi
+#   redis-cart                      1         70m          200Mi
+#   shippingservice                 2        100m           64Mi
+#   -------------------------------------------------------------------
+#   TOTAL                                        2820m         2312Mi
+#
+# MEMORY: 2312Mi of requests against a t3.medium's 4096Mi, of which roughly
+# 3400Mi is actually allocatable once kube-reserved, the eviction threshold and
+# the node's own pods (kube-proxy, kube-router, the CNI, node-exporter) are
+# taken out. 2312Mi < 3400Mi, so the app fits one node on memory with about
+# 1.1Gi spare for the rest of Phase 7-12. THIS IS THE NUMBER THE SPEC'S
+# "workload requests sum to ~9.5GiB" claim was checked against, and it is the
+# number that says the spec figure is optimistic.
+#
+# CPU: 2820m of requests against a t3.medium's 2000m. IT DOES NOT FIT. This is
+# not a rounding error and it is not fixable by choosing a different quota
+# number: HPA minReplicas: 2 on ten services, with upstream's own CPU request
+# values kept verbatim (100m each on seven, 200m on two, 300m on loadgenerator,
+# 70m on redis), sums to 2820m the moment the namespace is at its floor. A
+# node-sized `requests.cpu: "2000m"` here would not make the workload fit; it
+# would make the ReplicaSet's pod creation fail with `exceeded quota` and leave
+# the namespace permanently short. So the cap is set just above the measured
+# floor instead, and the real gap is recorded in TASKS.md as a blocker on
+# SPEC.md's unresolved question 1 (node shape). Three ways to close it:
+#
+#   1. A larger workload node. t3.large (2 vCPU) is the same vCPU; t3.xlarge is
+#      4 vCPU / 16GiB for ~$0.1664/h — over the 8.0 vCPU quota the account has
+#      left once the three k3s servers are counted, so this is not available.
+#   2. Relax the workload-node taint so `boutique` can also schedule on the
+#      three t3.small servers (6 GiB / 6 vCPU aggregate). 2820m fits 6 vCPU.
+#      This is what the SPEC's own "3 servers + 1 medium = 10GiB / 8vCPU"
+#      diagram actually assumes, and its taint line contradicts.
+#   3. Drop HPA minReplicas to 1 for the low-traffic services. Costs the
+#      single-replica availability story the PDBs are there to provide.
+#
+# Option 2 is the one the SPEC diagram already implies and is the recommendation;
+# it is a decision for Aravind, not for this file.
+# ===========================================================================

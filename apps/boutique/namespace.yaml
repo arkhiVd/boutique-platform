@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: boutique
+  labels:
+    # Pod Security Admission, all three modes, all at `restricted`.
+    #
+    # Upstream ships no namespace manifest at all: `kubectl apply -f
+    # kubernetes-manifests.yaml` silently creates nothing, and the `default`
+    # namespace inherits the cluster-wide `privileged` default. Everything that
+    # follows in apps/boutique/ is written against this label, not the other way
+    # round: the twelve manifests were checked against restricted and *fixed*
+    # where they failed, rather than the label being relaxed.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    kubernetes.io/metadata.name: boutique
