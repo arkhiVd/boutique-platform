@@ -1,0 +1,396 @@
+# Cost and node capacity dashboard
+# -----------------------------------------------------------------------------
+# Provisioned by the kube-prometheus-stack Grafana sidecar (label
+# `grafana_dashboard: "1"`).
+#
+# The SPEC's binding constraint is not throughput, it is money and vCPU quota:
+# ONE t3.medium workload node, 4 GiB and 2 vCPU, inside an 8.0 vCPU account
+# quota and a $200 six-month credit. This dashboard is the one that makes an
+# over-commit visible BEFORE it becomes an outage or a bill.
+#
+# The `node` template variable is a label_values query against
+# kube_node_info, so the panels address any node in the cluster rather than
+# assuming the workload node's name.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-node-capacity
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/dashboard: cost-node-capacity
+data:
+  cost-node-capacity.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": false,
+      "title": "Cost and node capacity",
+      "uid": "cost-node-capacity",
+      "version": 1,
+      "tags": [
+        "boutique-platform",
+        "capacity",
+        "cost",
+        "node"
+      ],
+      "time": {
+        "from": "now-24h",
+        "to": "now"
+      },
+      "refresh": "5m",
+      "templating": {
+        "list": [
+          {
+            "name": "node",
+            "label": "node",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "prometheus"
+            },
+            "query": "label_values(kube_node_info, node)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "What the account is allowed to spend",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Cluster vCPU requests vs 8.0 quota",
+          "description": "SPEC.md: the account's running-on-demand vCPU quota is 8.0, and the shape 3x t3.small + 1x t3.medium is exactly at it. This is the number that stops a 5th instance, not a budget alert.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"cpu\"})",
+              "legendFormat": "requests"
+            },
+            {
+              "expr": "vector(8)",
+              "legendFormat": "account quota"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Cluster memory requests",
+          "description": "Sum of memory requests across every namespace. SPEC's shape gives 10 GiB of node RAM, of which roughly 8-9 GiB is schedulable once the three etcd servers' reservations are counted.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 8,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"memory\"})",
+              "legendFormat": "requests"
+            },
+            {
+              "expr": "sum(kube_node_status_allocatable{resource=\"memory\"})",
+              "legendFormat": "cluster allocatable"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Unschedulable pods",
+          "description": "Pods in Pending state for more than 5 minutes. On this platform a non-zero value here is almost always the CPU over-commit recorded in TASKS.md U1, not a scheduling-policy mistake.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 8,
+            "x": 16,
+            "y": 1
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_status_unscheduled{namespace!=\"kube-system\"})",
+              "legendFormat": "unschedulable"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                {
+                  "type": "range",
+                  "options": {
+                    "from": 0.5,
+                    "to": 1000,
+                    "result": {
+                      "text": "{{ id }}",
+                      "color": "red"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "background"
+          }
+        },
+        {
+          "type": "row",
+          "title": "The workload node",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 5
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "CPU utilisation vs requests vs limits (workload node)",
+          "description": "The three lines that matter: what is actually used, what is reserved (requests), and the ceiling (limits). A flat 'used' line at the 'requests' line means every millicore is claimed and nothing else can schedule \u2014 which is the state SPEC.md's single-node constraint lives in.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 6
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(node_cpu_seconds_total{mode!=\"idle\", node=~\"$node\"}[5m]))",
+              "legendFormat": "used"
+            },
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"cpu\"}) / count(count by (node) (kube_pod_info))",
+              "legendFormat": "requests per node"
+            },
+            {
+              "expr": "sum(rate(node_cpu_seconds_total[5m]))",
+              "legendFormat": "capacity"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Memory working set vs allocatable (workload node)",
+          "description": "Working set as a share of the node's allocatable memory. The gauge, not the limit, is what OOM-kills; the kubelet evicts at the node-pressure threshold (~10% of allocatable) before any limit is reached.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 6
+          },
+          "targets": [
+            {
+              "expr": "sum(container_memory_working_set_bytes{node=~\"$node\", container!=\"\"})",
+              "legendFormat": "working set"
+            },
+            {
+              "expr": "sum(kube_node_status_allocatable{resource=\"memory\", node=~\"$node\"})",
+              "legendFormat": "allocatable"
+            },
+            {
+              "expr": "sum(kube_node_status_allocatable{resource=\"memory\", node=~\"$node\"}) * 0.9",
+              "legendFormat": "eviction threshold"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "bargauge",
+          "title": "CPU requests by namespace",
+          "description": "Where the 2 vCPU actually goes. This is the panel that answers 'what do I cut' \u2014 the answer is usually the largest bar that is not the application.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 14
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"})",
+              "instant": true,
+              "legendFormat": "{{namespace}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true
+          }
+        },
+        {
+          "type": "bargauge",
+          "title": "Memory requests by namespace",
+          "description": "Same, for the 4 GiB. observability is deliberately kept under 1 GiB: the metrics tier on this node is sized to 832Mi of requests, and the arithmetic is in scripts/resource-budget.py.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 14
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"memory\"})",
+              "instant": true,
+              "legendFormat": "{{namespace}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true
+          }
+        },
+        {
+          "type": "row",
+          "title": "Storage \u2014 the other thing that costs money",
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 22
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "PVC usage gp3",
+          "description": "Observability state is gp3 (SPEC.md): 8Gi Prometheus TSDB, 10Gi Loki, 2Gi Grafana, 1Gi Alertmanager = 21Gi on top of the 64Gi of node volumes. At $0.08/GB-month that is $1.68/month over the SPEC's table.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 23
+          },
+          "targets": [
+            {
+              "expr": "sum by (persistentvolumeclaim) (kubelet_volume_stats_used_bytes{namespace=\"observability\"})",
+              "legendFormat": "{{persistentvolumeclaim}}"
+            },
+            {
+              "expr": "sum by (persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=\"observability\"})",
+              "legendFormat": "{{persistentvolumeclaim}} capacity"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            }
+          }
+        }
+      ]
+    }

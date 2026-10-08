@@ -1,0 +1,208 @@
+# Boutique golden signals dashboard
+# -----------------------------------------------------------------------------
+# Provisioned by the kube-prometheus-stack Grafana sidecar (label
+# `grafana_dashboard: "1"`).
+#
+# ROADMAP Phase 9's exit criterion: "A provisioned dashboard shows request rate,
+# error ratio, p95 latency heatmap, and SLO burn for the app in a single
+# screenshot." This is that dashboard, and every panel names its source metric so
+# the claim is checkable rather than decorative.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: boutique-golden-signals
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/dashboard: golden-signals
+data:
+  golden-signals.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": false,
+      "title": "Boutique golden signals",
+      "uid": "boutique-golden-signals",
+      "version": 1,
+      "tags": ["boutique-platform", "golden-signals", "slo"],
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "service",
+            "label": "Boutique service",
+            "type": "custom",
+            "definition": "frontend,checkoutservice,productcatalogservice,currencyservice,emailservice,adservice,shippingservice,paymentservice,recommendationservice,cartservice,redis-cart,loadgenerator",
+            "query": "frontend,checkoutservice,productcatalogservice,currencyservice,emailservice,adservice,shippingservice,paymentservice,recommendationservice,cartservice,redis-cart,loadgenerator",
+            "hide": 0,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        { "type": "row", "title": "Traffic and saturation", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+        {
+          "type": "timeseries",
+          "title": "Request rate (Traefik edge view)",
+          "description": "job:request_rate:ratio, recorded from traefik_service_requests_total. Boutique has no /metrics endpoint, so this is the authoritative per-service request rate.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 1 },
+          "targets": [
+            { "expr": "job:request_rate:ratio{job=~\"$service\"}", "legendFormat": "{{job}}" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Request volume by status class",
+          "description": "traefik_service_requests_total split by HTTP class. The 5xx line is the numerator of every SLO on this dashboard.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum by (code) (rate(traefik_service_requests_total{service=~\"boutique-[a-z0-9-]+-[0-9]+@kubernetes\"}[5m]))",
+              "legendFormat": "{{code}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Request rate by HTTP method",
+          "description": "GET versus POST. A POST share that collapses is the signature of a checkout journey that stopped being exercised, which is a loadgenerator problem rather than a service problem.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 8 },
+          "targets": [
+            {
+              "expr": "sum by (method) (rate(traefik_service_requests_total{service=~\"boutique-[a-z0-9-]+-[0-9]+@kubernetes\"}[5m]))",
+              "legendFormat": "{{method}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Request and response bytes",
+          "description": "traefik_service_requests_bytes_total and traefik_service_responses_bytes_total. Useful for spotting a response-size regression that a latency-only dashboard misses.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 8 },
+          "targets": [
+            {
+              "expr": "sum(rate(traefik_service_requests_bytes_total{service=~\"boutique-[a-z0-9-]+-[0-9]+@kubernetes\"}[5m]))",
+              "legendFormat": "request bytes/s"
+            },
+            {
+              "expr": "sum(rate(traefik_service_responses_bytes_total{service=~\"boutique-[a-z0-9-]+-[0-9]+@kubernetes\"}[5m]))",
+              "legendFormat": "response bytes/s"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+        },
+        { "type": "row", "title": "Errors", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 } },
+        {
+          "type": "timeseries",
+          "title": "Error ratio per service",
+          "description": "job:error_ratio:ratio. The red line is the 99.9% availability budget rate; a service pinned on it is consuming its whole 30-day budget.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 16 },
+          "targets": [
+            { "expr": "job:error_ratio:ratio{job=~\"$service\"}", "legendFormat": "{{job}}" },
+            { "expr": "vector(0.001)", "legendFormat": "budget rate" },
+            { "expr": "vector(0.0144)", "legendFormat": "14.4x burn (page)" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Error ratio from traces (spanmetrics, Phase 11)",
+          "description": "span:error_ratio:ratio. Empty until the OTel Collector's spanmetrics connector is installed. Keep it on the dashboard so the day it fills, the edge view and the process view can be compared — a gap between them is the OTLP path failing.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 24, "x": 0, "y": 23 },
+          "targets": [
+            { "expr": "span:error_ratio:ratio{job=~\"$service\"}", "legendFormat": "{{job}}" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+        },
+        { "type": "row", "title": "Latency", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 } },
+        {
+          "type": "heatmap",
+          "title": "Latency heatmap — p99 by service over time",
+          "description": "The heatmap ROADMAP Phase 9 asks for. Rows are latency buckets, columns are time; the cell value is the request count. Uses Traefik's per-service duration histogram rather than the edge-level one, so a single slow service is visible rather than averaged away.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 31 },
+          "targets": [
+            {
+              "expr": "sum by (le) (rate(traefik_service_request_duration_seconds_bucket{service=~\"boutique-[a-z0-9-]+-[0-9]+@kubernetes\"}[5m]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}"
+            }
+          ],
+          "options": { "calculate": true, "cellGap": 1, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 }, "yAxis": { "unit": "s" } }
+        },
+        {
+          "type": "timeseries",
+          "title": "p95 and p99 latency per service",
+          "description": "job:latency_p95:seconds and job:latency_p99:seconds. With Traefik's default buckets these resolve to 0.1, 0.3, 1.2 or 5.0 — a measured limitation documented in observability/rules/boutique-golden-signals.yaml.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+          "targets": [
+            { "expr": "job:latency_p99:seconds{job=~\"$service\"}", "legendFormat": "{{job}} p99" },
+            { "expr": "job:latency_p95:seconds{job=~\"$service\"}", "legendFormat": "{{job}} p95" },
+            { "expr": "vector(1.2)", "legendFormat": "1.2s objective" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency bucket resolution",
+          "description": "boutique:latency_bucket_resolution_seconds. Exactly 4 means Traefik's default buckets (0.1, 0.3, 1.2, 5.0) are still in force and the latency SLO is coarse by construction. Phase 5 must set metrics.prometheus.buckets to get a real percentile.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+          "targets": [
+            {
+              "expr": "count(count by (le) (traefik_service_request_duration_seconds_bucket{service=~\"boutique-frontend-80@kubernetes\"}))",
+              "legendFormat": "distinct le values"
+            },
+            { "expr": "vector(4)", "legendFormat": "default buckets" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+        },
+        { "type": "row", "title": "SLO burn", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 } },
+        {
+          "type": "timeseries",
+          "title": "Availability error-budget remaining",
+          "description": "job:availability_error_budget_remaining_ratio. 1.0 is a full 30-day budget; 0 means it is gone and the stop-shipping policy in docs/slo.md applies.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
+          "targets": [
+            { "expr": "job:availability_error_budget_remaining_ratio{job=~\"$service\"}", "legendFormat": "{{job}}" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "min": -1, "max": 1 }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Burn rate by window",
+          "description": "The three SRE Workbook windows, side by side. The panel is designed so the two page-severity conditions (14.4 and 6) are visibly separated from the ticket-severity one (1).",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 49 },
+          "targets": [
+            { "expr": "job:availability_slo:errors_ratio:ratio_rate5m{job=~\"$service\"} / 0.001", "legendFormat": "{{job}} 5m" },
+            { "expr": "job:availability_slo:errors_ratio:ratio_rate1h{job=~\"$service\"} / 0.001", "legendFormat": "{{job}} 1h" },
+            { "expr": "job:availability_slo:errors_ratio:ratio_rate30m{job=~\"$service\"} / 0.001", "legendFormat": "{{job}} 30m" },
+            { "expr": "job:availability_slo:errors_ratio:ratio_rate6h{job=~\"$service\"} / 0.001", "legendFormat": "{{job}} 6h" },
+            { "expr": "vector(14.4)", "legendFormat": "14.4 page" },
+            { "expr": "vector(6)", "legendFormat": "6 page" },
+            { "expr": "vector(1)", "legendFormat": "1 ticket" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+        }
+      ]
+    }
