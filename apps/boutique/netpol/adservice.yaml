@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: adservice
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: adservice
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-adservice.yaml exactly: frontend only, on
+  # pod port 9555.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - port: 9555
+      protocol: TCP
+  egress:
+  # DNS carve-out upstream omits (see netpol/frontend.yaml), plus trace export —
+  # which, to be explicit, currently reaches nothing: upstream's adservice
+  # tracing is stubbed (see docs/adr/0004-adservice-tracing-gap.md) and
+  # DISABLE_TRACING=1 is set in base/adservice.yaml. The egress rule is written
+  # so that the day the gap closes, the network path is already allowed and no
+  # manifest change is needed.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - port: 4317
+      protocol: TCP

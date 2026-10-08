@@ -1,0 +1,130 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # NARROWED FROM UPSTREAM. Upstream's network-policy-frontend.yaml is
+  # `ingress: - {}` — an empty rule that allows every source in every namespace.
+  # SPEC.md's trust boundary 2 terminates at Traefik, so the rule is narrowed to
+  # the Traefik namespace by namespace label. `kubernetes.io/metadata.name` is
+  # added to every namespace by the NamespaceDefaultLabelName admission plugin
+  # (GA since 1.22), so this needs no hand-maintained label on the namespace.
+  #
+  # Port 8080, not 80: NetworkPolicy ports match the destination pod's port. The
+  # frontend Service publishes 80 and targets 8080, so the policy has to say 8080.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: traefik
+    ports:
+    - port: 8080
+      protocol: TCP
+  egress:
+  # THE CARVE-OUT UPSTREAM OMITS. Every one of upstream's per-service
+  # network policies ends with `egress: - {}` — a single empty rule that allows
+  # all destinations on all ports, which is a no-op in a cluster where the CNI
+  # enforces NetworkPolicy. A default-deny namespace plus a wide-open egress is
+  # not an egress policy. Kubernetes never assigns a pod a DNS server; pods get
+  # `nameserver` from /etc/resolv.conf, which points at the kube-dns Service
+  # ClusterIP. With egress closed, every name lookup fails with a timeout
+  # rather than an answer, and the service has no way to reach anything at all.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # Trace export. OTLP/gRPC only; the collector's 4318 (HTTP) listener is
+  # deliberately not reachable from this namespace, so nothing can smuggle spans
+  # in over plain HTTP.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - port: 4317
+      protocol: TCP
+  # Everything the frontend calls, taken from its own env block in
+  # base/frontend.yaml and cross-checked against upstream's SERVICE_ADDR values.
+  - to:
+    - podSelector:
+        matchLabels:
+          app: productcatalogservice
+    ports:
+    - port: 3550
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: currencyservice
+    ports:
+    - port: 7000
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: cartservice
+    ports:
+    - port: 7070
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: recommendationservice
+    ports:
+    - port: 8080
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: shippingservice
+    ports:
+    - port: 50051
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - port: 5050
+      protocol: TCP
+  - to:
+    - podSelector:
+        matchLabels:
+          app: adservice
+    ports:
+    - port: 9555
+      protocol: TCP
+  # shoppingassistantservice is kept because upstream keeps the
+  # SHOPPING_ASSISTANT_SERVICE_ADDR env var, but note honestly what it points
+  # at: the service ships only as the opt-in kustomize/components/
+  # shopping-assistant component (it needs AlloyDB) and is absent from the
+  # release manifest this repo vendors. The rule is therefore inert today and
+  # becomes live if that component is ever enabled.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: boutique
+      podSelector:
+        matchLabels:
+          app: shoppingassistantservice
+    ports:
+    - port: 80
+      protocol: TCP

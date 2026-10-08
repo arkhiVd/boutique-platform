@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paymentservice
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: paymentservice
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-paymentservice.yaml exactly: checkoutservice
+  # only, on pod port 50051. It is the only service in the app that the frontend
+  # may never call directly.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - port: 50051
+      protocol: TCP
+  egress:
+  # DNS carve-out upstream omits, plus trace export. Paymentservice's card
+  # authorisation is a local stub upstream (no real PSP), so it has no internet
+  # egress — and that is also exactly what a real payments service must not have.
+  # This rule is where a PSP allow-list would go.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - port: 4317
+      protocol: TCP

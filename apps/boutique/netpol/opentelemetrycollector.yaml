@@ -1,0 +1,57 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+spec:
+  podSelector:
+    matchLabels:
+      app: opentelemetrycollector
+  policyTypes:
+  - Ingress
+  - Egress
+  # Upstream has no NetworkPolicy for the collector at all — its
+  # google-cloud-operations component ships only the Deployment, Service and
+  # ConfigMap, and it lives outside the default-deny namespace (indeed upstream
+  # ships no namespace for it either). Every other workload in this platform is
+  # behind a default-deny, so the collector gets one too.
+  ingress:
+  # From the boutique namespace only, on both OTLP listeners. The 4318 (HTTP)
+  # listener is deliberate: it is reachable so that a future instrumented
+  # service which does not speak gRPC still has a path, and it is included here
+  # explicitly rather than left to a future default-allow.
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: boutique
+    ports:
+    - port: 4317
+      protocol: TCP
+    - port: 4318
+      protocol: TCP
+  egress:
+  # DNS, for the collector's own name resolution.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # TO BE NARROWED IN PHASE 11, stated plainly rather than hidden. Today's
+  # exporter in the collector's config is `debug` (see
+  # apps/boutique/observability/opentelemetrycollector.yaml), so the collector
+  # has no outbound trace destination and this rule matches no live connection.
+  # When Phase 11 lands Tempo, this becomes a rule for Tempo's OTLP port in this
+  # namespace and the same-namespace allowance narrows to it. What is NOT allowed
+  # today is the internet: no pod in this namespace can reach a public IP, which
+  # also means the collector cannot exfiltrate trace data off-cluster.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability

@@ -1,0 +1,51 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: currencyservice
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: currencyservice
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-currencyservice.yaml exactly: frontend and
+  # checkoutservice, on pod port 7000.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - port: 7000
+      protocol: TCP
+  egress:
+  # DNS carve-out upstream omits, plus trace export. currencyservice has no
+  # downstream dependency — its conversion table is baked into the image — so
+  # this is the same minimal egress surface as productcatalogservice.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - port: 4317
+      protocol: TCP

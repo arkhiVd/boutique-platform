@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-cart
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-cart
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-redis.yaml exactly (name included — upstream
+  # calls the policy `redis-cart`): cartservice only, on pod port 6379. Upstream's
+  # file is the tightest in their set already; only its egress rule needed work.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: cartservice
+    ports:
+    - port: 6379
+      protocol: TCP
+  egress:
+  # DNS only. Redis is the one pod in this namespace with genuinely no outbound
+  # dependency: it never dials another service, never resolves a peer, and (with
+  # an emptyDir backing store and no replication configured) never talks to
+  # anything. The DNS rule is kept for parity with every other service and
+  # because it costs nothing, but it is listed knowing it matches no live
+  # connection — that is the ideal state for an egress rule.
+  #
+  # Notably absent: no OTel egress. redis-cart is not instrumented.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP

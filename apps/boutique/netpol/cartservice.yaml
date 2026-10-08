@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cartservice
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: cartservice
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-cartservice.yaml exactly: frontend and
+  # checkoutservice, on pod port 7070.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    ports:
+    - port: 7070
+      protocol: TCP
+  egress:
+  # DNS carve-out upstream omits (see netpol/frontend.yaml).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # The only outbound dependency, from REDIS_ADDR=redis-cart:6379 in its env
+  # block. No OTel rule: cartservice is the one app service with no OpenTelemetry
+  # instrumentation in the upstream tree at all, so allowing 4317 here would be
+  # an allow-rule for a connection that is never attempted.
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis-cart
+    ports:
+    - port: 6379
+      protocol: TCP

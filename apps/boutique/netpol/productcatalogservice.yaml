@@ -1,0 +1,55 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: productcatalogservice
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: productcatalogservice
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Mirrors upstream's network-policy-productcatalogservice.yaml exactly:
+  # frontend, checkoutservice and recommendationservice, on pod port 3550.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    - podSelector:
+        matchLabels:
+          app: checkoutservice
+    - podSelector:
+        matchLabels:
+          app: recommendationservice
+    ports:
+    - port: 3550
+      protocol: TCP
+  egress:
+  # DNS carve-out upstream omits, plus trace export. Verified in-tree: this is the
+  # only service in the whole upstream tree that reads EXTRA_LATENCY, so it is
+  # also the only one that ever needs to sleep — and it has no other outbound
+  # dependency, which makes its egress surface the smallest of the Go services.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app: opentelemetrycollector
+    ports:
+    - port: 4317
+      protocol: TCP

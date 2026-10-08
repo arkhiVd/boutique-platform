@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: boutique
+spec:
+  # Mirrors upstream's kustomize/components/network-policies/network-policy-deny-all.yaml
+  # exactly: `podSelector: {}` with both policy types and no rules, which selects
+  # every pod in the namespace and permits nothing. This is the default-deny that
+  # makes every allow-policy in this directory meaningful — without it, an
+  # allow-list is decoration.
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress

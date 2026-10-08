@@ -1,0 +1,43 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: loadgenerator
+  namespace: boutique
+spec:
+  podSelector:
+    matchLabels:
+      app: loadgenerator
+  policyTypes:
+  # Both declared, with no `ingress:` key — which denies all inbound. Upstream's
+  # network-policy-loadgenerator.yaml declares only Egress, leaving the allow
+  # decision for ingress to the deny-all. Declaring both makes the intent
+  # explicit and survives the deny-all being removed by a future overlay.
+  - Ingress
+  - Egress
+  egress:
+  # DNS carve-out upstream omits (see netpol/frontend.yaml). Note this is not
+  # theoretical for loadgenerator: its initContainer resolves FRONTEND_ADDR
+  # before the locust process even starts.
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # The single destination, from FRONTEND_ADDR=frontend:80. The frontend Service
+  # publishes 80 and targets the pod's 8080, so the pod-side port to allow is
+  # 8080 — same 80-vs-8080 distinction as the checkoutservice → emailservice
+  # rule, and the same place a memory-based transcription would get it wrong.
+  - to:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - port: 8080
+      protocol: TCP
