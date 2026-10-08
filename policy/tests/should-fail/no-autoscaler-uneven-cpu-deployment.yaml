@@ -1,0 +1,72 @@
+# ---------------------------------------------------------------------------
+# DELIBERATE FAILURE FIXTURE — the policy MUST reject this file.
+#
+# Negative test for policy/resources.rego, and the only fixture whose HPA
+# violation is observable. A Deployment, not a Pod, because the
+# "every Deployment needs an HPA" rule matches Deployments only.
+#
+# What it violates, one per policy rule:
+#   policy/security.rego        readOnlyRootFilesystem, runAsNonRoot,
+#                              allowPrivilegeEscalation, capabilities,
+#                              seccompProfile, automountServiceAccountToken,
+#                              serviceAccountName, default SA
+#   policy/resources.rego       CPU requests != limits, memory limits missing
+#
+# How to reproduce the HPA half of the rejection, which requires combined mode:
+#
+#   conftest test policy/tests/should-fail -p policy/ --combine
+#   conftest test apps/boutique/base policy/tests/should-fail -p policy/ --combine
+#
+# The second command is the interesting one: it proves the rule does not fire
+# for the real manifests in the same tree while it does fire for this one.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: no-autoscaler-uneven-cpu
+  namespace: boutique
+  labels:
+    app: no-autoscaler-uneven-cpu
+spec:
+  # DELIBERATE: replicas 3, and no HorizontalPodAutoscaler anywhere in this
+  # directory targets it. Upstream's baseline is the same shape for all 12 of
+  # its workloads.
+  replicas: 3
+  selector:
+    matchLabels:
+      app: no-autoscaler-uneven-cpu
+  template:
+    metadata:
+      labels:
+        app: no-autoscaler-uneven-cpu
+    spec:
+      # DELIBERATE: `default` ServiceAccount, and no automountServiceAccountToken.
+      # This is upstream's redis-cart configuration exactly — it is the one
+      # upstream workload with no ServiceAccount of its own.
+      containers:
+      - name: server
+        image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/checkoutservice:v0.10.7
+        ports:
+        - containerPort: 5050
+        securityContext:
+          # DELIBERATE: all four of these inverted.
+          allowPrivilegeEscalation: true
+          capabilities:
+            drop:
+            - NET_RAW
+          privileged: false
+          readOnlyRootFilesystem: false
+        env:
+        - name: PORT
+          value: "5050"
+        resources:
+          requests:
+            # DELIBERATE: the upstream pattern, verbatim. 100m request, 200m
+            # limit — Burstable QoS, not Guaranteed. Real upstream numbers, so
+            # this is also a demonstration that upstream's own eight Go services
+            # would be rejected by this policy as shipped.
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            # DELIBERATE: no memory limit at all.

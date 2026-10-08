@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# DELIBERATE FAILURE FIXTURE — the policy MUST reject this file.
+#
+# This is the negative test for policy/security.rego. Nothing here is a
+# template; it is a demonstration that each rule has teeth. Every violation it
+# contains is one that was verified PRESENT-or-absent in the real upstream
+# baseline at apps/boutique/upstream-kubernetes-manifests.yaml, chosen so that
+# "the policy catches upstream too" is a demonstrable fact rather than a claim.
+#
+# Verified against the vendored baseline:
+#   - upstream sets no seccompProfile on any of its 13 workloads
+#   - upstream sets `automountServiceAccountToken` nowhere
+#   - upstream sets `readOnlyRootFilesystem` everywhere... but this fixture
+#     breaks the other six controls deliberately
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-pod
+  namespace: boutique
+  labels:
+    app: privileged-pod
+spec:
+  # 1. hostNetwork: true — denies_host_namespaces
+  hostNetwork: true
+  containers:
+  - name: privileged
+    image: busybox:1.38.0
+    ports:
+    - containerPort: 8080
+    securityContext:
+      # 2. privileged: true — deny_privileged
+      privileged: true
+      # 3. allowPrivilegeEscalation: true — deny_privilege_escalation
+      allowPrivilegeEscalation: true
+      # 4. capabilities.drop does not include ALL — deny_capabilities_not_dropped
+      capabilities:
+        drop:
+        - NET_RAW
+      # 5. readOnlyRootFilesystem unset — deny_readonly_root_filesystem
+      # 6. runAsNonRoot unset — deny_run_as_non_root
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi

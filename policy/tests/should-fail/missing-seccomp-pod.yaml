@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# DELIBERATE FAILURE FIXTURE — the policy MUST reject this file.
+#
+# Negative test for the security contract. A Pod that is correct in every field
+# except the two an operator most plausibly gets wrong under time pressure:
+# seccomp, and the service-account token. Both are single omissions, and both
+# are exactly what the upstream baseline ships — verified:
+#
+#   $ grep -c seccompProfile apps/boutique/upstream-kubernetes-manifests.yaml
+#   0
+#   $ grep -c automountServiceAccountToken \
+#       apps/boutique/upstream-kubernetes-manifests.yaml
+#   0
+#
+# So the real upstream baseline is 12/13 of the way to this fixture. That is the
+# point of keeping it: it proves the policy rejects the upstream default, not
+# merely something contrived.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Pod
+metadata:
+  name: missing-seccomp-pod
+  namespace: boutique
+  labels:
+    app: missing-seccomp-pod
+spec:
+  serviceAccountName: missing-seccomp-pod
+  # DELIBERATE: no `automountServiceAccountToken: false` here.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    # DELIBERATE: no seccompProfile at all — the upstream shape.
+  containers:
+  - name: server
+    image: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo/frontend:v0.10.7
+    ports:
+    - containerPort: 8080
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      readOnlyRootFilesystem: true
+      # DELIBERATE: `Unconfined` rather than an absence. Tests the
+      # `!= RuntimeDefault` branch of deny_seccomp_profile, which is separate
+      # from the "no seccompProfile at all" branch and can pass while that one
+      # fires.
+      seccompProfile:
+        type: Unconfined
+    resources:
+      requests:
+        cpu: 100m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
