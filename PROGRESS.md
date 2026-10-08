@@ -124,7 +124,7 @@ summary, and blind-compares against the real Online Boutique deployment.
 ### Phase 6 manifest layer — 2026-10-09, from the render not the source
 
 ```
-kustomize build apps/boutique/                2942 lines, 13 Deployments
+kustomize build apps/boutique/                3033 lines, 13 Deployments
 kubeconform -strict -kubernetes-version 1.36.3 apps/ apps/boutique/netpol/ policy/tests/
   Summary: 136 resources found in 36 files - Valid: 136, Invalid: 0, Errors: 0
 conftest test apps/boutique/base -p policy/          1044 tests, 1044 passed

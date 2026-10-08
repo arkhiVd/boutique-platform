@@ -82,7 +82,7 @@ auto-refreshes every 30s</p>
 <ul><li>Verified absent and <strong>not</strong> to be built: <code>adServiceFailure</code>, <code>recommendationCacheFailure</code></li></ul>
 <p>  (checked across v0.1.4–v0.10.7), <code>ml-pipeline/</code>, Cloud CDN, Argo CD / Config Sync descriptors</p>
 <h3>Phase 6 manifest layer — 2026-10-09, from the render not the source</h3>
-<pre><code>kustomize build apps/boutique/                2942 lines, 13 Deployments
+<pre><code>kustomize build apps/boutique/                3033 lines, 13 Deployments
 kubeconform -strict -kubernetes-version 1.36.3 apps/ apps/boutique/netpol/ policy/tests/
   Summary: 136 resources found in 36 files - Valid: 136, Invalid: 0, Errors: 0
 conftest test apps/boutique/base -p policy/          1044 tests, 1044 passed
