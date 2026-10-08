@@ -1,0 +1,26 @@
+# bootstrap — example inputs.
+#
+# Copy to terraform.tfvars, which is gitignored. Never commit the real file:
+# it is the only place a live email address lives.
+
+# Region for the state bucket, the Budget and the OIDC provider. The account's
+# only provisioned region; changing it changes every ARN in the stack.
+aws_region = "us-east-1"
+
+# Where the Budget alerts and the cluster alarms go. Subscribed to the
+# boutique-platform-alerts SNS topic; AWS sends a confirmation mail that must
+# be clicked before the first alert can arrive. Required: no default.
+alert_email = "alerts@example.com"
+
+# Monthly Budget ceiling. 50% and 80% of the forecast fire on the SNS topic.
+# The SPEC prices the whole platform near $124/mo against a $200 credit, so 30
+# is an early, loud threshold.
+monthly_budget_limit_usd = 30
+
+# The account has no OIDC provider for GitHub Actions today
+# (`aws iam list-open-id-connect-providers` returned an empty list on
+# 2026-10-09), so the default creates one. Set this to false and set
+# existing_oidc_provider_arn if the account already has one — otherwise the
+# trust policy has no provider to name and the roles cannot be assumed.
+create_oidc_provider = true
+# existing_oidc_provider_arn = "arn:aws:iam::348032171026:oidc-provider/token.actions.githubusercontent.com"
