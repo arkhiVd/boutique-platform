@@ -1,0 +1,121 @@
+# Boutique availability SLO — multiwindow multi-burn-rate alerts
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; the kube-prometheus-stack chart wraps it into a
+# PrometheusRule at render time (templates/platform-rules.yaml).
+#
+# THE THREE CONDITIONS, STRAIGHT FROM THE SRE WORKBOOK
+# ----------------------------------------------------
+# Source: Google SRE Workbook, Chapter 5 "Alerting on SLOs", Table 5.2 —
+# https://sre.google/workbook/alerting-on-slos/
+#
+#   | condition        | long window | short window | burn rate | severity |
+#   |------------------|-------------|--------------|-----------|----------|
+#   | 2% of a 30d budget in 1h  | 1h  | 5m  | 14.4 | page |
+#   | 5% in 6h                  | 6h  | 30m | 6    | page |
+#   | 10% in 3d                 | 3d  | 2h  | 1    | ticket |
+#
+# The arithmetic for each, against a 99.9% SLO over 30 days (budget =
+# 0.1% = 43m 12s):
+#
+#   14.4 = (0.02 x 43.2 min) / (60 min x 0.001 error-budget ratio)
+#      6 = (0.05 x 43.2 min) / (360 min x 0.001)
+#      1 = (0.10 x 43.2 min) / (4320 min x 0.001)
+#
+# WHY THE SHORT WINDOW IS `and`-ED AND NOT MERGED
+# ------------------------------------------------
+# The workbook's rule is that the alert fires only when the condition holds in
+# BOTH windows. A single 5-minute blip moves the 5m window and nothing else; a
+# slow 6-hour bleed moves the 6h window but not the 5m one. Only a real, current,
+# sustained outage moves both, which is the whole point — and it is why
+# observability/synthetic-tests/ can assert "2% in 1h fires, 5% in 6h does not"
+# with a single input series.
+#
+# The one deviation from the workbook is recorded: the third row's short window
+# is 2h here rather than 6h, because `sum_over_time(...[6h])` evaluated at 30s
+# over 13 jobs is a query cost this 4 GiB node should not pay for a ticket-severity
+# alert. 2h against a 3d long window is still a 36:1 ratio.
+
+groups:
+  - name: boutique.slo.availability.alerts
+    interval: 30s
+
+    rules:
+      ## --- 2% of the 30-day budget consumed in 1 hour -> PAGE -----------------
+      # burn rate 14.4 x the 99.9% error budget (0.001) = 1.44% error ratio.
+      # 14.4 x 0.001 is written out rather than inlined as 0.0144 so the next
+      # reader can see the arithmetic instead of guessing at a magic number.
+      - alert: BoutiqueAvailabilityErrorBudgetBurn
+        annotations:
+          summary: >-
+            Availability error budget burning 14.4x for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} is failing {{ $value | humanizePercentage }} of requests
+            over the last 5 minutes, and more than 1.44% over the last hour. At
+            this rate the 30-day 99.9% availability budget is gone in just over
+            2 days. This is a page: the condition is true in BOTH the 5m and 1h
+            windows, which is what distinguishes it from a blip.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:availability_slo:errors_ratio:ratio_rate5m > (14.4 * 0.001)
+            and
+            job:availability_slo:errors_ratio:ratio_rate1h > (14.4 * 0.001)
+          )
+        labels:
+          severity: page
+          burn_rate: "14.4"
+          window: "5m/1h"
+          platform.boutique/slo: availability
+          platform.boutique/component: application
+
+      ## --- 5% of the 30-day budget consumed in 6 hours -> PAGE ----------------
+      # burn rate 6 x 0.001 = 0.6% error ratio.
+      - alert: BoutiqueAvailabilityErrorBudgetBurn
+        annotations:
+          summary: >-
+            Availability error budget burning 6x for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} is failing {{ $value | humanizePercentage }} of requests
+            over the last 30 minutes, and more than 0.6% over the last 6 hours.
+            The 30-day 99.9% budget is consumed in ~5 days at this rate.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:availability_slo:errors_ratio:ratio_rate30m > (6 * 0.001)
+            and
+            job:availability_slo:errors_ratio:ratio_rate6h > (6 * 0.001)
+          )
+        labels:
+          severity: page
+          burn_rate: "6"
+          window: "30m/6h"
+          platform.boutique/slo: availability
+          platform.boutique/component: application
+
+      ## --- 10% of the 30-day budget consumed in 3 days -> TICKET ---------------
+      # burn rate 1 x 0.001 = 0.1% error ratio. At exactly the budget rate, the
+      # budget runs out at the end of the window — this is the "stop shipping"
+      # condition from the error-budget policy in docs/slo.md, not a page.
+      - alert: BoutiqueAvailabilityErrorBudgetBurn
+        annotations:
+          summary: >-
+            Availability error budget fully consumed for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} has been failing more than 0.1% of requests for the
+            entire 3-day window. The 30-day 99.9% availability budget is on pace
+            to be fully consumed. Under the error-budget policy in docs/slo.md
+            this is the stop-shipping condition: new features stop until the
+            budget recovers.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:availability_slo:errors_ratio:ratio_rate2h > (1 * 0.001)
+            and
+            job:availability_slo:errors_ratio:ratio_rate3d > (1 * 0.001)
+          )
+        labels:
+          severity: ticket
+          burn_rate: "1"
+          window: "2h/3d"
+          platform.boutique/slo: availability
+          platform.boutique/component: application

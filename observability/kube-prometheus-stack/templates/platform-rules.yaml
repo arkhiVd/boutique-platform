@@ -1,0 +1,53 @@
+{{- /*
+PrometheusRule objects built from the bare rule files in observability/rules/
+and observability/slos/.
+
+WHY THIS EXISTS RATHER THAN `additionalPrometheusRulesMap`:
+`promtool check rules` and `promtool test rules` only accept a file whose sole
+top-level key is `groups:`. A PrometheusRule CRD cannot be checked by promtool.
+So the rules live as bare files at observability/rules/ (single source of truth,
+promtool-checkable) and THIS template adds the apiVersion, kind, namespace and
+labels the Prometheus Operator needs.
+
+The label block is added once, here, rather than repeated in every rule file —
+which is the actual reason the split is worth the extra file.
+
+`rules/` and `slos/` inside this chart directory are symlinks to
+../../rules and ../../slos. Helm's chart loader follows symlinks and prints an
+informational line to stderr; the file content is the same file on disk.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "rules/*.yaml" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ base $path | trimSuffix ".yaml" | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    # The Prometheus Operator's rule selector defaults to `{release: <name>}`
+    # (ruleSelectorNilUsesHelmValues: true). Without this label every rule
+    # below is silently ignored — which is the failure mode this whole repo
+    # exists to make visible.
+    release: {{ $.Release.Name }}
+    app: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+spec:
+{{ $.Files.Get $path | indent 2 }}
+{{- end }}
+{{- range $path, $_ := .Files.Glob "slos/*.yaml" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ base $path | trimSuffix ".yaml" | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    release: {{ $.Release.Name }}
+    app: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    platform.boutique/slo: "true"
+spec:
+{{ $.Files.Get $path | indent 2 }}
+{{- end }}

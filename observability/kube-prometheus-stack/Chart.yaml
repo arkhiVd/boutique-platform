@@ -1,0 +1,15 @@
+apiVersion: v2
+name: kube-prometheus-stack
+description: >-
+  Platform wrapper around the upstream kube-prometheus-stack 92.1.1 (app v0.94.1).
+  Every override in values.yaml is justified next to the value it overrides, because
+  this chart runs on a single t3.medium workload node with 4 GiB RAM and 2 vCPU and
+  nothing here is a default.
+type: application
+version: 0.1.0
+appVersion: "v0.94.1"
+kubeVersion: ">=1.25.0-0"
+dependencies:
+  - name: kube-prometheus-stack
+    version: 92.1.1
+    repository: https://prometheus-community.github.io/helm-charts

@@ -1,0 +1,307 @@
+# Boutique platform alerts — firing rules, deliberately not noisy
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; the kube-prometheus-stack chart wraps it into a
+# PrometheusRule at render time (templates/platform-rules.yaml).
+#
+# The design rule for this file, in one line: on a one-operator platform an
+# alert that fires without a decision attached has a NEGATIVE value, because it
+# consumes the attention the real page needs.
+#
+# So there are two severities and both are routed by
+# observability/kube-prometheus-stack/values.yaml:
+#
+#   severity: page   -> sns-page, continue: true (so a ticket can also be filed)
+#   severity: ticket -> sns-ticket
+#
+# Watchdog carries severity `none` and lands on the integration-free `default`
+# receiver, which is the intended use of a watchdog.
+#
+# DUPLICATE ALERTS, STATED PLAINLY: the upstream kube-prometheus-stack rules
+# (defaultRules, left enabled) also define KubePodCrashLooping,
+# KubeDeploymentReplicasMismatch and Watchdog. Both copies fire. Alertmanager
+# groups by `namespace`/`alertname`, so this is one notification, not two — but
+# a reviewer reading the rule list will see the same alertname twice and should
+# know it is deliberate: the platform's copy carries the `runbook_url` pointing
+# at THIS repo's runbooks, a `for:` tuned to a one-node cluster, and a severity
+# label the route tree actually uses. If you want exactly one copy, set
+# `defaultRules.rules.kubernetesApps: false` — but that also removes
+# KubePodNotReady, KubeStatefulSetReplicasMismatch and KubeJobFailed, which are
+# worth keeping.
+
+groups:
+  - name: boutique.platform.alerts
+    interval: 30s
+
+    rules:
+      ## -------------------------------------------------------------------
+      ## The watchdog — the only alert that is supposed to be firing all the
+      ## time. It proves the Prometheus -> Alertmanager -> route tree path is
+      ## intact, which is the one failure that would silently disable every
+      ## other rule in this file.
+      ## -------------------------------------------------------------------
+      - alert: Watchdog
+        annotations:
+          summary: Alertmanager pipeline is alive
+          description: >-
+            This alert is designed to fire permanently. If it stops, the
+            Prometheus-to-Alertmanager-to-route path is broken and every other
+            alert in this file is blind. Severity `none` routes it to the
+            integration-free `default` receiver, so it pages nobody.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: vector(1)
+        labels:
+          severity: none
+          platform.boutique/component: observability
+
+      ## -------------------------------------------------------------------
+      ## Crash loops. THE THRESHOLD IS THE WHOLE POINT OF THIS RULE.
+      ##
+      ## Upstream's KubePodCrashLooping uses
+      ##   rate(kube_pod_container_status_restarts_total[15m]) * 60 * 5 > 0
+      ## which pages on the FIRST restart. On this platform a single restart is
+      ## normal: `redis-cart` restarts when its emptyDir is recreated, the OTel
+      ## collector restarts on a config reload, and a Boutique pod restarts on
+      ## any node drain. A rule that pages on all of those trains the operator
+      ## to ignore it.
+      ##
+      ## `changes()` counts RESTARTS IN THE WINDOW, so the condition is
+      ## "restarted at least twice in 15 minutes" — the shape of an actual
+      ## CrashLoopBackOff, which restarts every 10-30s. One restart is one
+      ## change and does not fire.
+      ##
+      ## A known property of `changes()` on a counter: a pod being RE-created
+      ## resets the counter to zero, which counts as a change. That is correct
+      ## here — a re-created pod is the failure being described.
+      ## -------------------------------------------------------------------
+      - alert: KubePodCrashLooping
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+          description: >-
+            Container {{ $labels.container }} in pod {{ $labels.namespace }}/{{ $labels.pod }}
+            restarted {{ $value }} times in the last 15 minutes. A single restart
+            does not fire this alert by design; two or more in 15 minutes is the
+            shape of a CrashLoopBackOff, not of a node drain.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          changes(kube_pod_container_status_restarts_total{
+            job="kube-state-metrics", namespace=~"boutique|ci|observability"
+          }[15m]) >= 2
+        for: 5m
+        labels:
+          severity: ticket
+          platform.boutique/component: workload
+          platform.boutique/signal: availability
+
+      ## -------------------------------------------------------------------
+      ## Replica mismatch — a rollout that is stuck, or an HPA that cannot
+      ## schedule. Scoped to this platform's three namespaces: kube-system on a
+      ## k3s node is Traefik's own rollout and is not this platform's problem.
+      ## `for: 15m` because a rolling update legitimately spends 15 minutes
+      ## unavailable-0 while it drains.
+      ## -------------------------------------------------------------------
+      - alert: KubeDeploymentReplicasMismatch
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.deployment }} has unmatched replicas"
+          description: >-
+            Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has
+            {{ $value }} fewer available replicas than its spec for more than
+            15 minutes. That is either a stuck rollout, an unschedulable
+            production HPA, or a ResourceQuota rejecting a new ReplicaSet.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          kube_deployment_spec_replicas{job="kube-state-metrics", namespace=~"boutique|ci|observability"}
+          -
+          kube_deployment_status_replicas_available{job="kube-state-metrics", namespace=~"boutique|ci|observability"}
+          > 0
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: workload
+          platform.boutique/signal: availability
+
+      ## -------------------------------------------------------------------
+      ## Traefik up. This is the single most valuable alert in the file: if
+      ## Traefik is down, every Boutique service is unreachable AND the SLO
+      ## numerator goes to zero, so both SLO pages fire and give no clue why.
+      ##
+      ## Two shapes, `or`-ed together:
+      ##   `up{job="traefik"} == 0`   — the scrape is failing
+      ##   `absent(up{job="traefik"})` — there are no series at all
+      ## The second clause is what catches a ServiceMonitor that was never
+      ## selected (a relabelled release name, a wrong port name) — the classic
+      ## silent-monitoring failure that a plain `up == 0` cannot see, because no
+      ## series means no `up` to be zero.
+      ##
+      ## Job name: observability/servicemonitors/traefik.yaml sets
+      ## `jobLabel: app.kubernetes.io/name` and the traefik-metrics Service
+      ## carries `app.kubernetes.io/name: traefik`, so the job is `traefik`.
+      ## -------------------------------------------------------------------
+      - alert: TargetDown
+        annotations:
+          summary: "Traefik metrics target is down"
+          description: >-
+            Prometheus has no successful scrape of job=traefik for 5 minutes, or
+            no series for that job at all. Every Boutique request flows through
+            Traefik, so this is both an outage and a loss of observability for
+            that outage. If `absent()` fired rather than `up == 0`, the
+            ServiceMonitor is not being selected at all — check that the
+            release label still matches.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          absent(up{job="traefik"})
+          or
+          up{job="traefik"} == 0
+        for: 5m
+        labels:
+          severity: page
+          platform.boutique/component: edge
+          platform.boutique/signal: availability
+
+      ## -------------------------------------------------------------------
+      ## Prometheus remote-write failures.
+      ##
+      ## HONEST STATE: this platform configures NO remote_write. There is no
+      ## second Prometheus to write to and no budget for one on a 4 GiB node
+      ## (SPEC's cost table has no second compute line), so
+      #  `prometheus_remote_storage_samples_total` does not exist in this
+      ## deployment and this alert cannot fire today. It is written now,
+      ## validated now, and it becomes live the moment
+      ## `prometheus.prometheusSpec.additionalRemoteWrite` is set — which is a
+      ## deliberate decision recorded here rather than a gap that was guessed
+      ## at. Do not delete it and claim remote write is monitored.
+      ##
+      ## The ratio form (not the raw failure count) is deliberate: 2 failed
+      ## samples out of 2 total is 100% failure, while 2 out of 40,000 is
+      ## nothing, and a raw counter fires on both.
+      ## -------------------------------------------------------------------
+      - alert: PrometheusRemoteWriteFailures
+        annotations:
+          summary: Prometheus remote write is failing
+          description: >-
+            {{ $value | humanizePercentage }} of samples sent to a configured
+            remote-write endpoint were rejected in the last 15 minutes. This
+            platform has no remote_write configured, so this alert is inert
+            until one is added; see the comment in observability/rules/.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          rate(prometheus_remote_storage_failed_samples_total[15m])
+          /
+          rate(prometheus_remote_storage_samples_total[15m])
+          > 0.1
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: observability
+
+      ## -------------------------------------------------------------------
+      ## Rule evaluation failures — the alert that catches a broken alert.
+      ## Not on the required list, added because the required list has no
+      ## self-check for Prometheus itself. This one IS live today: a recording
+      ## rule that mistakes a label name for a metric produces zero series, and
+      ## the symptom is indistinguishable from "everything is fine".
+      ## -------------------------------------------------------------------
+      - alert: PrometheusRuleEvaluationFailures
+        annotations:
+          summary: Prometheus rule evaluation is failing
+          description: >-
+            {{ $value }} rule evaluations failed in the last 15 minutes. A rule
+            that errors produces no series, so its alert silently never fires.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          increase(prometheus_rule_evaluation_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+          platform.boutique/component: observability
+
+      ## -------------------------------------------------------------------
+      ## Loki — the APPLICATION-scoped half of the log-pipeline alert.
+      ##
+      ## Deliberately NOT the same rule as `LokiRequestErrors` in
+      ## observability/loki/alerts.yaml. That file owns the PLATFORM-scoped
+      ## copy (is Loki itself returning 5xx); this one owns the APP-scoped copy
+      ## (is the Boutique log pipeline still delivering). Same alertname,
+      ## different labels, so Alertmanager treats them as two groups and an
+      ## operator can tell "Loki is broken" from "Boutique stopped logging"
+      ## without opening a dashboard.
+      ##
+      ## `vector(1)` rather than a metric: at Phase 9 Fluent Bit does not exist
+      ## yet (it is Phase 10), so the honest expression is the one that is true
+      ## once it does. The Loki log-count metrics below are the real signal and
+      ## they are Phase 10's.
+      ## -------------------------------------------------------------------
+      - alert: LokiRequestErrors
+        annotations:
+          summary: "Boutique log ingestion is failing (scope: app)"
+          description: >-
+            The Fluent Bit to Loki pipeline for the boutique namespace is
+            returning errors or dropping records. This is the application-scoped
+            half of the Loki alert; observability/loki/alerts.yaml carries the
+            platform-scoped half, which tells you whether Loki itself is the
+            thing returning 5xx.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          sum(rate(log_lines_dropped_total{namespace="boutique"}[10m])) > 0
+          or
+          sum(rate(fluentbit_output_errors_total{namespace="boutique"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: ticket
+          scope: app
+          platform.boutique/component: logs
+
+      ## -------------------------------------------------------------------
+      ## Jenkins build failure.
+      ##
+      ## Metric names verified against the jenkinsci/prometheus-plugin
+      ## documentation (docs/metrics/index.md at master):
+      ##   default_jenkins_builds_last_build_result_ordinal
+      ##     0 = SUCCESS, 1 = UNSTABLE, 2 = FAILURE, 3 = NOT_BUILT, 4 = ABORTED
+      ## The plugin is what observability/servicemonitors/jenkins-exporter.yaml
+      ## scrapes at /prometheus on the Jenkins controller's http port; it is
+      ## NOT installed yet, because the ci/ namespace is Phase 7 work.
+      ##
+      ## Only FAILURE (2) is alerted. UNSTABLE (1) is a test failure, which is
+      ## the pipeline's own gate and not an operations problem; alerting on it
+      ## would fire on every knowingly-failing test branch.
+      ##
+      ## `for: 5m` so a build that fails and is immediately retried (the normal
+      ## Jenkins response to a flaky smoke test) does not page.
+      ## -------------------------------------------------------------------
+      - alert: JenkinsBuildFailed
+        annotations:
+          summary: "Jenkins job {{ $labels.job_name }} last build failed"
+          description: >-
+            The most recent build of Jenkins job {{ $labels.job_name }} ended in
+            FAILURE (result ordinal 2). Unstable builds (1) are not alerted
+            here: a failing test is the pipeline's own gate, not an operations
+            signal.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          max by (job_name) (default_jenkins_builds_last_build_result_ordinal) == 2
+        for: 5m
+        labels:
+          severity: ticket
+          platform.boutique/component: ci
+
+      ## -------------------------------------------------------------------
+      ## Jenkins queue depth — the "agent stall" condition Phase 13's runbook
+      ## names. An ephemeral-agent pipeline that cannot get an agent looks
+      ## identical to a slow build from the outside; this is the metric that
+      ## tells them apart.
+      ## -------------------------------------------------------------------
+      - alert: JenkinsQueueBacklog
+        annotations:
+          summary: Jenkins executor queue is backing up
+          description: >-
+            {{ $value }} queued Jenkins items. The ci namespace's dynamic agents
+            ## cannot be scheduled, so builds are waiting rather than running.
+            On this platform the usual cause is the workload node's CPU
+            ## over-commit (TASKS.md U1), not a Jenkins misconfiguration.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          default_jenkins_executors_queue_length > 5
+        for: 10m
+        labels:
+          severity: ticket
+          platform.boutique/component: ci

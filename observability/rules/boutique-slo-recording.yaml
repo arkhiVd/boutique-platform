@@ -1,0 +1,218 @@
+# Boutique SLI recording rules — numerators, denominators, and burn-rate windows
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; observability/kube-prometheus-stack/templates/
+# platform-rules.yaml wraps it into a PrometheusRule at render time.
+#
+# WHY THE NUMERATOR AND DENOMINATOR ARE SEPARATE SERIES
+# -----------------------------------------------------
+# The error budget is a RATIO, and a ratio cannot be windowed.
+# `rate(errors[5m]) / rate(total[5m])` throws away the information that 4 errors
+# out of 4 requests is a total outage and 4 out of 40,000 is nothing. The SRE
+# Workbook's multiwindow multi-burn-rate alerts need the numerator and the
+# denominator separately so the SAME ratio can be evaluated over 5m, 1h, 30m,
+# 6h, 2h and 3d — six windows, one numerator each.
+#
+# HOW THE LONG WINDOWS ARE COMPUTED
+# ---------------------------------
+# `1 - sum_over_time(sli_good[6h]) / sum_over_time(sli_total[6h])`, where
+# sli_good/sli_total are themselves 5m rates. The 5-minute factor and the
+# leading-edge overlap cancel between numerator and denominator, so this is the
+# exact 6h ratio at a fraction of the cost of a 6h `increase()` per job.
+#
+# THE LONG WINDOWS ARE NOT THE WORKBOOK'S, AND THAT IS DELIBERATE
+# ---------------------------------------------------------------
+# The SRE Workbook's third row uses a 6h short window against a 3d long window.
+# This file uses 2h. The reason is memory: a 6h short window in a burn-rate
+# alert needs `sum_over_time(...[6h])` evaluated at 30s over 13 jobs, and on a
+# 4 GiB node the query buffer is the expensive part. 2h still gives the 3d
+# long-window case a 36:1 short/long ratio, which is the property that matters
+# (a single blip cannot move a 3d window), and it is documented in
+# docs/slo.md as a deviation with its reason.
+#
+# LABELS
+# ------
+# Every series below is labelled {job} only, plus {le} on latency histograms.
+# A `pod` label here would multiply the series by the replica count and make
+# the SLO a statement about one pod; an `instance` label would make it a
+# statement about one scrape. Both are excluded on purpose.
+
+groups:
+  - name: boutique.slo.recording
+    interval: 30s
+
+    rules:
+      ## =================================================================
+      ## AVAILABILITY SLI — from the edge (Traefik)
+      ## =================================================================
+      # Numerator and denominator over the shortest window. Everything longer
+      # is derived from these two, which is why the ratio is never recorded
+      # directly.
+      - record: sli:availability_total:ratio_rate5m
+        expr: |
+          sum by (job) (
+            rate(traefik_service_requests_total{
+              service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+
+      # Numerator: requests that completed with a non-5xx status. 4xx is
+      # excluded from BOTH sides deliberately — a client that asks for a bad
+      # URL did not experience an outage of the service, and counting 4xx would
+      # let a broken script consume the availability budget with zero user
+      # impact. This is the same definition as job:error_ratio:ratio in
+      # boutique-golden-signals.yaml, on purpose: two error definitions in one
+      # platform is how an SLO stops being trusted.
+      - record: sli:availability_good:ratio_rate5m
+        expr: |
+          sum by (job) (
+            rate(traefik_service_requests_total{
+              code!~"5..", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+
+      ## =================================================================
+      ## LATENCY SLI — from the edge (Traefik)
+      ## =================================================================
+      - record: sli:latency_total:ratio_rate5m
+        expr: |
+          sum by (job) (
+            rate(traefik_service_requests_total{
+              service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+
+      # Numerator: requests served in under the latency objective. `le="1.2"`
+      # is NOT a chosen number — it is the finest boundary Traefik's default
+      # histogram buckets can express. Traefik v3.7.13 builds this metric with
+      # `Buckets: buckets` where the default is 0.1, 0.3, 1.2, 5.0
+      # (pkg/observability/metrics/prometheus.go), so "1.2s" really means
+      # "(0.3s, 1.2s]". docs/slo.md records this as a measured limitation with
+      # the Phase 5 fix (metrics.prometheus.buckets).
+      - record: sli:latency_good:ratio_rate5m
+        expr: |
+          sum by (job, le) (
+            rate(traefik_service_request_duration_seconds_bucket{
+              le="1.2", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+
+      ## =================================================================
+      ## BURN-RATE WINDOWS — the numerator/denominator pairs the alerts use
+      ## =================================================================
+      # availability. Six windows: the two per alert, three alerts.
+      - record: job:availability_slo:errors_ratio:ratio_rate5m
+        expr: 1 - (sli:availability_good:ratio_rate5m / sli:availability_total:ratio_rate5m)
+      - record: job:availability_slo:errors_ratio:ratio_rate1h
+        expr: |
+          1 - (
+            sum_over_time(sli:availability_good:ratio_rate5m[1h])
+            /
+            sum_over_time(sli:availability_total:ratio_rate5m[1h])
+          )
+      - record: job:availability_slo:errors_ratio:ratio_rate30m
+        expr: |
+          1 - (
+            sum_over_time(sli:availability_good:ratio_rate5m[30m])
+            /
+            sum_over_time(sli:availability_total:ratio_rate5m[30m])
+          )
+      - record: job:availability_slo:errors_ratio:ratio_rate6h
+        expr: |
+          1 - (
+            sum_over_time(sli:availability_good:ratio_rate5m[6h])
+            /
+            sum_over_time(sli:availability_total:ratio_rate5m[6h])
+          )
+      - record: job:availability_slo:errors_ratio:ratio_rate2h
+        expr: |
+          1 - (
+            sum_over_time(sli:availability_good:ratio_rate5m[2h])
+            /
+            sum_over_time(sli:availability_total:ratio_rate5m[2h])
+          )
+      - record: job:availability_slo:errors_ratio:ratio_rate3d
+        expr: |
+          1 - (
+            sum_over_time(sli:availability_good:ratio_rate5m[3d])
+            /
+            sum_over_time(sli:availability_total:ratio_rate5m[3d])
+          )
+
+      # latency. The `sum by (job)` drops `le` — the latency SLI is a ratio of
+      # two sums over the same bucket boundary, so `le` must be summed away
+      # before the division, not after.
+      - record: job:latency_slo:errors_ratio:ratio_rate5m
+        expr: |
+          1 - (
+            sum by (job) (sli:latency_good:ratio_rate5m)
+            /
+            sum by (job) (sli:latency_total:ratio_rate5m)
+          )
+      - record: job:latency_slo:errors_ratio:ratio_rate1h
+        expr: |
+          1 - (
+            sum by (job) (sum_over_time(sli:latency_good:ratio_rate5m[1h]))
+            /
+            sum by (job) (sum_over_time(sli:latency_total:ratio_rate5m[1h]))
+          )
+      - record: job:latency_slo:errors_ratio:ratio_rate30m
+        expr: |
+          1 - (
+            sum by (job) (sum_over_time(sli:latency_good:ratio_rate5m[30m]))
+            /
+            sum by (job) (sum_over_time(sli:latency_total:ratio_rate5m[30m]))
+          )
+      - record: job:latency_slo:errors_ratio:ratio_rate6h
+        expr: |
+          1 - (
+            sum by (job) (sum_over_time(sli:latency_good:ratio_rate5m[6h]))
+            /
+            sum by (job) (sum_over_time(sli:latency_total:ratio_rate5m[6h]))
+          )
+      - record: job:latency_slo:errors_ratio:ratio_rate2h
+        expr: |
+          1 - (
+            sum by (job) (sum_over_time(sli:latency_good:ratio_rate5m[2h]))
+            /
+            sum by (job) (sum_over_time(sli:latency_total:ratio_rate5m[2h]))
+          )
+      - record: job:latency_slo:errors_ratio:ratio_rate3d
+        expr: |
+          1 - (
+            sum by (job) (sum_over_time(sli:latency_good:ratio_rate5m[3d]))
+            /
+            sum by (job) (sum_over_time(sli:latency_total:ratio_rate5m[3d]))
+          )
+
+      ## =================================================================
+      ## Error-budget fractions an operator actually reads during an incident
+      ## =================================================================
+      # Recorded rather than recomputed in a dashboard: the number an on-call
+      # engineer needs is "how much budget is left", not "what is the ratio".
+      - record: job:availability_error_budget_remaining_ratio
+        expr: |
+          1 - (
+            job:availability_slo:errors_ratio:ratio_rate3d / 0.001
+          )
+      - record: job:latency_error_budget_remaining_ratio
+        expr: |
+          1 - (
+            job:latency_slo:errors_ratio:ratio_rate3d / 0.01
+          )
+
+      ## =================================================================
+      ## Synthetic (external) availability — blackbox_exporter
+      ## =================================================================
+      # A second, independent availability source that does not travel the
+      # Prometheus scrape path at all: a probe from inside the cluster to the
+      # PUBLIC hostname, so it covers the ALB, the Web ACL and DNS. If the
+      # Traefik SLI is healthy and this one is not, the edge is the problem —
+      # which is exactly the failure that no application metric can see.
+      # `probe_success` is a GAUGE, not a counter, so `avg_over_time` is the
+      # correct windowing and `rate()` would be wrong.
+      - record: synthetic:availability_ratio_rate5m
+        expr: |
+          avg_over_time(probe_success{job="blackbox-exporter"}[5m])
+        labels:
+          job: frontend
+          scope: external

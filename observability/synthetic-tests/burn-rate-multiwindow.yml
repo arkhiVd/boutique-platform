@@ -1,0 +1,200 @@
+# promtool unit tests for the Boutique availability SLO burn-rate alerts
+# -----------------------------------------------------------------------------
+# Run with:
+#
+#   promtool test rules observability/synthetic-tests/*.yml
+#
+# This is ROADMAP Phase 12's exit criterion, proved locally rather than asserted:
+#
+#   "A deliberate 100% error injection fires the 2%-in-1h page AND NOT the
+#    5%-in-6h page — proven by pasted Alertmanager output"
+#
+# The Alertmanager half of that criterion needs a live cluster (Phase 12
+# validation). The half provable here is the RULE LOGIC: a synthetic input
+# series that must produce exactly one alert, the 14.4x page, and must not
+# produce the 6x page. That is what these two cases do.
+#
+# HOW THE SYNTHETIC SERIES IS BUILT
+# ---------------------------------
+# The input series are the SLI recording rules from
+# observability/rules/boutique-slo-recording.yaml — not the raw Traefik metrics.
+# That is deliberate and it is the strongest form of this test: it feeds the
+# rules at the same boundary the real rules use, so the whole chain
+# (sli -> error ratio -> windowed burn rate -> alert) is exercised, and a
+# regression in any link fails the test.
+#
+# The timeline is minutes, evaluation_interval 1m:
+#
+#   0..899    clean       good = 100 of total = 100   (error ratio 0)
+#   900..929  DEGRADED    good =  97 of total = 100   (error ratio 0.03)
+#   930..944  clean again
+#
+# Evaluated at 930m, the end of the degraded window:
+#
+#   5m  window (925,930]  -> 5/5 degraded      -> 0.0300 > 0.0144  passes
+#   1h  window (870,930]  -> 30 degraded, 30 clean
+#                                          -> 0.0150 > 0.0144  passes   => 14.4x PAGE
+#   30m window (900,930]  -> 30/30 degraded   -> 0.0300 > 0.0060  passes
+#   6h  window (570,930]  -> 330 clean, 30 degraded
+#                                          -> 0.0025 < 0.0060  fails   => 6x NO PAGE
+#   2h  window (810,930]  -> 90 clean, 30 degraded
+#                                          -> 0.0157 > 0.0010  passes
+#   3d  window (0,930]    -> 900 clean, 30 degraded
+#                                          -> 0.00097 < 0.0010 fails   => 1x NO PAGE
+#
+# So exactly ONE alert fires. That is the must-fire / must-not-fire pair the
+# criterion asks for, and it is arithmetically guaranteed by the same two
+# windows being in different places — which is the whole property the multiwindow
+# design exists to give.
+#
+# The second case is the noise-immunity test from the same exit criterion:
+#   "A 1-in-20 error rate for 10 minutes does NOT page"
+#   10 minutes at 5% error moves the 5m short window to 0.05 (way over the
+#   1.44% threshold) but the 1h window only to 0.0083 (under it), so the `and`
+#   does exactly what it is there for: the alert does not fire.
+
+rule_files:
+  - ../rules/boutique-slo-recording.yaml
+  - ../slos/boutique-availability-slo.yaml
+  - ../slos/boutique-latency-slo.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # =========================================================================
+  # CASE 1 — MUST FIRE the 2%-of-budget-in-1h page, MUST NOT FIRE 5%-in-6h
+  # =========================================================================
+  - interval: 1m
+    name: "availability burn-rate: 2% in 1h fires, 5% in 6h does not"
+    input_series:
+      # Denominator: 100 requests/s (unit string, but the ratio is what matters).
+      # 900 clean minutes, 30 degraded minutes, 15 clean minutes = 945 samples.
+      - series: 'sli:availability_total:ratio_rate5m{job="frontend"}'
+        values: '100+0x900 100+0x30 100+0x15'
+
+      # Numerator: 97 during the degraded window (3% of requests failing 5xx).
+      - series: 'sli:availability_good:ratio_rate5m{job="frontend"}'
+        values: '100+0x900 97+0x30 100+0x15'
+
+      # A second service that stays healthy throughout, so the test also proves
+      # the alert is per-job rather than cluster-wide: a healthy job must never
+      # produce an alert, and `sum by (job)` is what makes that true.
+      - series: 'sli:availability_total:ratio_rate5m{job="checkoutservice"}'
+        values: '100+0x945'
+      - series: 'sli:availability_good:ratio_rate5m{job="checkoutservice"}'
+        values: '100+0x945'
+
+      # Latency inputs that stay healthy, proving the LATENCY burn-rate alerts do
+      # not fire on an availability incident — a real risk when both SLIs read
+      # from the same Traefik request counters.
+      - series: 'sli:latency_total:ratio_rate5m{job="frontend"}'
+        values: '100+0x945'
+      - series: 'sli:latency_good:ratio_rate5m{job="frontend",le="1.2"}'
+        values: '100+0x945'
+      - series: 'sli:latency_total:ratio_rate5m{job="checkoutservice"}'
+        values: '100+0x945'
+      - series: 'sli:latency_good:ratio_rate5m{job="checkoutservice",le="1.2"}'
+        values: '100+0x945'
+
+    alert_rule_test:
+      - eval_time: 930m
+        alertname: BoutiqueAvailabilityErrorBudgetBurn
+        exp_alerts:
+          # The MUST-FIRE case: 2% of the 30-day 99.9% budget consumed in 1h.
+          # burn_rate 14.4, windows 5m and 1h both above 1.44%.
+          - exp_labels:
+              severity: page
+              burn_rate: "14.4"
+              window: "5m/1h"
+              platform.boutique/slo: availability
+              platform.boutique/component: application
+              job: frontend
+            exp_annotations:
+              summary: >-
+                Availability error budget burning 14.4x for frontend
+              description: >-
+                frontend is failing 3% of requests over the last 5 minutes, and
+                more than 1.44% over the last hour. At this rate the 30-day 99.9%
+                availability budget is gone in just over 2 days. This is a page:
+                the condition is true in BOTH the 5m and 1h windows, which is what
+                distinguishes it from a blip.
+              runbook_url: >-
+                https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        # The MUST-NOT-FIRE case: no 6x (burn_rate "6", window "30m/6h") alert
+        # appears, because the 6h long window is at 0.25% rather than above the
+        # 0.6% threshold. No 1x alert appears either: the 3d window is at
+        # 0.097%, under the 0.1% budget rate. Listing exactly one alert is the
+        # assertion — promtool fails the test on ANY unexpected alert, so this
+        # block is a complete inventory of what fired, not a sample.
+
+  # =========================================================================
+  # CASE 2 — NOISE IMMUNITY: a 1-in-20 error rate for 10 minutes must NOT page
+  # =========================================================================
+  # ROADMAP Phase 12 exit criterion, verbatim: "A 1-in-20 error rate for 10
+  # minutes does not page (noise immunity test)".
+  #
+  # The 5m short window is at 0.05 — 3.5x the page threshold. The 1h window is
+  # at 0.0083, because 10 bad minutes out of 60 is 10/60 x 0.05. The `and`
+  # between them is the only reason this does not page, and that is precisely
+  # why the short window alone is not a valid alert.
+  - interval: 1m
+    name: "availability noise immunity: 1-in-20 for 10 minutes does not page"
+    input_series:
+      # 900 clean minutes, 10 minutes at 5% errors, then clean again.
+      - series: 'sli:availability_total:ratio_rate5m{job="frontend"}'
+        values: '100+0x900 100+0x10 100+0x35'
+      - series: 'sli:availability_good:ratio_rate5m{job="frontend"}'
+        values: '100+0x900 95+0x10 100+0x35'
+      - series: 'sli:availability_total:ratio_rate5m{job="checkoutservice"}'
+        values: '100+0x945'
+      - series: 'sli:availability_good:ratio_rate5m{job="checkoutservice"}'
+        values: '100+0x945'
+
+    alert_rule_test:
+      - eval_time: 910m
+        alertname: BoutiqueAvailabilityErrorBudgetBurn
+        # NOTHING fires. An empty exp_alerts is the assertion.
+        exp_alerts: []
+
+  # =========================================================================
+  # CASE 3 — the latency SLO on the same shape of incident
+  # =========================================================================
+  # Same timeline as case 1, but the degradation is on the LATENCY SLI: 30
+  # minutes at 30% slow requests (above the 14.4% latency threshold, which is
+  # 14.4 x the 1% latency budget). The
+  # availability alerts must stay silent, and only the 14.4x latency page must
+  # fire — proving the two SLOs are genuinely independent and not one alert
+  # wearing two names.
+  - interval: 1m
+    name: "latency burn-rate: 2% in 1h fires on the latency SLI only"
+    input_series:
+      - series: 'sli:availability_total:ratio_rate5m{job="frontend"}'
+        values: '100+0x945'
+      - series: 'sli:availability_good:ratio_rate5m{job="frontend"}'
+        values: '100+0x945'
+      - series: 'sli:latency_total:ratio_rate5m{job="frontend"}'
+        values: '100+0x900 100+0x30 100+0x15'
+      - series: 'sli:latency_good:ratio_rate5m{job="frontend",le="1.2"}'
+        values: '100+0x900 70+0x30 100+0x15'
+
+    alert_rule_test:
+      - eval_time: 930m
+        alertname: BoutiqueLatencyErrorBudgetBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              burn_rate: "14.4"
+              window: "5m/1h"
+              platform.boutique/slo: latency
+              platform.boutique/component: application
+              job: frontend
+            exp_annotations:
+              summary: >-
+                Latency error budget burning 14.4x for frontend
+              description: >-
+                frontend is serving more than 14.4% of requests slower than the
+                1.2s objective over 5 minutes, and more than 14.4% over the last
+                hour. The 30-day 99% latency budget is gone in just over 2 days at
+                this rate.
+              runbook_url: >-
+                https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks

@@ -1,0 +1,95 @@
+# Boutique latency SLO — multiwindow multi-burn-rate alerts
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; the kube-prometheus-stack chart wraps it into a
+# PrometheusRule at render time (templates/platform-rules.yaml).
+#
+# Same three conditions and the same source as the availability SLO:
+# Google SRE Workbook, Chapter 5, Table 5.2 —
+# https://sre.google/workbook/alerting-on-slos/
+#
+# What changes is the budget. The availability SLO is 99.9% (budget 0.1%), so
+# its thresholds are 14.4 x 0.001 = 1.44%, 6 x 0.001 = 0.6%, 1 x 0.001 = 0.1%.
+# The latency SLO is 99% of requests under the objective (budget 1%), so its
+# thresholds are ten times larger: 14.4%, 6%, 1%.
+#
+# That difference is deliberate and it is the part a reviewer should check: a
+# latency SLO with the same numeric threshold as an availability SLO would page
+# ten times as often for a budget ten times bigger, which is exactly the
+# "alerting that cries wolf" ROADMAP Phase 12 exists to avoid.
+
+groups:
+  - name: boutique.slo.latency.alerts
+    interval: 30s
+
+    rules:
+      ## --- 2% of the 30-day budget consumed in 1 hour -> PAGE -----------------
+      # burn rate 14.4 x the 99% latency budget (0.01) = 14.4% slow requests.
+      - alert: BoutiqueLatencyErrorBudgetBurn
+        annotations:
+          summary: >-
+            Latency error budget burning 14.4x for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} is serving more than 14.4% of requests slower than
+            the 1.2s objective over 5 minutes, and more than 14.4% over the last
+            hour. The 30-day 99% latency budget is gone in just over 2 days at
+            this rate.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:latency_slo:errors_ratio:ratio_rate5m > (14.4 * 0.01)
+            and
+            job:latency_slo:errors_ratio:ratio_rate1h > (14.4 * 0.01)
+          )
+        labels:
+          severity: page
+          burn_rate: "14.4"
+          window: "5m/1h"
+          platform.boutique/slo: latency
+          platform.boutique/component: application
+
+      ## --- 5% of the 30-day budget consumed in 6 hours -> PAGE ----------------
+      - alert: BoutiqueLatencyErrorBudgetBurn
+        annotations:
+          summary: >-
+            Latency error budget burning 6x for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} is serving more than 6% of requests slower than the
+            1.2s objective over 30 minutes, and more than 6% over 6 hours. The
+            30-day 99% budget is consumed in ~5 days at this rate.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:latency_slo:errors_ratio:ratio_rate30m > (6 * 0.01)
+            and
+            job:latency_slo:errors_ratio:ratio_rate6h > (6 * 0.01)
+          )
+        labels:
+          severity: page
+          burn_rate: "6"
+          window: "30m/6h"
+          platform.boutique/slo: latency
+          platform.boutique/component: application
+
+      ## --- 10% of the 30-day budget consumed in 3 days -> TICKET ---------------
+      - alert: BoutiqueLatencyErrorBudgetBurn
+        annotations:
+          summary: >-
+            Latency error budget fully consumed for {{ $labels.job }}
+          description: >-
+            {{ $labels.job }} has served more than 1% of requests slower than the
+            1.2s objective for the entire 3-day window. The 30-day 99% latency
+            budget is on pace to be fully consumed; under docs/slo.md this is the
+            stop-shipping condition.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          (
+            job:latency_slo:errors_ratio:ratio_rate2h > (1 * 0.01)
+            and
+            job:latency_slo:errors_ratio:ratio_rate3d > (1 * 0.01)
+          )
+        labels:
+          severity: ticket
+          burn_rate: "1"
+          window: "2h/3d"
+          platform.boutique/slo: latency
+          platform.boutique/component: application

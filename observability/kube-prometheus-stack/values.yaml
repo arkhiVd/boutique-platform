@@ -1,0 +1,530 @@
+# kube-prometheus-stack — values for ONE t3.medium (4 GiB RAM, 2 vCPU)
+# -----------------------------------------------------------------------------
+# This file is the sizing contract for the metrics tier. Every override carries
+# the reason it is not the upstream default, because the upstream defaults assume
+# a node with 16 GiB and a separate Prometheus node.
+#
+# WHY EVERYTHING IS NESTED ONE LEVEL DEEP: this is a WRAPPER chart whose single
+# dependency is the upstream `kube-prometheus-stack`. Helm scopes a parent
+# chart's values by the dependency's NAME, so a `prometheus:` key at the root of
+# this file would be silently ignored and the chart would install with every
+# upstream default — which is the exact failure this file exists to prevent.
+# Everything therefore lives under `kube-prometheus-stack:`.
+#
+# The number everything is sized against:
+#
+#   node allocatable after kubelet reservations on a 4 GiB / 2 vCPU box is
+#   ~3.63 GiB and ~1.94 vCPU (255Mi system-reserved for memory under 4 GiB, plus
+#   ~100Mi eviction threshold, plus kube-reserved CPU).
+#
+#   `scripts/resource-budget.py` sums the RENDERED manifests and prints that
+#   comparison; scripts/check.sh runs it, so these numbers are proved rather than
+#   asserted. The same figure appears on the cost + node-capacity dashboard.
+#
+# Install name is deliberate: the Prometheus Operator's selectors default to
+# `{release: <helm release>}`, so every standalone PrometheusRule / ServiceMonitor
+# in observability/rules/, observability/slos/ and observability/servicemonitors/
+# carries `release: kube-prometheus-stack` to match this release name. Renaming
+# the release means relabelling those resources.
+
+kube-prometheus-stack:
+  nameOverride: ""
+  fullnameOverride: ""
+
+  ## ---------------------------------------------------------------------------
+  ## Release name for the Operator's label selectors. Not a chart value; documented
+  ## here so the release name is not guessed at deploy time.
+  ## ---------------------------------------------------------------------------
+
+  ## The CRDs are installed by this release. `crds.enabled: false` would leave the
+  ## cluster unable to accept a single PrometheusRule, so it stays on. The CRD job
+  ## runs once as a Helm hook, costs ~10m/16Mi for its lifetime, and is included in
+  ## the budget script's totals.
+  crds:
+    enabled: true
+
+  ## ---------------------------------------------------------------------------
+  ## Controller (prometheus-operator)
+  ## ---------------------------------------------------------------------------
+  prometheusOperator:
+    ## The webhooks validate PrometheusRule and ServiceMonitor objects at admission.
+    ## They stay enabled: a rule that fails validation at apply time is a page that
+    ## silently never fires, which is the single most expensive observability bug.
+    ##
+    ## PSA implication, stated because it is a real trap: the admission webhook
+    ## Configurations are cluster-scoped and the operator runs a temporary Job in
+    ## THIS namespace (`observability`) named
+    ## `<release>-admission-patch` / `<release>-admission-create`. If `observability`
+    ## ever gets `pod-security.kubernetes.io/enforce: restricted` (the label the
+    ## boutique namespace carries), those Jobs must satisfy `restricted` or the
+    ## chart's own install fails. The Jobs already set runAsNonRoot, drop ALL and
+    ## seccompProfile RuntimeDefault, but they also request >100Mi memory, so a
+    ## `restricted` namespace with a tighter LimitRange would reject them.
+    ## `observability` is therefore labelled PSA `baseline`, not `restricted`, and
+    ## the reason is written here rather than discovered at install time.
+    admissionWebhooks:
+      enabled: true
+      ## A `Fail` policy is the point of the webhook: a `Ignore` policy would let an
+      ## invalid rule through whenever the operator is briefly unavailable.
+      failurePolicy: Fail
+
+    resources:
+      requests:
+        cpu: 20m
+        memory: 96Mi
+      limits:
+        cpu: 200m
+        memory: 192Mi
+
+    ## The operator watches 4 namespaces of custom resources; it does not need full
+    ## cluster-admin and the chart's default ClusterRole already narrows itself.
+    ## Unchanged from upstream on purpose — a narrower edit is a Phase 4 RBAC task.
+    ##
+    ## config-reloader sidecar, injected by the operator into BOTH the Prometheus
+    ## and the Alertmanager pod. Not a default anyone reads, and the operator's
+    ## built-in default is `requests: {cpu: 100m, memory: 25Mi}` per pod — two
+    ## pods on a 2 vCPU node means 200m and 50Mi reserved just to re-read a
+    ## config file that changes on a Helm upgrade. The reloader is
+    ## `curl -X POST /-/reload` in a loop: 10m and 16Mi is an order of magnitude
+    ## more than it needs.
+    ##
+    ## The chart renders this into the OPERATOR'S OWN command-line flags
+    ## (`--config-reloader-cpu-request=...`), not into the Prometheus custom
+    ## resource, so it is invisible in `helm template` output. That is exactly why
+    ## scripts/resource-budget.py takes the config-reloader numbers as an explicit
+    ## CLI option rather than trying to discover them from a render.
+    prometheusConfigReloader:
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+  ## ---------------------------------------------------------------------------
+  ## Prometheus itself
+  ## ---------------------------------------------------------------------------
+  prometheus:
+    enabled: true
+
+    prometheusSpec:
+      ## ONE replica. A second replica of the same rule evaluation and the same
+      ## scrape interval doubles the TSDB write rate, the CPU and the memory for a
+      ## node that has none of it to spare. Prometheus HA is a two-instance
+      ## out-of-scope problem; SPEC.md lists it nowhere.
+      replicas: 1
+
+      ## 7 days. ROADMAP Phase 12's burn-rate windows top out at 3 days, so 7d gives
+      ## two full long windows of history for postmortems — the SRE Workbook's own
+      ## postmortem trigger needs at least one complete window of data. 14d would
+      ## double the gp3 volume and buy no extra window.
+      retention: 7d
+
+      ## Hard ceiling on TSDB size, and the guard against a cardinality accident
+      ## rather than the routine bound. The arithmetic, using the ~10k active-series
+      ## bound documented in the cardinality note below:
+      ##   10,000 series x 7d x 2,880 samples/day = 201.6M samples
+      ##   201.6M x ~2 bytes on disk = ~400 MB of blocks, plus the 2x 2h WAL
+      ##   segments before checkpointing = ~1.6 GiB max.
+      ## So `retention: 7d` binds first, and `retentionSize` only fires if series
+      ## count goes somewhere unexpected. 7GB is deliberately larger than the routine
+      ## 7d footprint and smaller than the 8Gi PVC, which is what makes it a guard.
+      retentionSize: 7GB
+
+      ## 30s, not the 15s upstream default. Every alert window in observability/slos/
+      ## is 5m or longer, so 15s produces samples nobody reads while doubling the
+      ## TSDB write rate and the rule evaluation cost on a 2 vCPU node. 30s still
+      ## gives 10 samples inside the shortest (5m) short window, which is what the
+      ## `and`-ed burn-rate conditions need to be stable rather than jittery.
+      scrapeInterval: 30s
+      evaluationInterval: 30s
+
+      ## Must be below scrapeInterval. 10s leaves a 20s margin so a slow target can
+      ## time out without starving the next scrape of the same target.
+      scrapeTimeout: 10s
+
+      ## --- resources -----------------------------------------------------------
+      ## Sized against the measured ~10k active series, not against a guess:
+      ##   kube-state-metrics ~1.5k series
+      ##   node-exporter     ~0.8k x 4 nodes = 3.2k
+      ##   cAdvisor/kubelet  ~0.4k x 13 pods  = 5.2k
+      ##   traefik           ~0.2k
+      ##   spanmetrics       13 services x ~20 = 0.26k  (Phase 11)
+      ##   blackbox/jenkins  ~0.1k
+      ## Prometheus v3 keeps the head mmap'd, so series cost is ~2-4 KiB of heap
+      ## rather than the ~16 KiB of the pre-v3 head, and query memory is the
+      ## dominant term: one instant query over a 5m rate() window on 5k series
+      ## buffers ~5k x 10 samples x 16 B. 384Mi requests / 768Mi limits leaves room
+      ## for the SLO recording rules, which are the heaviest queries in this file.
+      resources:
+        requests:
+          cpu: 200m
+          memory: 384Mi
+        limits:
+          cpu: "1"
+          memory: 768Mi
+
+      ## gp3 PVC, not emptyDir: SPEC.md commits observability state (Prometheus TSDB,
+      ## Loki, Tempo) to gp3 with snapshot/restore runbooks. 8Gi is headroom over
+      ## the ~1.6Gi a 7d retention needs, so an operator never has to resize a
+      ## volume to survive one bad week.
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 8Gi
+
+      ## The Operator's default selector is `{release: kube-prometheus-stack}` because
+      ## ruleSelectorNilUsesHelmValues / serviceMonitorSelectorNilUsesHelmValues
+      ## default to true. Left at that, with the label applied to every standalone
+      ## rule and ServiceMonitor in this repo, rather than widened to `matchNames: []`
+      ## which would make THIS cluster scrape anything any bad chart drops.
+      ruleSelector: {}
+      ruleNamespaceSelector: {}
+      serviceMonitorSelector: {}
+      serviceMonitorNamespaceSelector: {}
+
+      ## The 11 Boutique services have no /metrics endpoint — verified across the
+      ## vendored upstream tree at v0.10.7: no Prometheus instrumentation exists in
+      ## any src/. Golden signals therefore come from Traefik's per-service metrics
+      ## and from the OTel spanmetrics connector (Phase 11). No scrape config that
+      ## invents a Boutique /metrics target is present, and none should be added.
+
+      ## Cardinality controls. These three are the difference between a 4 GiB node
+      ## that survives and one that is OOM-killed at 03:00 by a label nobody
+      ## expected. Each is a hard cap enforced by the scraper, so a mislabelled
+      ## metric is dropped rather than admitted.
+      sampleLimit: 10000
+      targetLimit: 100
+      labelLimit: 30
+      labelNameLengthLimit: 200
+      labelValueLengthLimit: 200
+      keepDroppedTargets: 100
+
+    ## A PodDisruptionBudget so a node drain does not take Prometheus out with it.
+    ## With a single replica this is inert, but it becomes correct the day HA is
+    ## built, and it is free.
+    ## (Left at the chart default of `enabled: true, maxUnavailable: 1`.)
+
+  ## ---------------------------------------------------------------------------
+  ## Alertmanager
+  ## ---------------------------------------------------------------------------
+  alertmanager:
+    enabled: true
+
+    alertmanagerSpec:
+      replicas: 1
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      ## Silences and notification-log state survive a restart, which is the only
+      ## reason a 1Gi claim is here at all. On a 4 GiB node an emptyDir would be
+      ## fine for a homelab, but SPEC.md commits observability state to gp3 and a
+      ## lost silence file during an incident is the wrong time to learn that.
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+
+    ## The route tree ROADMAP Phase 12 requires: `page` goes to SNS and KEEPS
+    ## MATCHING (continue: true) so a `ticket` alert can also be filed for the same
+    ## incident; `ticket` alone stops at its receiver.
+    ##
+    ## Two decisions that are not defaults:
+    ##   1. `default` is an integration-free receiver. That is a real Alertmanager
+    ##      configuration (the same shape as this chart's own `null` receiver), and
+    ##      it means every alert that is neither page nor ticket is visible in
+    ##      Alertmanager and appears in `amtool alert query` without paging anyone.
+    ##      That is the correct behaviour for a single operator: the platform has
+    ##      20+ rules and exactly two of them are worth waking up for.
+    ##   2. Watchdog has `severity: none` upstream, so it lands on `default` and is
+    ##      never routed to a pager. That is the intended use of a watchdog.
+    config:
+      global:
+        resolve_timeout: 5m
+      inhibit_rules:
+        ## Guard against the same incident page twice. `severity: page` mutes any
+        ## `ticket`-severity alert from the same alertname in the same namespace.
+        - source_matchers:
+            - 'severity = page'
+          target_matchers:
+            - 'severity = ticket'
+          equal:
+            - 'alertname'
+            - 'namespace'
+        ## A critical alert mutes its own warning siblings. Upstream's default
+        ## inhibit rules only fire on `severity = critical`; this platform's
+        ## severities are `page` and `ticket`, so the page rule is the one that
+        ## matters and the ticket rule is the specific one that must not fire twice.
+        - source_matchers:
+            - 'severity = page'
+          target_matchers:
+            - 'severity = ticket'
+          equal:
+            - 'namespace'
+      route:
+        receiver: default
+        group_by: ['namespace', 'alertname']
+        ## 30s first notification: on a one-node cluster every failure looks the
+        ## same, so grouping by alertname first means a single KubePodCrashLooping
+        ## page rather than 11 pages as the crash cascades.
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        routes:
+          - matchers:
+              - 'severity="page"'
+            receiver: sns-page
+            continue: true
+          - matchers:
+              - 'severity="ticket"'
+            receiver: sns-ticket
+      receivers:
+        - name: default
+        ## The SNS topic ARNs below are a PLATFORM CONTRACT, not a value read from
+        ## a live account: bootstrap/ Phase 1 owns these topics and it does not
+        ## exist yet (see TASKS.md). They are not secrets — an ARN is an
+        ## identifier — but they ARE unverified, so the contract is stated where a
+        ## reviewer will see it: Phase 1 must create `boutique-platform-page` and
+        ## `boutique-platform-ticket` in 348032171026/us-east-1, or override
+        ## `alertmanager.sns.pageTopicArn` / `.ticketTopicArn` at deploy time.
+        ##
+        ## SigV4 uses the nodes' shared instance profile (SPEC "least privilege"),
+        ## so NO AWS credential is placed in this repo, in values.yaml, or in a
+        ## Secret. That is the whole reason SNS is the chosen destination.
+        - name: sns-page
+          sns_configs:
+            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-page
+              sigv4:
+                region: us-east-1
+              ## Page alerts are the ones that wake someone up, so they carry the
+              ## runbook URL rather than the default template.
+              send_resolved: true
+              attributes:
+                severity: page
+        - name: sns-ticket
+          sns_configs:
+            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-ticket
+              sigv4:
+                region: us-east-1
+              send_resolved: true
+              attributes:
+                severity: ticket
+
+  ## ---------------------------------------------------------------------------
+  ## kube-state-metrics
+  ## ---------------------------------------------------------------------------
+  ## NOTE ON THE KEY NAME: the subchart is addressed as `kube-state-metrics`
+## (kebab-case) in the parent values, NOT as `kubeStateMetrics`. The
+  ## `kubeStateMetrics:` key only carries `enabled:` — the condition Helm uses
+  ## to decide whether to render the subchart at all. Setting resources under
+  ## `kubeStateMetrics.resources` is silently ignored, and that is the exact
+  ## class of bug this comment exists to prevent.
+  kubeStateMetrics:
+    enabled: true
+
+  kube-state-metrics:
+    ## One replica. KSM is the source of KubePodCrashLooping and
+    ## KubeDeploymentReplicasMismatch — the two alerts that catch a broken rollout
+    ## before anyone looks at a dashboard — and a second replica doubles ~1.5k
+    ## series for statistics the replicas would compute identically.
+    replicas: 1
+    ## 64Mi request against ~1.5k series: the operator's own sizing docs quote
+    ## ~64Mi for a 1000-pod cluster, which is an order of magnitude more pods than
+    ## the 13 workloads plus 3 namespaces this platform has.
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    prometheus:
+      monitor:
+        enabled: true
+        interval: 30s
+
+  ## ---------------------------------------------------------------------------
+  ## node-exporter
+  ## ---------------------------------------------------------------------------
+  ## Same kebab-case note: the subchart values live under
+  ## `prometheus-node-exporter`, and `nodeExporter:` only holds `enabled:` plus
+  ## the per-OS conditions.
+  nodeExporter:
+    enabled: true
+    ## Only linux. The SPEC's cluster is linux-only k3s; aix and darwin would add
+    ## DaemonSet pods that can never schedule.
+    operatingSystems:
+      linux:
+        enabled: true
+      aix:
+        enabled: false
+      darwin:
+        enabled: false
+
+  prometheus-node-exporter:
+    ## These numbers happen once per node: on the SPEC's 4-node shape that is
+    ## 4 x 16Mi = 64Mi reserved and 4 x 20m = 80m of CPU. That is why the request
+    ## is at the chart's floor rather than at a comfortable-looking number.
+    resources:
+      requests:
+        cpu: 20m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+    ## The subchart already creates a ServiceMonitor for its own /metrics
+    ## endpoint. A second one would scrape the same exporter twice and double
+    ## every node sample in the TSDB, so it stays disabled — the ServiceMonitor
+    ## rendered by the parent chart (`<release>-prometheus-node-exporter`) is the
+    ## single target.
+    prometheus:
+      monitor:
+        enabled: false
+
+  ## ---------------------------------------------------------------------------
+  ## Grafana
+  ## ---------------------------------------------------------------------------
+  grafana:
+    enabled: true
+
+    ## The admin password is NEVER a value in this repo. The chart reads it from a
+    ## Secret created out of band; `scripts/` owns that step and the Secret is
+    ## gitignored by pattern (`kubeconfig*` and `*.key` cover the obvious mistakes,
+    ## `gitleaks` covers the rest).
+    adminUser: admin
+    admin:
+      existingSecret: grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 96Mi
+      limits:
+        cpu: 300m
+        memory: 192Mi
+    ## The dashboard ConfigMaps in observability/dashboards/ are provisioned by the
+    ## sidecar below, so Grafana needs to keep them across a restart. 2Gi is
+    ## generous for 4 dashboards plus the 20 kube-prometheus-stack default
+    ## dashboards; it is the smallest gp3 claim that does not need resizing.
+    persistence:
+      enabled: true
+      type: pvc
+      storageClassName: gp3
+      accessModes: ["ReadWriteOnce"]
+      size: 2Gi
+      finalizers:
+        - kubernetes.io/pvc-protection
+    sidecar:
+      dashboards:
+        ## Auto-load from ConfigMaps labelled `grafana_dashboard: "1"`. This is the
+        ## mechanism the four dashboards in observability/dashboards/ rely on.
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        ## ALL namespaces, not just `observability`: a dashboard for a platform
+        ## component may legitimately live beside that component, and the sidecar
+        ## is the cheapest possible reaction to that.
+        searchNamespace: ALL
+        ## The sidecar writes the provider file and takes no further action; a UI
+        ## change to a provisioned dashboard is lost on the next restart, which is
+        ## exactly what "provisioned" should mean.
+        provider:
+          allowUiUpdates: false
+      datasources:
+        ## Prometheus and Loki datasources are provisioned from the chart's own
+        ## ConfigMap; the Loki URL is the SingleBinary gateway Service.
+        enabled: true
+      resources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+
+    ## The 20 kube-prometheus-stack default dashboards cost no extra memory — they
+    ## are ConfigMaps the sidecar reads — and they are the fastest way to answer
+    ## "is the node or the app the problem". They stay on.
+    defaultDashboardsEnabled: true
+    ## Non-editable and UTC: a dashboard an on-call engineer edits during an
+    ## incident is a dashboard that is wrong for the next one.
+    defaultDashboardsEditable: false
+    defaultDashboardsTimezone: utc
+
+    ## Grafana is reachable through Traefik's `grafana` host route (Phase 5), so no
+    ## Ingress object is created here — two entry points for one UI is one more TLS
+    ## certificate and one more WAF rule to get wrong.
+    ingress:
+      enabled: false
+
+    ## Prometheus and Loki are the two datasources the dashboards in
+    ## observability/dashboards/ query. `prometheus` is provisioned by the chart;
+    ## Loki is added because Phase 10's dashboards need it and Grafana's default
+    ## datasource is otherwise absent a second data source.
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki-gateway.observability.svc.cluster.local:80
+        isDefault: false
+        jsonData:
+          maxLines: 1000
+
+  ## ---------------------------------------------------------------------------
+  ## Default rules
+  ## ---------------------------------------------------------------------------
+  defaultRules:
+    create: true
+    rules:
+      alertmanager: true
+      etcd: true
+      configReloaders: true
+      general: true
+      k8sContainerCpuUsageSecondsTotal: true
+      k8sContainerMemoryCache: true
+      k8sContainerMemoryRss: true
+      k8sContainerMemorySwap: true
+      k8sContainerResource: true
+      k8sContainerMemoryWorkingSetBytes: true
+      k8sPodOwner: true
+      kubeApiserverAvailability: true
+      kubeApiserverBurnrate: true
+      kubeApiserverHistogram: true
+      kubeApiserverSlos: true
+      kubeControllerManager: true
+      kubelet: true
+      kubeProxy: true
+      kubePrometheusGeneral: true
+      kubePrometheusNodeRecording: true
+      kubernetesApps: true
+      kubernetesResources: true
+      kubernetesStorage: true
+      kubernetesSystem: true
+      kubeSchedulerAlerting: true
+      kubeSchedulerRecording: true
+      kubeStateMetrics: true
+      network: true
+      node: true
+      nodeExporterAlerting: true
+      nodeExporterRecording: true
+      prometheus: true
+      prometheusOperator: true
+      windows: false
+    runbookUrl: "https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks"
+    appNamespacesOperator: "=~"
+    appNamespacesTarget: "boutique|ci|observability"
