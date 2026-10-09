@@ -7,25 +7,28 @@
 
 ## ▶ Where we are
 
-**Phase 2 is built and planned; Phase 3 is being built on this branch.** `bootstrap/` (state
-bucket, split OIDC plan/apply roles, $30 Budget, alert SNS topic) and `platform/` (VPC, three
-public subnets in three AZs, IGW, four security groups, node instance profile, S3 backend with
-native `use_lockfile` locking) both plan clean, both scan clean, and neither has been applied —
-the apply is Aravind's gate, and the state bucket the platform stack stores state in does not
-exist until that one-time bootstrap apply runs. The application manifest layer (Phase 6) and the
-observability layer (Phases 9, 10, 12) are also built and validated by render, with no cluster to
-deploy them into.
+**Phase 3 and 4 are built and planned; nothing is applied.** On `feat/cluster`, the `platform/`
+stack now carries the cluster itself — 4 EC2 instances behind 2 launch templates, one KMS CMK,
+the k3s join token written write-only into SSM, and cloud-init that installs k3s v1.36.5+k3s1
+using nothing but an IMDS token, an instance role, and an AZ to elect a leader. Phase 4 adds the
+etcd snapshot bucket and its systemd timer, the RBAC, the PDB/NetworkPolicy/ResourceQuota/
+LimitRange baseline, and a restore drill that refuses to touch the live cluster. The apply is still
+Aravind's gate, and the state bucket the platform stack stores state in does not exist until that
+one-time bootstrap apply runs.
 
-**What the two Wave-A plans say, exactly:**
+**What the three plans say, exactly:**
 
 ```
 terraform -chdir=bootstrap plan      Plan: 14 to add, 0 to change, 0 to destroy.
-terraform -chdir=platform  plan      Plan: 42 to add, 0 to change, 0 to destroy.
+terraform -chdir=platform  plan      Plan: 42 to add, 0 to change, 0 to destroy.   (Phase 2)
+terraform -chdir=platform  plan      Plan: 58 to add, 0 to change, 0 to destroy.   (Phase 3+4)
 ```
 
-**Cost of Wave A: $0.00.** VPC, IGW, subnets, route table, DHCP options, security groups, IAM
-roles, instance profiles, the OIDC provider, the Budget and the SNS topic are all free. The first
-billable thing in the repo is Phase 3's instances.
+**Cost of Waves A-C so far: $0.00 applied.** The first billable thing in the repo is still Phase
+3's instances, because the first cost-bearing apply has not been run. Two new cost lines land with
+them that the SPEC's table does not yet carry: the CMK at $1.00/month and detailed monitoring at
+$0.30 per instance per month (**+$2.20/month, $3.13 over the 43-day window**) — 69% of the $200
+credit becomes 71%.
 
 **The headline number, stated plainly because it is the one that matters:**
 the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds the arithmetic —
@@ -71,7 +74,15 @@ Critic: `pending` · `pass` · `gap named`
 
 ### Wave B — Cluster
 - `[~]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · built on this branch; blocked on the first cost-bearing apply
+  - Launch templates per node role, 3 servers (one per AZ) + 1 t3.medium, **all four schedulable, none tainted**
+  - Root volumes encrypted gp3 under a CMK this stack owns; **no `key_name`, no port 22, SSM only**
+  - The join token is an **ephemeral variable written into a write-only `value_wo` SecureString**: 0 hits in the plan text, the plan JSON and the saved plan file, and the provider nulls the value on read
+  - Cloud-init elects the leader by AZ, reads the token and the leader address from SSM with the instance role, hardens the k3s unit, and installs the etcd snapshot timer on the leader
+  - `scripts/bootstrap-cluster.sh` (kubeconfig to `~/.kube/boutique-prod.yaml`, 0600, never inside the repo) and `scripts/doctor.sh` (11 checks, one verdict, exit 1 on any failure)
 - `[~]` **Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)** · policy layer written on this branch; cluster-dependent proof pending
+  - 4 PDBs for the k3s add-ons, the `boutique` default-deny **with the kube-dns egress carve-out**, `observability` + `ci` quotas and LimitRanges, and `cluster/priority.yaml`
+  - RBAC as manifests, not `kubernetes_*` resources: every binding targets a Group, because there is no IdP yet and a group is the only subject that can be bound before it resolves
+  - `scripts/etcd-restore-drill.sh`: restores into scratch, times each phase, and **refuses `TARGET=cluster-live` without `LIVE_ACK=yes`**
 
 ### Wave C — Edge and workload
 - `[!]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · blocked on decision 2
@@ -120,6 +131,70 @@ Critic: `pending` · `pass` · `gap named`
   (checked across v0.1.4–v0.10.7), `ml-pipeline/`, Cloud CDN, Argo CD / Config Sync descriptors
 - k3s stable channel resolves to **v1.36.5+k3s1** (`curl -s https://update.k3s.io/v1-release/channels/stable`)
 
+### Waves B — 2026-10-09, from the plan, the scanners and two stubbed runs
+
+```
+terraform -chdir=platform plan -no-color
+  Plan: 58 to add, 0 to change, 0 to destroy.
+  aws_default_security_group.boutique, aws_iam_instance_profile.boutique_node,
+  aws_iam_role.boutique_node, aws_iam_role_policy.boutique_node,
+  aws_iam_role_policy_attachment.boutique_node_ssm_core,
+  aws_instance.k3s_server["us-east-1a"], aws_instance.k3s_server["us-east-1b"],
+  aws_instance.k3s_server["us-east-1c"], aws_instance.k3s_worker,
+  aws_internet_gateway.boutique, aws_kms_alias.platform, aws_kms_key.platform,
+  aws_launch_template.k3s_server, aws_launch_template.k3s_worker,
+  aws_route_table.boutique, aws_route_table_association.boutique[3],
+  aws_s3_bucket.etcd_snapshots, aws_s3_bucket_lifecycle_configuration.etcd_snapshots,
+  aws_s3_bucket_policy.etcd_snapshots,
+  aws_s3_bucket_public_access_block.etcd_snapshots,
+  aws_s3_bucket_server_side_encryption_configuration.etcd_snapshots,
+  aws_s3_bucket_versioning.etcd_snapshots,
+  aws_security_group.boutique_edge / boutique_node_admin / boutique_node_api / boutique_node_internal,
+  aws_security_group_rule.* (21 rules), aws_ssm_parameter.k3s_channel,
+  aws_ssm_parameter.k3s_leader_ip, aws_ssm_parameter.k3s_token,
+  aws_subnet.boutique[3], aws_vpc.boutique, aws_vpc_dhcp_options.*,
+  aws_vpc_dhcp_options_association.boutique
+
+checkov -d platform     Passed checks: 160, Failed checks: 0, Skipped checks: 4
+                         4 skips, each with a written reason on the resource:
+                         CKV_AWS_109 (account-root administration of a key policy),
+                         CKV_AWS_8 x2 (volume encryption declared on the launch template),
+                         CKV_AWS_18 (access logging needs a second bucket)
+                         + CKV2_AWS_11 (VPC flow logs, Phase 2)
+                         plus CKV_AWS_144/CKV2_AWS_62 in the stack's .checkov.yaml
+terraform fmt -check -recursive            clean, both stacks
+tflint --recursive                          clean
+shellcheck -x + bash -n                     clean on the 4 new scripts and the 2 node scripts
+kubeconform -strict -kubernetes-version 1.36.3 cluster/policies/
+                                          Summary: 9 resources found - Valid: 9, Invalid: 0, Errors: 0
+conftest test cluster/policies/ -p policy/  198 tests, 198 passed, 0 warnings, 0 failures
+gitleaks detect --no-git                    no leaks found
+scripts/check.sh                            PASS: 103  FAIL: 0  MISSING: 0
+```
+
+Also verified from the tooling, not from memory:
+
+- **The join token is nowhere.** `terraform plan -out=tfplan`, then
+  `terraform show -json tfplan | grep -c <the-token>` → **0**, and `grep -c <the-token> tfplan` → **0**.
+  Terraform itself refuses to write an ephemeral value into a normal attribute, and the AWS
+  provider's read path nulls `value` when `has_value_wo` is set.
+- **k3s does not taint its server nodes** (docs.k3s.io/advanced; the label is set, the taint is
+  not) — which is what makes the SPEC's scheduling model hold on 4 nodes instead of 1.
+- **The kubelet's read-only port is off by k3s's own construction**:
+  `pkg/daemons/agent/agent_linux.go` builds `argsMap["read-only-port"] = "0"` with a comment
+  explaining that the structured config drops a zero.
+- **The systemd watchdog must NOT be set**: k3s unsets `NOTIFY_SOCKET` right after `READY=1`, so
+  the kubelet cannot feed it and systemd kills the service at the timeout (k3s-io/k3s#13725).
+- **k3s's S3 snapshot credentials fall through to the instance role** — the chain in
+  `pkg/etcd/s3/s3.go` is Static → FileAWSCredentials → IAM — so the snapshot timer needs no key pair.
+- **Amazon Linux 2023 with kernel 6.12 is the current default AMI**, read from SSM at plan time,
+  and the k3s install script handles it explicitly (container-selinux + the k3s-selinux policy).
+- Two negative tests, run and recorded: `scripts/doctor.sh` against a stubbed cluster reports
+  **PASS 8 / WARN 2 / FAIL 0, exit 0**, and against a broken kubeconfig reports
+  **PASS 1 / WARN 3 / FAIL 6, exit 1** — which is also how the one real bug found in this phase
+  was caught (an AZS array assignment that made every node look absent). The restore drill's two
+  guard rails were exercised the same way.
+
 ### Wave A — 2026-10-09, from the plans and the scanners, not from an apply
 
 ```
@@ -164,9 +239,12 @@ Also verified from the account, not from memory:
 |---|---|---|
 | 3 × t3.small servers | $29.95 | 1440 billable h, pooled free hours applied |
 | 1 × t3.medium worker | $30.37 | 730 h, 0 free-tier hours |
-| 4 × 16 GiB gp3 | $2.72 | 30 GiB free |
+| 4 × 16 GiB gp3 | $2.72 | 30 GiB free, CMK instead of the managed key |
 | ALB + ~2 LCU | $28.11 | decision 2 |
 | logs / snapshots / ECR | ≈$6.60 | retained logs have a lifecycle |
-| **Total** | **≈$97.74/mo** | **≈$138 of the 43 days left in the window (69% of the $200 credit)** |
+| **Subtotal (the SPEC table)** | **≈$97.74/mo** | **≈$138.26 over the 43 days left (69% of the $200 credit)** |
+| 1 × KMS CMK | $1.00 | **a line the SPEC table does not carry** — one key for EBS and the token |
+| detailed monitoring | $1.20 | $0.30 × 4 nodes, **also new** — the t3 sustained-CPU risk is otherwise unobservable |
+| **Total as built** | **≈$99.94/mo** | **≈$141.39 over the window (71% of the $200 credit)** |
 
 Teardown at Phase 14 returns the account to $0. `destroy.yml` exists before the ALB exists.
