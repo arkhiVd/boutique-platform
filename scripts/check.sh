@@ -148,7 +148,14 @@ if need conftest conftest && [[ -d policy ]]; then
   #   apps/boutique/chaos/ — strategic-merge patch fragments. A fragment is not
   #     a complete object, so validating one against a whole-resource policy
   #     reports failures that do not exist.
-  CONFTEST_IGNORE='apps/boutique/(upstream-kubernetes-manifests\.yaml|chaos/)'
+  #   observability/*/templates/, and every values.yaml / Chart.yaml — Helm
+  #     source, not a manifest. `{{- if }}` is not YAML, so conftest fails at the
+  #     parser with a message that looks like a policy failure. These are checked
+  #     where they are actually valid: `helm lint --strict`, `helm template`, and
+  #     kubeconform over the rendered output.
+  #   observability/rules/, slos/, loki/alerts.yaml — bare Prometheus rule files
+  #     with no kind, already excluded by kind-check below.
+  CONFTEST_IGNORE='apps/boutique/(upstream-kubernetes-manifests\.yaml|chaos/)|/templates/|(values\.yaml|Chart\.ya?ml|Chart\.lock)$|/rules/|/slos/|alerts\.yaml$'
   if [[ ${#CONFTEST_TARGETS[@]} -gt 0 ]]; then
     check "conftest test ${CONFTEST_TARGETS[*]}" -- \
       conftest test "${CONFTEST_TARGETS[@]}" -p policy/ --ignore "$CONFTEST_IGNORE"
