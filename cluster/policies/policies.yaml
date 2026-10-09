@@ -1,0 +1,352 @@
+# ===========================================================================
+# boutique-platform -- Platform policy baseline, Phase 4.
+#
+# The SPEC's trust boundary 4 says the cluster "refuses to run a badly-behaved
+# pod, and every namespace has explicit guardrails rather than cluster-admin
+# trust". This directory is that, for the namespaces this repo does not already
+# cover in an application overlay.
+#
+# WHAT LIVES HERE, AND WHERE ITS TWINS LIVE
+# ---------------------------------------------------------------------------
+# This repo already carries a `boutique` policy set inside the app overlay
+# (apps/boutique/), measured against a rendered manifest:
+#
+#   apps/boutique/netpol/deny-all.yaml   default-deny, NO egress carve-out
+#   apps/boutique/netpol/<svc>.yaml      one allow policy per service, each with
+#                                        the kube-dns egress carve-out
+#   apps/boutique/quota.yaml             ResourceQuota + LimitRange for
+#                                        `boutique`, with the measured arithmetic
+#   apps/boutique/priorityclass.yaml     boutique-app 1000 / observability 500 /
+#                                        batch 100
+#
+# Those stay where they are: they are validated against the render that proves
+# their numbers, and moving them here would break the link between the number
+# and the measurement. This directory adds what the overlay does not have:
+#
+#   pdb-k3s-addons.yaml                       PodDisruptionBudgets for kube-system
+#   networkpolicy-boutique-default-deny.yaml  the baseline with the DNS carve-out
+#   resourcequota-observability.yaml          `observability` quota
+#   resourcequota-ci.yaml                     `ci` quota
+#   limitrange-observability.yaml             `observability` LimitRange
+#   limitrange-ci.yaml                        `ci` LimitRange
+#
+# NetworkPolicy is ADDITIVE, so the two `boutique` default-denies compose rather
+# than conflict: `apps/boutique/netpol/deny-all.yaml` allows nothing, this one
+# allows nothing except DNS, and the per-service policies allow what each
+# service names. The union is "DNS plus everything a service policy lists", which
+# is exactly the posture the SPEC asks for. The reason to have the carve-out here
+# as well as in the per-service policies is a pod nobody wrote a policy for: a
+# developer's one-off `kubectl run`, a Phase 7 Jenkins agent, a `kubectl debug`
+# container. Against deny-all alone, those get no DNS and time out on every name.
+# ===========================================================================
+---
+# ===========================================================================
+# PodDisruptionBudgets for the k3s add-ons -- Phase 4's "the cluster refuses to
+# break itself" half.
+#
+# A PodDisruptionBudget does not stop a pod from failing; it stops kubectl from
+# VOLUNTARILY taking it away. That is the case that matters here, because the
+# Phase 6 drain test ("drain one node, zero failed requests") is exactly a
+# voluntary disruption, and without a PDB it is legal for the drain to evict the
+# last CoreDNS pod and take name resolution with it. The SPEC's Phase 6 exit
+# criterion and this file are two halves of the same proof.
+#
+# THE HONEST LIMITATION, stated up front: creating these PDBs does not make the
+# k3s-bundled Deployments USE them. k3s's coredns, metrics-server, local-path-
+# provisioner and (in a stock install) traefik Deployments are written by the
+# k3s deploy controller and carry no `priorityClassName` and no PDB reference.
+# The PDB selects them by label -- that works, because a PDB is a separate object
+# pointed at a label -- but PriorityClass is a pod-spec field and has to be
+# patched in. The commands that close that gap are in cluster/priority.yaml.
+#
+# `minAvailable: 1` on every one, for the same reason: with 1 replica, 1 is the
+# only number that is simultaneously true and meaningful. coredns runs two
+# replicas on a three-server cluster, so minAvailable 1 still allows one drain.
+# For the single-replica traefik (Phase 5 installs it), minAvailable 1 means
+# `drain` is blocked on that node -- which is CORRECT and is the reason Phase 5
+# scales traefik to 2. The warning this produces in scripts/doctor.sh is the
+# signal, not a bug.
+# ===========================================================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: k3s-addon
+spec:
+  # k3s labels its bundled coredns `k8s-app: kube-dns` -- the same label the
+  # boutique netpol DNS carve-out selects on, so the two files cannot disagree
+  # about who CoreDNS is.
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
+  minAvailable: 1
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: local-path-provisioner
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: k3s-addon
+spec:
+  # The default StorageClass. Every PVC in observability (Prometheus TSDB, Loki
+  # chunks, Tempo wal) binds through it, so losing it does not lose data but it
+  # does block anything new from binding mid-drain.
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  minAvailable: 1
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: metrics-server
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: k3s-addon
+spec:
+  # Every HPA in apps/boutique/ reads averageUtilization from this, so a drain
+  # that evicts it freezes every autoscaler in the cluster for the duration.
+  selector:
+    matchLabels:
+      k8s-app: metrics-server
+  minAvailable: 1
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: traefik
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: k3s-addon
+spec:
+  # Targets Phase 5's Helm-installed Traefik, not k3s's bundled one (which this
+  # stack disables with --disable traefik). The Helm chart's own labels are
+  # app.kubernetes.io/name=traefik, so this selects the right pods.
+  #
+  # With 1 replica this blocks a drain on that node; that is the correct answer
+  # for a single-replica ingress and it is the reason Phase 5 sets replicas: 2
+  # across two AZs. Until then, doctor.sh reports `disruptionsAllowed: 0` here
+  # on purpose -- it is a visible reminder, not a defect to hide.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+  minAvailable: 1
+---
+# ===========================================================================
+# The `boutique` default-deny, with the carve-out upstream omits.
+#
+# Upstream Online Boutique ships a deny-all in its kustomize component that is
+# `podSelector: {}` with both policy types and NO rules -- which, in a cluster
+# whose CNI enforces NetworkPolicy, denies everything including DNS. Upstream's
+# own per-service policies then each end with `egress: - {}`, a single empty rule
+# that allows all destinations on all ports, which makes the deny-all
+# decorative: a default-deny namespace with a wide-open egress is not an egress
+# policy.
+#
+# This is the baseline the SPEC's trust boundary 4 describes: nothing in, nothing
+# out, EXCEPT DNS, because Kubernetes never assigns a pod a DNS server. Pods take
+# `nameserver` from /etc/resolv.conf, which points at the kube-dns Service's
+# ClusterIP; with egress closed, every lookup hangs and times out rather than
+# returning NXDOMAIN, and a service that cannot resolve a name cannot call
+# anything at all.
+#
+# Ports 53/udp AND 53/tcp both, because a response larger than the UDP datagram
+# fall-back path uses TCP, and CoreDNS answers on both.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-with-dns
+  namespace: boutique
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: default-deny
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # The carve-out, and the only rule in this object.
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ===========================================================================
+# Namespace quotas for the two namespaces the app overlay does not cover.
+#
+# `boutique`'s quota is in apps/boutique/quota.yaml, next to the render that
+# proves its arithmetic. These two sizes come from the same measurement -- the
+# numbers below are the measured requests, not guesses -- and the block at the
+# bottom ties all three to what four schedulable nodes can actually hold.
+#
+# `observability`: 680m / 1224Mi measured across the four charts. 1500m / 3Gi
+#   leaves room for a Prometheus scrape storm, for the Loki compactor, and for
+#   the retention that a 168h compactor enforces, without reopening the ceiling
+#   by hand.
+#
+# `ci`: 100m / 512Mi measured, one Jenkins controller and no agents. The quota
+#   is deliberately loose -- a Jenkins controller spawns ephemeral agent pods and
+#   the number that matters is how many can run at once, not how big one is. A
+#   tight quota here would fail a pipeline at admission, which is the least
+#   useful way to fail a build.
+# ===========================================================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: observability-quota
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: quota
+spec:
+  hard:
+    requests.cpu: "1500m"
+    requests.memory: "3Gi"
+    limits.cpu: "3000m"
+    limits.memory: "6Gi"
+    # 30 pods: kube-prometheus-stack ~10 (prometheus, alertmanager, operator, 2
+    # kube-state-metrics, node-exporter daemonset, 4 grafana-ish) + Loki 4 +
+    # Fluent Bit 4 DaemonSet pods + OTel collector 2 + debug head-room.
+    pods: "30"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ci-quota
+  namespace: ci
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: quota
+spec:
+  hard:
+    requests.cpu: "2000m"
+    requests.memory: "8Gi"
+    limits.cpu: "4000m"
+    limits.memory: "12Gi"
+    # The controller plus up to 8 concurrent ephemeral agents, which is what the
+    # Phase 7 pod template asks for and is the number a pipeline's parallelism
+    # actually hits.
+    pods: "12"
+---
+# ===========================================================================
+# LimitRanges, so a pod with no requests at all fails admission instead of
+# being admitted with no reservation.
+#
+# THE ORDER OF OPERATIONS MATTERS and is easy to get wrong: a LimitRange's
+# `default`/`defaultRequest` are applied by the LimitRanger admission plugin
+# BEFORE the ResourceQuota is checked. So a container with no requests gets
+# filled in from `defaultRequest` and THEN counted against the quota above --
+# which is why the quotas above carry head-room rather than being sized exactly
+# to the measured requests.
+#
+# These are the safety net for the NEXT manifest, not a constraint on the ones
+# that exist: every container in apps/boutique/ and every Helm chart here already
+# sets requests and limits. The case this catches is a 3am `kubectl run` in the
+# ci namespace.
+# ===========================================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: observability-limits
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: limitrange
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      # max must stay above the largest value actually deployed: Prometheus asks
+      # 1000m/2Gi, Loki 500m/1Gi. 2 CPU / 4 GiB caps any single container at half
+      # of one t3.medium's allocatable, so one container cannot starve a node by
+      # its request alone.
+      max:
+        cpu: "2"
+        memory: 4Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
+    - type: Pod
+      max:
+        cpu: "3"
+        memory: 6Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ci-limits
+  namespace: ci
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: limitrange
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      # A Jenkins agent runs maven or docker; 2 CPU is the shape the Phase 7 pod
+      # template asks for, and this cap is what stops a hand-written agent from
+      # asking for 8.
+      max:
+        cpu: "2"
+        memory: 4Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
+    - type: Pod
+      max:
+        cpu: "3"
+        memory: 6Gi
+---
+# ===========================================================================
+# THE ARITHMETIC. Three quotas, one cluster, and the measured numbers they are
+# sized against -- taken from docs/resource-budget.md and apps/boutique/quota.yaml,
+# not estimated:
+#
+#   namespace       measured requests   quota (requests.cpu / requests.memory)
+#   boutique        2820m / 2312Mi      3000m  / 3Gi     (app overlay)
+#   observability    680m / 1224Mi      1500m  / 3Gi     (this file)
+#   ci               100m /  512Mi      2000m  / 8Gi     (this file)
+#   OTel collector   200m /  256Mi      counted in `observability`
+#   ---------------------------------------------------------------------
+#   TOTAL MEASURED  3600m / 4048Mi      TOTAL CEILING 6500m / 14Gi
+#
+# What that leaves: four schedulable nodes give 7320m / ~9042Mi of ALLOCATABLE,
+# so the measured platform sits at 49% CPU and 45% memory, and the quota ceiling
+# at 89% / 155% -- deliberately over 100% on memory, because a ceiling nobody can
+# reach is decoration and a ceiling nobody can exceed is an outage. The gap
+# between measured and ceiling is head-room for an HPA scale-up, a canary set,
+# and a debug pod.
+#
+# The number that still binds is not requests: a t3 is burstable at a 20%
+# baseline, so the cluster sustains about 1600m of the 8000m the instances
+# advertise. That is SPEC.md's U2, it is modelled in scripts/cost-estimate.sh as
+# the CPU-credit surcharge guard, and no quota closes it -- requests are an
+# admission guarantee, not a performance one.
+# ===========================================================================

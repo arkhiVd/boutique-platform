@@ -1,0 +1,95 @@
+# ===========================================================================
+# boutique-platform -- critical add-on PriorityClasses, Phase 4.
+#
+# WHAT THIS FILE DOES, AND WHAT IT DOES NOT DO
+# ---------------------------------------------------------------------------
+# It creates the priority classes. It does NOT make any pod use them: a
+# PriorityClass is inert until something references it in
+# `spec.priorityClassName`. The k3s-bundled CoreDNS, metrics-server and
+# local-path-provisioner Deployments do not, and k3s's deploy controller rewrites
+# them, so a hand-patched Deployment is reverted at the next restart.
+#
+# The three commands that actually apply these are therefore recorded here and in
+# TASKS.md, and are the ones the Phase 4 apply runs:
+#
+#   kubectl patch deploy coredns -n kube-system \
+#     -p '{"spec":{"template":{"spec":{"priorityClassName":"platform-critical-addons"}}}}'
+#   kubectl patch deploy metrics-server -n kube-system \
+#     -p '{"spec":{"template":{"spec":{"priorityClassName":"platform-critical-addons"}}}}'
+#   kubectl patch deploy traefik -n kube-system \           # Phase 5, Helm chart
+#     -p '{"spec":{"template":{"spec":{"priorityClassName":"platform-critical-addons"}}}}'
+#   kubectl patch deploy jenkins -n ci \                   # Phase 7, Helm chart
+#     -p '{"spec":{"template":{"spec":{"priorityClassName":"platform-ci-controller"}}}}'
+#
+# That k3s reverts them is not a defect: it is a documented property of a distro
+# that owns its manifests, and the patch commands are idempotent so a pipeline
+# re-applies them after a restart. The honest gap is that a MANUAL eviction
+# sequence would need them re-applied by hand, which is why the runbook carries
+# the same three lines.
+#
+# THE VALUE LADDER, and why these sit where they do
+# ---------------------------------------------------------------------------
+#   system-cluster-critical        2000001000   kubeadm/k3s system pods
+#   system-node-critical           2000001000   node-level system pods
+#   platform-critical-addons            10000   THIS FILE: traefik, coredns
+#   platform-ci-controller                5000   THIS FILE: jenkins controller
+#   boutique-app                          1000   apps/boutique/priorityclass.yaml
+#   boutique-observability                 500   apps/boutique/priorityclass.yaml
+#   boutique-batch                         100   apps/boutique/priorityclass.yaml
+#   <cluster default>                        0   everything else
+#
+# Two things are deliberate:
+#
+#   1. Nothing here approaches system-cluster-critical. A custom priority class
+#      above the system's own would let an application pod outrank the kubelet's
+#      own components during an eviction, which is how you lose a node while
+#      showing a green dashboard.
+#
+#   2. The add-on classes sit ABOVE boutique-app. That is the point: under memory
+#      pressure the kubelet evicts by priority, and the correct order is to shed
+#      the thing a user is NOT waiting for while keeping the thing they are. The
+#      edge (traefik) and name resolution (coredns) outrank every application
+#      pod; the Jenkins controller outranks application pods but not the edge,
+#      because a broken build does not stop a user's request while a broken edge
+#      stops both.
+#
+# `preemptionPolicy` is left at its default (PreemptLowerPriority): a critical
+# add-on arriving on a node that has no room should be able to preempt a lower
+# priority application pod. Setting it explicitly to Never would make these
+# classes decorative exactly when they are needed.
+# ===========================================================================
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-critical-addons
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: priorityclass
+value: 10000
+globalDefault: false
+# Stated rather than inherited: the kubelet should preempt a lower-priority
+# application pod to place one of these.
+preemptionPolicy: PreemptLowerPriority
+description: >-
+  Critical cluster add-ons this platform runs: Traefik (the in-cluster edge, in
+  front of the ALB), CoreDNS (name resolution), metrics-server (every HPA in
+  apps/boutique/ reads averageUtilization from it), and local-path-provisioner
+  (the StorageClass every observability PVC binds through). Above every
+  application priority class, far below system-cluster-critical. Created by Phase
+  4; applied to the pods by the four patch commands in this file's header.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: platform-ci-controller
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/policy: priorityclass
+value: 5000
+globalDefault: false
+description: >-
+  The Jenkins controller (Phase 7). Above the application pods so a deploy storm
+  does not kill the thing doing the deploying, below the critical add-ons so the
+  edge and name resolution always outrank it. Ephemeral agent pods deliberately
+  do NOT use this class: an agent is a build, not a pipeline, and it should evict
+  at the same priority as the workload it is building.

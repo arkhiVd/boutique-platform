@@ -1,0 +1,304 @@
+# ===========================================================================
+# boutique-platform -- cluster RBAC, Phase 4.
+#
+# WHY THIS IS A MANIFEST AND NOT `kubernetes_*` TERRAFORM RESOURCES
+# ---------------------------------------------------------------------------
+# Both were offered and one was rejected on evidence, not taste. The
+# hashicorp/kubernetes provider reads a kubeconfig at PLAN time, because it
+# discovers the server version, the API group list and the applied configuration
+# before it can diff anything. That makes `terraform plan` in platform/ a
+# command that requires a live cluster and a kubeconfig on the machine running
+# it -- which:
+#
+#   * breaks the plan gate. The Phase 2 plan gate (`.github/workflows/plan.yml`)
+#     runs `terraform plan` with credentials for a read-only OIDC role and no
+#     cluster. With the kubernetes provider it would fail on every PR, on the
+#     branch that also has no cluster, with an error that reads exactly like a
+#     policy failure.
+#   * inverts the Spec's own ordering. SPEC.md gates Phase 3 behind Aravind's
+#     approval for the first cost-bearing apply, and Phase 4 behind a working
+#     cluster. Making the network stack's plan require a cluster means the thing
+#     that PROVISIONS the cluster cannot be reviewed before it is applied.
+#   * puts a kubeconfig on the CI runner. Phase 3's exit criterion is that no
+#     kubeconfig ever lives in CI.
+#
+# So the RBAC is YAML, applied by the operator or by the Phase 8 pipeline, and
+# gated by the same tools the manifest layer already uses: kubeconform for
+# schema, conftest for policy, and `kubectl auth can-i` as the live proof. The
+# trade is real and is stated: the RBAC is not in drift detection, so a hand
+# edit on the cluster is not caught by `terraform plan`. The mitigation is that
+# the manifests are the source of truth and the Phase 8 pipeline re-applies them,
+# which is the same discipline the boutique application manifests already use.
+#
+# WHY EVERY BINDING IS TO A GROUP, AND WHY THERE IS NO IDENTITY YET
+# ---------------------------------------------------------------------------
+# There is no OIDC identity provider in this account, no GitHub OIDC role that
+# resolves to a Kubernetes user, and no LDAP. SPEC.md's "bound to real SSO or IAM
+# identities" is a Phase 4 exit criterion that cannot be met yet, because the
+# identity provider does not exist. Rather than bind a role to a made-up user
+# name, every binding here targets a GROUP, on the reasoning that a group is the
+# only RBAC subject that can be bound before it resolves:
+#
+#   platform:admins    the operator. k3s's own kubeconfig authenticates with a
+#                      client certificate whose CN maps to system:admin, which
+#                      the default system:masters ClusterRoleBinding already
+#                      grants cluster-admin. So this group is what a real IdP
+#                      user will land in, not a second path to cluster-admin.
+#   platform:developers  the SSO/GitHub team that raises PRs. When GitHub OIDC is
+#                      wired (Phase 8), the claim that maps to a username also
+#                      carries the group, and the RoleBinding below starts
+#                      working with no edit.
+#   platform:on-call    the on-call rota. Same reasoning.
+#   platform:read-only  everyone who needs visibility and nothing else.
+#
+# Each one is documented at its binding with the exact claim that will populate
+# it, so the day an IdP exists the change is a mapping, not a redesign.
+# ===========================================================================
+
+# --- ClusterRoles ---------------------------------------------------------
+
+# platform-admin. Deliberately the full set, not a curated subset: an operator
+# role that is "mostly cluster-admin" is more dangerous than cluster-admin,
+# because it is trusted like one and fails at the worst moment. When an IdP
+# exists, binding its admin group to this Role is the whole change.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-admin
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+  # The non-resource URLs, which `*` in apiGroups does not cover: /healthz,
+  # /version, /openapi/v2, /metrics. Without this line `kubectl top nodes`
+  # and `kubectl version` work while `kubectl get --raw` does not, which is a
+  # confusing failure for an admin role.
+  - nonResourceURLs: ["*"]
+    verbs: ["*"]
+---
+# developer: the PR author. Scoped to the boutique namespace, scoped to the
+# four kinds a deploy actually touches, and scoped on secrets by NAME rather
+# than denied outright.
+#
+# The secret rule is the interesting one. A developer cannot list secrets --
+# listing them in a namespace is the difference between "I broke one thing" and
+# "I now hold every credential the namespace has", including the registry pull
+# secret and anything the next phase stores. But a developer who cannot read the
+# ECR pull secret cannot debug a container that will not start, and the natural
+# workaround is a screenshot in a ticket. So the grant is `get` and `watch` on
+# `secrets` restricted by resourceNames to exactly the names this platform
+# creates: `boutique-ecr-pull` is the imagePullSecret Phase 8 wires up. Adding a
+# name here is a one-line diff, and it is where a reviewer looks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-developer
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["create", "get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "configmaps", "persistentvolumeclaims", "events"]
+    verbs: ["create", "get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status", "pods/ephemeralcontainers"]
+    verbs: ["get", "list", "watch", "create"]
+  # Named secrets only -- see the header above. resourceNames is enforced per
+  # name, so adding one is a diff in this file.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "watch"]
+    resourceNames: ["boutique-ecr-pull"]
+  # Ephemeral PR namespaces need to exist. `kubectl create namespace pr-123`
+  # is the first step of every preview environment.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch"]
+---
+# read-only-everyone: get/list/watch on everything except secrets. This is the
+# role a new team member gets before they get developer, and the role the
+# Grafana/Loki service accounts would get if they were not already scoped.
+#
+# Secrets are absent rather than filtered. RBAC cannot express "list everything
+# except secrets", so the safe form is to enumerate the rest: a read-only role
+# that can enumerate a namespace's secrets is a read-only role that leaks every
+# credential, and the leak needs no write permission at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-read-only-everyone
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+# on-call. The verbs that fix an incident, and nothing that changes one.
+#
+#   pods/exec and pods/attach: the debugging surface. `kubectl exec -it <pod> --
+#   curl localhost:8080/healthz` is the fastest diagnosis and it is also
+#   arbitrary code in a container, so it is a named group, not a general grant.
+#   delete pods: the only restart button on a container that has no restart
+#   policy of its own -- a wedged loadgenerator, or a pod stuck in
+#   Terminating.
+#   patch on deployments/statefulsets/daemonsets: what `kubectl rollout restart`
+#   actually issues. Without it the on-call person can delete pods and watch
+#   them come back identical.
+#   pods/eviction: `kubectl drain` is an eviction, not a deletion, and the
+#   Phase 6 drain test needs it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-on-call
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status", "services", "endpoints", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+# --- Bindings --------------------------------------------------------------
+#
+# A ClusterRoleBinding for the four cluster-wide roles, and a namespaced
+# RoleBinding for the developer role. The developer role is bound twice on
+# purpose: at cluster scope so that `pr-<n>` preview namespaces get the same
+# permissions as `boutique` without a second binding being created by every
+# pipeline run, and at namespace scope so that auditing `kubectl -n boutique
+# get rolebindings` shows the team's access without a cluster-wide lookup.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-admin
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+subjects:
+  # No user. Every member of this group will be an IdP identity when one exists;
+  # until then the operator authenticates through k3s's own client certificate,
+  # which the stock system:masters binding already grants cluster-admin to.
+  - kind: Group
+    name: platform:admins
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-developer
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+subjects:
+  - kind: Group
+    name: platform:developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-read-only-everyone
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+subjects:
+  - kind: Group
+    name: platform:read-only
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-read-only-everyone
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-on-call
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+subjects:
+  - kind: Group
+    name: platform:on-call
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-on-call
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: platform-developer
+  namespace: boutique
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    boutique.io/rbac-tier: platform
+subjects:
+  # THE GITHUB TEAM. This is the group the SPEC's "bound to real SSO or IAM
+  # identities" line means when it says there is no IdP yet: the string below is
+  # the name a GitHub OIDC claim will resolve to once Phase 8 wires one up, and
+  # it is written here now so that the grant exists the day the claim does.
+  #
+  #   kubeconfig-style auth today:
+  #     nothing authenticates as this group, so today the binding grants nobody
+  #   Phase 8 onwards, GitHub OIDC:
+  #     `kubectl config set-credentials gh -n boutique --auth-provider=oidc ...`
+  #     and the identity's `groups` claim carries "platform:developers", which
+  #     is exactly this string. Nothing here changes on that day.
+  - kind: Group
+    name: platform:developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-developer
+  apiGroup: rbac.authorization.k8s.io
