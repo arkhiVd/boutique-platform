@@ -1,0 +1,352 @@
+# Loki — values for ONE t3.medium (4 GiB RAM, 2 vCPU)
+# -----------------------------------------------------------------------------
+# `SingleBinary` mode: the write path, the read path, the compactor and the query
+# frontend all run as one process in one pod. That is the only shape that fits a
+# 4 GiB node, and it is the shape the chart calls "SingleBinary" for.
+#
+# WHY THIS FILE IS NESTED TWICE, AND WHY IT MATTERS MORE THAN ANY VALUE IN IT
+# -----------------------------------------------------------------------------
+# This is a WRAPPER chart whose single dependency is the upstream `loki` chart.
+# Helm scopes a parent chart's values by the dependency's NAME, so everything
+# below lives under `loki:`. The upstream chart then keeps its OWN root section
+# also called `loki:` (`loki.storage`, `loki.limits_config`, `loki.commonConfig`,
+# `loki.server`, ...). So the values that configure Loki itself are one level
+# deeper still:
+#
+#     loki:              <- subchart scope, added by Helm
+#       loki:            <- the upstream chart's own root section
+#         storage:
+#           type: filesystem
+#
+# Getting this wrong is a SILENT failure, not an error: `loki.storage.type` at
+# the first level is accepted by Helm and ignored by the chart, and Loki installs
+# with its default S3 backend. The symptom is `helm template` failing with
+# "Please define loki.storage.bucketNames.chunks" at render time, which is at
+# least loud — but it is easy to "fix" by inventing bucket names, which then
+# produces a working-looking install that cannot store anything.
+#
+# The keys that stay at ONE level of nesting (`loki:`) are the chart's component
+# selectors: deploymentMode, singleBinary, write, read, backend, gateway,
+# chunksCache, resultsCache, serviceMonitor, monitoring. The keys that need TWO
+# are the ones under the upstream's own `loki:` section. This file is annotated
+# so the distinction is visible.
+
+loki:
+
+  ## =========================================================================
+  ## The upstream chart's own `loki:` section — everything here needs the extra
+  ## level of nesting explained above.
+  ## =========================================================================
+  loki:
+
+    auth_enabled: false
+    ## Auth is off. Single-tenant, single-owner platform (SPEC "one cluster, one
+    ## observability namespace, single-writer, single-owner"), and a multi-tenant
+    ## auth setup with no second tenant is a credential in a Secret with no
+    ## consumer. Fluent Bit therefore sends no X-Scope-OrgID and Loki accepts
+    ## single-tenant pushes. This is the documented reason, not an omission.
+
+    ## -----------------------------------------------------------------------
+    ## THE CARDINALITY BOUND, IN NUMBERS
+    ## -----------------------------------------------------------------------
+    ## This is the section the brief asks for, and it is the reason the rest of
+    ## this file is shaped the way it is.
+    ##
+    ## Loki's memory is driven by ACTIVE STREAMS, and a stream is a unique label
+    ## set. Every extra label value is a new stream, and a stream that dies has to
+    ## be re-created the next time that label combination appears. The classic
+    ## failure is adding `pod` as a label: on a 4-node cluster with 13 Boutique
+    ## Deployments at 2 replicas plus rollouts, that is not 26 streams, it is one
+    ## PER POD THAT EVER EXISTED over the retention window.
+    ##
+    ## The arithmetic:
+    ##
+    ##   namespaces that produce logs: 4  (boutique, ci, observability, kube-system)
+    ##   pods per namespace, worst case: 13 application + ~10 system = 23
+    ##   containers per pod:                        1..2
+    ##
+    ##   => if {namespace, pod, container} are the stream labels:
+    ##        4 x 23 x 1.5 = 138 streams TODAY, and roughly 4x that = ~550 streams
+    ##        over a 7-day window once rollouts and HPA scaling are counted.
+    ##
+    ##   => if {namespace, app, container} are the stream labels (pod DROPPED):
+    ##        4 x ~15 x 1.5 = 90 streams, bounded by the number of Deployments and
+    ##        containers per pod. It does NOT grow with time.
+    ##
+    ## The second shape is what observability/fluent-bit/values.yaml produces:
+    ## labels are `namespace`, `app` and `container`, and `pod` goes to Loki's
+    ## structured metadata, which is indexed per line and creates no stream. The
+    ## whole bound in one line: 90 streams instead of 550, and the count is
+    ## bounded by the number of Deployments rather than by the number of pods ever
+    ## created.
+    ##
+    ## Why 90 matters on this node: the single binary holds one stream per open
+    ## chunk target and a queue per stream. At ~90 streams the ingest path costs
+    ## ~40MiB of heap. At ~550 it costs ~250MiB, and on a node already holding
+    ## Prometheus and Grafana that is the difference between fitting and being
+    ## OOMKilled. The measured figure is `loki_ingester_streams`, which is on the
+    ## cost + node capacity dashboard.
+    ## -----------------------------------------------------------------------
+    commonConfig:
+      path_prefix: /var/loki
+      ## Single binary means a single replica, so replication_factor MUST be 1.
+      ## The chart's default is 3, which in SingleBinary mode makes every write
+      ## wait for a quorum of one and every read fan out to an ingester that does
+      ## not exist. It is not a performance setting here, it is a correctness one.
+      replication_factor: 1
+
+    ## -----------------------------------------------------------------------
+    ## Storage: filesystem on a gp3 PVC, and why not S3
+    ## -----------------------------------------------------------------------
+    ## SPEC.md commits observability state (Prometheus TSDB, Loki, Tempo) to gp3
+    ## with snapshot/restore runbooks, and this is the Loki half of that.
+    ##
+    ## Why filesystem rather than S3, stated because the brief asks:
+    ##
+    ##   1. There is nothing to authenticate WITH. S3 needs an access key or an
+    ##      IRSA/OIDC trust relationship, and this cluster's nodes use a shared
+    ##      instance profile scoped to SSM, ECR-pull, CloudWatch and S3
+    ##      log/state access (SPEC "least privilege"). There is no bucket for log
+    ##      chunks and creating one is a cost line SPEC's table does not carry.
+    ##   2. An S3 backend adds a network round trip per chunk per request. On a 2
+    ##      vCPU node already running Prometheus, that round trip comes out of the
+    ##      application's CPU.
+    ##   3. In SingleBinary mode with a filesystem backend the compactor runs
+    ##      locally, so `retention_period` below is ACTUALLY ENFORCED. In
+    ##      SimpleScalable mode retention is a compactor concern spread across
+    ##      replicas and is easier to get wrong.
+    ##   4. 10Gi of gp3 at $0.08/GB-month is $0.80/month, inside the SPEC's
+    ##      existing logs/snapshots line.
+    ##
+    ## The documented cost of the choice: a 10Gi local volume is a single point of
+    ## failure and losing it loses the window. SPEC's Phase 13 snapshot/restore
+    ## runbook covers it. Recorded as a decision, not an oversight.
+    storage:
+      type: filesystem
+      filesystem:
+        chunks_directory: /var/loki/chunks
+        rules_directory: /var/loki/rules
+
+    ## -----------------------------------------------------------------------
+    ## Limits — the second half of the cardinality control
+    ## -----------------------------------------------------------------------
+    limits_config:
+      ## 7 days, and it is ACTUALLY enforced: the single binary runs the
+      ## compactor, so `retention_period` deletes chunks older than the window.
+      ## ROADMAP Phase 10's exit criterion "a log older than the window is gone"
+      ## is provable against THIS setting.
+      retention_period: 168h
+
+      ## 4 MiB/s of ingestion per tenant with an 8 MiB burst. The measured rate is
+      ## ~0.03 MiB/s — 60 log lines/s at ~400 bytes from the loadgenerator's
+      ## USERS=10, RATE=1, plus access logs and the other three namespaces. So
+      ## this is ~130x headroom, and it is a LIMIT, not a target: it exists so a
+      ## single service that starts logging a stack trace in a tight loop cannot
+      ## fill the 10Gi volume overnight.
+      ingestion_rate_mb: 4
+      ingestion_burst_size_mb: 8
+
+      ## THE explicit cardinality bound. A query matching more than 500 series is
+      ## rejected with HTTP 422 instead of being evaluated. Against the 90-stream
+      ## bound above that is 5x headroom for a query that fans out across
+      ## namespaces, and it is the guard against the one LogQL query that
+      ## accidentally scans every pod in the cluster — the query written by a
+      ## tired engineer at 03:00.
+      max_query_series: 500
+
+      ## Structured metadata is what lets `pod` stop being a label. Without it the
+      ## only way to keep the pod name is to promote it to a label and pay the
+      ## stream count; with it, `pod` is per-line and costs nothing in streams.
+      allow_structured_metadata: true
+
+      ## The remaining limits, each with its reason:
+      reject_old_samples: true
+      ## 168h, matching retention_period: a sample older than the window is
+      ## rejected at ingest rather than stored and deleted a moment later.
+      reject_old_samples_max_age: 168h
+      ## 20 distinct label names per series. The Fluent Bit pipeline emits 15-18
+      ## depending on the parser, so this is a tight ceiling with a small margin.
+      max_label_names_per_series: 20
+      max_entries_limit_per_query: 5000
+      ## 2 minutes. A LogQL query on a 2 vCPU node that runs longer than this is
+      ## already useless to whoever is waiting for it.
+      query_timeout: 2m
+      ## Query splitting at 15 minutes is what lets a 7-day query be served from
+      ## one chunk index at a time instead of loading the whole window.
+      split_queries_by_interval: 15m
+      max_cache_freshness_per_query: 10m
+      volume_enabled: true
+
+    ## -----------------------------------------------------------------------
+    ## The compactor is what makes retention_period real
+    ## -----------------------------------------------------------------------
+    compactor:
+      enabled: true
+      ## 10 minutes. At the measured log volume a compaction cycle takes seconds;
+      ## 10m leaves margin and stops the compactor from competing with the ingest
+      ## path for CPU on a 2 vCPU box.
+      interval: 10m
+      ## Retention deletion runs in the compactor and needs the delay flag, which
+      ## is what "the chunk is only deleted once nothing is reading it" means.
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 50
+
+    ## -----------------------------------------------------------------------
+    ## Schema
+    ## -----------------------------------------------------------------------
+    ## v13 (tsdb) with the compactor, which is the only schema that supports
+    ## per-stream retention in Loki 3.x. A v11/v12 schema would make
+    ## `retention_period` above silently inert.
+    schemaConfig:
+      configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+
+    ## -----------------------------------------------------------------------
+    ## Server limits that are not in limits_config
+    ## -----------------------------------------------------------------------
+    server:
+      http_listen_port: 3100
+      ## 5 minutes of write timeout. At 0.03 MiB/s a flush is sub-second, but a
+      ## compaction cycle that coincides with a push can stall it, and a push that
+      ## times out is a log line lost on the floor.
+      http_server_write_timeout: 5m
+      http_server_read_timeout: 5m
+
+    ## -----------------------------------------------------------------------
+    ## Alerts
+    ## -----------------------------------------------------------------------
+    ## NOT configured here. The chart's `alerting.loki` block takes a
+    ## JavaScript-ish expression evaluated by Loki's own ruler, and putting the
+    ## rules there would make them invisible to `promtool check rules` — the
+    ## gate this repo uses to prove no rule has a syntax error.
+    ##
+    ## The alerts therefore live as a bare rule file at
+    ## observability/loki/alerts.yaml, and
+    ## observability/loki/templates/prometheusrules.yaml wraps it into a
+    ## PrometheusRule with the `release` label the Prometheus Operator's default
+    ## ruleSelector requires. One place for the rules, one place for the labels,
+    ## and `promtool check rules observability/loki/alerts.yaml` passes.
+    ##
+    ## The Loki metrics those alerts read (`loki_request_duration_seconds`,
+    ## `loki_discarded_samples_total`, `loki_ingester_streams`) are scraped by
+    ## observability/servicemonitors/loki.yaml, NOT by the chart's own
+    ## `serviceMonitor`, which is disabled below.
+
+  ## =========================================================================
+  ## Component selectors — one level of nesting, because these keys are NOT
+  ## under the upstream chart's own `loki:` section.
+  ## =========================================================================
+  deploymentMode: SingleBinary
+
+  singleBinary:
+    replicas: 1
+    resources:
+      ## Sized against the 90-stream bound and the measured ~0.03 MiB/s:
+      ##   ingest:    ~0.03 MiB/s of chunks, ~30 MiB of buffer
+      ##   compactor: one cycle at a time, ~60 MiB
+      ##   querier:   max_query_series 500 x ~4 KiB = ~2 MiB, plus the Go runtime
+      ##   baseline:  ~120 MiB for the process itself
+      ##
+      ## 60m requests (down from 100m) / 512Mi limits is the envelope. The CPU
+      ## cut is the same argument as the Grafana one in
+      ## observability/kube-prometheus-stack/values.yaml: CPU is the binding
+      ## constraint on the ONE t3.medium, and 100m is 5.5% of the node's entire
+      ## CPU for a component whose measured ingestion rate is ~60 log lines per
+      ## second. A query that genuinely needs 400m still gets it — that is what
+      ## the 500m limit is for, and the `LokiRequestLatency` alert in
+      ## observability/loki/alerts.yaml is the visible symptom if it does not
+      ## arrive.
+      requests:
+        cpu: 60m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    persistence:
+      enabled: true
+      storageClass: gp3
+      accessModes:
+        - ReadWriteOnce
+      ## 10Gi. The measured rate is ~0.03 MiB/s = ~2.6 GiB/day of raw volume,
+      ## compressed 6-8x by Loki's chunk codec plus index overhead = ~0.4 GiB/day
+      ## on disk. 7 days x 0.4 = ~2.8 GiB, so 10Gi is ~3.5x headroom for a week
+      ## with an accidental log storm, and `retention_period` deletes into it
+      ## rather than filling it.
+      size: 10Gi
+
+  ## Disable the components SingleBinary replaces, so `kubectl get pods` in the
+  ## observability namespace shows ONE Loki pod instead of six half-configured
+  ## ones. `replicas: 0` is also what validate.yaml requires before it allows a
+  ## filesystem backend at all.
+  write:
+    replicas: 0
+  read:
+    replicas: 0
+  backend:
+    replicas: 0
+  ingester:
+    replicas: 0
+  distributor:
+    replicas: 0
+  querier:
+    replicas: 0
+  queryFrontend:
+    replicas: 0
+  queryScheduler:
+    replicas: 0
+  ruler:
+    replicas: 0
+
+  ## The gateway is an nginx proxy in front of Loki. In SingleBinary mode it adds
+  ## a process and an auth boundary for no benefit — the collector talks to the
+  ## single binary's Service on port 3100 directly, and Grafana's Loki datasource
+  ## (observability/kube-prometheus-stack/values.yaml) points at that Service.
+  gateway:
+    enabled: false
+
+  ## The chunk and results caches are memcached in the chart's default
+  ## SimpleScalable shape. With a filesystem backend and a single binary they
+  ## would be a second container each, caching data that is already on local disk.
+  chunksCache:
+    enabled: false
+  resultsCache:
+    enabled: false
+
+  ## lokiCanary is a synthetic log generator. It is a genuinely useful check —
+  ## it is the only way to prove "a log line is retrievable in 60s" without
+  ## depending on application traffic — but it runs on EVERY node as a DaemonSet,
+  ## and on a node that already has no CPU headroom that is work the platform
+  ## cannot pay. The Phase 10 exit criterion "a log line emitted by
+  ## productcatalogservice is retrievable in 60s" is proven against the real
+  ## loadgenerator stream instead, which is the stronger test anyway.
+  ##
+  ## The chart's validate.yaml requires the canary to be enabled if its Helm TEST
+  ## hook is enabled, so `test.enabled` is also set false. That is the honest
+  ## trade: the canary is the mechanism the chart ships for its own test, and this
+  ## platform trades it for real traffic. A DaemonSet canary on a 2 vCPU node is
+  ## the wrong instrument.
+  lokiCanary:
+    enabled: false
+  test:
+    enabled: false
+
+  ## The Loki chart's own self-monitoring ServiceMonitor is off;
+  ## observability/servicemonitors/ has a single monitor for the metrics
+  ## endpoint, so there is exactly one target.
+  serviceMonitor:
+    enabled: false
+    interval: "30s"
+
+  monitoring:
+    dashboards:
+      enabled: true
+      annotations: {}
+      labels:
+        grafana_dashboard: "1"

@@ -1,0 +1,58 @@
+# Loki ServiceMonitor
+# -----------------------------------------------------------------------------
+# Scrapes the Loki SingleBinary's own /metrics endpoint on port 3100.
+#
+# THIS FILE EXISTS BECAUSE observability/loki/alerts.yaml DEPENDS ON IT. The
+# alerts LokiRequestErrors, LokiRequestLatency, LokiLogLinesDropped and
+# LokiIngesterStreamsHigh read `loki_request_duration_seconds`,
+# `loki_discarded_samples_total` and `loki_ingester_streams`. With no monitor
+# scraping them those series do not exist, every alert evaluates on an empty
+# input, and none of them can ever fire. That is the exact silent failure the
+# `absent(up{...}) or up == 0` shape in observability/rules/boutique-alerts.yaml
+# exists to catch — and it only works if the target is actually defined here.
+#
+# DO NOT ALSO ENABLE the Loki chart's own `serviceMonitor`. The chart's values
+# set it to `enabled: false` (observability/loki/values.yaml) for this reason:
+# two ServiceMonitors for one endpoint means two scrape targets, and every
+# `rate()` over a duplicated counter is a number that is wrong by 2x with no
+# visible symptom.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: loki
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: logs
+spec:
+  # `job` becomes "loki", the Service's app.kubernetes.io/name. The Loki alerts
+  # in observability/loki/alerts.yaml are NOT scoped by `job` (they aggregate
+  # by `route` and `reason`), so this label is for humans reading `up{}` and
+  # for the TargetDown-style absence check, not for an alert expression.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - observability
+  # The SingleBinary Service and its headless sibling. The headless Service
+  # exists only for DNS; selecting it here would produce a target with no
+  # endpoints for the non-headless one to differ from. `loki` is the one that
+  # matters, and it is the one the Grafana Loki datasource
+  # (observability/kube-prometheus-stack/values.yaml) also points at.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loki
+      app.kubernetes.io/instance: loki
+  endpoints:
+    # PORT NAME, NOT NUMBER. The SingleBinary Service in loki 7.3.0 calls its
+    # port `http-metrics` on 3100 — rendered and checked, not assumed. A number
+    # here would be a value to reconcile at every chart bump.
+    - port: http-metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      # Loki emits a `cluster` label on its own self-monitoring metrics and, in
+      # a single-tenant setup, no `tenant` label at all. Neither is a scrape
+      # identity, and honorLabels would let a locally-set `instance` through
+      # unmerged. Left off (the default) so the operator relabels cleanly.

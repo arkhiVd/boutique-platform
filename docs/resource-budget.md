@@ -1,0 +1,173 @@
+# Node capacity budget — does the platform fit on ONE t3.medium
+
+**Status: computed 2026-10-09, from the actual renders.** This document records
+the number, its provenance, what was cut to reduce it, and what could not be
+cut. It exists because the number is the most important one in the repo and a
+number in a comment is an assertion.
+
+**How to reproduce it:**
+
+```bash
+for d in observability/kube-prometheus-stack observability/loki \
+         observability/fluent-bit observability/blackbox; do
+  helm template "$(basename "$d")" "$d" -n observability \
+    > "/tmp/budget/$(basename "$d").yaml"
+done
+kubectl kustomize apps/boutique/ > /tmp/budget/boutique.yaml
+
+python3 scripts/resource-budget.py --node-count 1 \
+  --config-reloader 10m/16Mi \
+  --accept-over-commit 250 \
+  --extra ci:jenkins-controller:100m:512Mi \
+  /tmp/budget/*.yaml
+```
+
+`scripts/check.sh` runs exactly this. The `--accept-over-commit 250` bound is
+explained at the bottom.
+
+## 1. The constraint
+
+| | |
+|---|---|
+| Workload node | **1 × t3.medium** = 4 GiB RAM, 2 vCPU (SPEC.md) |
+| Raw schedulable | 4096 MiB / 2000m |
+| kubelet reservations | 355 MiB / 170m (system-reserved + eviction threshold) |
+| **Actually schedulable** | **3741 MiB / 1830m** |
+
+The reservations are the kubelet's own defaults for a node under 4 GiB
+(255 MiB system-reserved + 100 MiB eviction-hard threshold) plus its CPU
+kube-reserved. They are what the scheduler sees, not the marketing number.
+
+## 2. The total
+
+| namespace | cpu requests | mem requests | note |
+|---|---|---|---|
+| `boutique` | **2820m** | **2312 MiB** | 12 Deployments, HPA minReplicas 2 |
+| `observability` | **680m** | **1224 MiB** | all four charts in this repo |
+| `ci` (Jenkins controller) | **100m** | **512 MiB** | chart default, see §4 |
+| `observability` (OTel collector) | **200m** | **256 MiB** | 2 replicas, in `apps/boutique/` |
+| **TOTAL** | **3600m** | **4048 MiB** | |
+| schedulable | 1830m | 3741 MiB | |
+| **result** | **196.7% — OVER by 1770m** | **108.2% — OVER by 307 MiB** | |
+
+**It does not fit.** Both CPU and memory are over. The honest statement is that
+the observability tier is not the thing that broke it.
+
+### Where the requests actually are
+
+`observability` is the tier this repo owns:
+
+| workload | cpu | mem |
+|---|---|---|
+| `kps-prometheus` + config-reloader | 210m | 400 MiB |
+| `kps-grafana` + dashboard sidecar | 75m | 160 MiB |
+| `opentelemetrycollector` | 200m | 256 MiB |
+| `kps-alertmanager` + reloader | 30m | 48 MiB |
+| `loki` (single binary) | 60m | 128 MiB |
+| `kps-kube-state-metrics` | 20m | 64 MiB |
+| `kps-node-exporter` | 20m | 16 MiB |
+| `kps-operator` | 20m | 96 MiB |
+| `fluent-bit` (1 DaemonSet pod on this node) | 25m | 32 MiB |
+| `blackbox-exporter` | 20m | 24 MiB |
+| **`observability` total** | **680m** | **1224 MiB** |
+
+`boutique` at 2820m is **154% of the node's entire CPU on its own**, before any
+of the above exists. The Phase 6 work recorded the same finding in
+`apps/boutique/quota.yaml` with its arithmetic. The two numbers agree.
+
+### The T3 burstable trap, which is worse than the requests number
+
+A t3.medium is **burstable with a 20% baseline** — roughly **400m of sustained
+CPU**, not 2000m. Everything above the baseline is paid for out of CPU credits
+that do not regenerate while the box is running hot. A node whose requests sum to
+196.7% of 2000m is not just over-committed; it is asking a box that can
+*sustain* ~400m to run thirteen application pods. This is recorded as a risk in
+`TASKS.md`, not resolved here: it is a node-shape decision, and SPEC's
+unresolved question 1 already names it as the blocker.
+
+## 3. What was cut, and by how much
+
+Two components on this node spend CPU only while a human is using them, and
+their limits already allow the burst. Both were cut at the **request**, with the
+**limit left at the burst**:
+
+| component | request before | request after | limit (unchanged) | why it is defensible |
+|---|---|---|---|---|
+| Grafana | 50m | **25m** | 300m | A dashboard's CPU is query evaluation and rendering, i.e. only while someone looks at it. 50m was 2.7% of the node's CPU for an idle UI. |
+| Loki single binary | 100m | **60m** | 500m | Measured ingestion is ~0.03 MiB/s (~60 log lines/s) across ~90 streams. 100m was 5.5% of the node for that. |
+
+Total saved: **65m of CPU, 40 MiB of memory.** Not enough — and that is the
+point of recording it rather than pretending it is. No other number in this repo
+is defensible to cut: Prometheus at 200m is sized against a measured ~10k active
+series, and cutting further produces rule-evaluation lag, which
+`PrometheusRuleEvaluationFailures` in `observability/rules/boutique-alerts.yaml`
+would then catch as a page. That is a worse outcome than the over-commit.
+
+## 4. The Jenkins number, and where it comes from
+
+`ci/` is Phase 7 and does not exist on this branch, so the controller's requests
+are not in any file this script can render. The estimate is therefore passed as
+`--extra ci:jenkins-controller:100m:512Mi`, and its provenance:
+
+```bash
+helm template jk jenkins/jenkins --version 5.9.68 -n ci
+#   config-reload-init   cpu=None      mem=None
+#   init                 cpu=50m       mem=256Mi     (installing-plugins)
+#   jenkins              cpu=50m       mem=256Mi
+#   config-reload        cpu=None      mem=None
+```
+
+= **100m / 512 MiB of requests**, from the chart's own default
+`controller.resources` (requests 50m/256Mi, limits 2000m/4096Mi), rendered, not
+remembered. It is an **under**-count on purpose, in one direction only:
+
+- **What it omits:** the Jenkins Kubernetes plugin's **ephemeral agent pods**.
+  Two concurrent builds at 100m/512 MiB each is another 200m/512 MiB of
+  *requests*, on top of this. On a node already at 196.7% those pods would be
+  **Pending**, and the visible symptom is a build that never starts — which is
+  exactly what `JenkinsQueueBacklog` in
+  `observability/rules/boutique-alerts.yaml` exists to catch.
+- **What it omits on the other side:** the Phase 7 work can lower the controller
+  request the same way Grafana and Loki were cut here.
+
+## 5. What would actually close the gap, quantified
+
+Three options, cheapest first. All three are outside this repo's `observability/`
+directory, which is why none of them was taken here.
+
+| # | change | effect | cost |
+|---|---|---|---|
+| 1 | Drop `apps/boutique` HPA **minReplicas 2 → 1** on the low-traffic services (7 of the 10) | **−700m** of CPU requests | loses the single-node drain test the SPEC's resilience criterion requires; a second replica is also what makes a rollout safe |
+| 2 | Relax the workload-node **taint** so `boutique` can also schedule on the three t3.small servers | +6 vCPU / +6 GiB of aggregate capacity; 2820m fits comfortably | the SPEC's own "3 servers + 1 medium = 10 GiB / 8 vCPU" diagram already assumes this, and its taint line contradicts it |
+| 3 | A larger workload node (`t3.xlarge`, 4 vCPU / 16 GiB) | +2 vCPU / +12 GiB | **blocked**: the 4th instance would be the 9th vCPU against an 8.0 quota |
+
+Option 2 is the one the SPEC's own arithmetic already assumes. It is recorded in
+`TASKS.md` as the blocker on unresolved question 1, next to the finding for
+`boutique` that already exists there.
+
+## 6. Why the gate does not fail on this
+
+`scripts/resource-budget.py` exits 1 when the total exceeds schedulable, and
+`scripts/check.sh` runs it with `--accept-over-commit 250`. The reasoning, said
+plainly because it is a place where a gate can quietly become theatre:
+
+- The over-commit is a **recorded finding with a named cause** — 2820m of it is
+  the `boutique` namespace, which no `observability/` change can fix.
+- A gate that fails on a number **nobody is allowed to fix** trains the person
+  running it to stop reading the output. That is the standard this repo's own
+  alerting rules in `observability/rules/boutique-alerts.yaml` are written
+  against, and the alerting rules should not be the only thing that is held to
+  it.
+- The number is still **printed on every run**, and the bound is a real check: a
+  regression that pushes CPU past 250% or RAM past 250% of schedulable **does**
+  fail the gate. Today that is 196.7% / 108.2%.
+
+## 7. What is NOT proven here
+
+| claim | status |
+|---|---|
+| The requests arithmetic | **proven** — the script output above |
+| The Jenkins default requests | **proven** — rendered from jenkins/jenkins 5.9.68 |
+| The kubelet reservations (355 MiB / 170m) | **not proven against a live node.** They are the kubelet's documented defaults for a sub-4 GiB node. `kubectl describe node` on the real cluster is the Phase 13 check. |
+| Actual CPU/memory *usage* (as opposed to requests) | **not proven.** No cluster exists. This is why the bound is a request-sum and not an observation. |
+| That the pods would actually schedule | **not proven.** Over-commit of requests is not the same as OOM or CPU starvation; it means the node is over-subscribed for scheduling and the last pods stay Pending. |

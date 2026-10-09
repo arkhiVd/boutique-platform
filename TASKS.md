@@ -1,95 +1,66 @@
 # boutique-platform — tasks
 
-## Current phase: 0 — guardrails and validation harness
+## Current phase: 3 — cluster bootstrap (blocked on the apply approval)
 
-- [ ] Write `AGENTS.md`, `CLAUDE.md`, `SPEC.md`, `ROADMAP.md`, `TASKS.md`, `.gitignore`,
-      `.gitattributes`, `.gitleaksignore`
-  - Scope: repo scaffolding only, no infrastructure
-  - Acceptance criteria: every file present and free of placeholder text; `SPEC.md`
-    unresolved questions answered or explicitly left open
-  - Automated validation: `terraform fmt -recursive -check`, `gitleaks detect --no-git`
-  - Manual validation: Aravind reads SPEC.md and answers Q1 (node size) and Q3 (ALB)
-  - Blockers: **SPEC unresolved Q1 and Q3 — sizing/cost decision needed before Phase 2**
+Built and validated with **no cluster and no live infrastructure**: everything below is proven by
+`terraform plan`, `helm template`, `kustomize build`, `kubeconform`, `conftest`, `promtool`, and
+the Fluent Bit binary. Nothing is deployed. Cluster-dependent exit criteria are named in the
+blockers table rather than marked done.
 
-- [ ] Create the GitHub repo `arkhiVd/boutique-platform` and push Phase 0
-  - Scope: repo creation, `main` as default branch, no CI secrets yet
-  - Acceptance criteria: `git push` succeeds; GitHub shows the guardrail files
-  - Automated validation: `git diff --check` clean
-  - Manual validation: the repo is visible to Aravind
-  - Blockers: none (needs Aravind's go-ahead to create a public repo)
+## What is proven, and by what
 
-- [ ] Wire `scripts/check.sh` as the single local gate
-  - Scope: wrappers for fmt / validate / kubeconform / conftest / shellcheck / gitleaks
-  - Acceptance criteria: `scripts/check.sh` runs and reports pass/fail per tool with real
-    output; a deliberately broken `.tf` makes it exit non-zero
-  - Automated validation: the deliberate break
-  - Manual validation: none
-  - Blockers: `tflint`, `trivy`, `kubeconform`, `checkov`, `shellcheck` are not all on PATH —
-    install them or record the gap explicitly rather than skipping silently
+| Phase | What landed | Proven by |
+|---|---|---|
+| 0 | SPEC / ROADMAP / AGENTS / TASKS, `scripts/check.sh`, `scripts/cost-estimate.sh`, ADRs 0001–0003, CI plan gate | `check.sh` PASS 0 FAIL 0; gitleaks clean; actionlint clean |
+| 1 | `bootstrap/` — state bucket, split plan/apply OIDC roles, AWS Budget, SNS alerts | `terraform validate`, `plan: 14 to add, 0 to change, 0 to destroy`, `checkov 70 passed 0 failed 6 skipped` |
+| 2 | `platform/` — VPC `10.90.0.0/16`, 3 public subnets, 4 security groups, narrow node instance profile | `plan: 42 to add, 0 to change, 0 to destroy`, `checkov 103 passed 0 failed`, `tflint` clean |
+| 6 | `apps/boutique/` — upstream v0.10.7 vendored verbatim with provenance; all 13 workloads hardened (PDB, HPA, topology spread, anti-affinity, `seccompProfile`, `automountServiceAccountToken: false`, CPU requests == limits, `startupProbe`); `netpol/` with the kube-dns carve-out upstream omits; `policy/` rego + 3 failing fixtures; OTel collector with real processors | `kustomize build` 3033 lines; `kubeconform` 136/136 valid; `conftest` 1044/1044 pass, 22/22 fixtures rejected; `gitleaks` clean |
+| 9 | `observability/kube-prometheus-stack/` on chart `92.1.1`; golden-signal recording rules; alerts; 4 dashboards; ServiceMonitors | `helm lint --strict` 0 failed; `promtool check rules` 9 rules |
+| 10 | Loki `SingleBinary` with **enforced** 168h retention; Fluent Bit parsers for all six real log formats and a Loki output with exactly 3 labels | `promtool check rules` 4 rules; `scripts/check-fluentbit-config.py` runs the render through `fluent-bit --dry-run` in the pinned image |
+| 12 | SLOs 99.9% / 99% with multiwindow multi-burn-rate (14.4x / 6x / 1x); `docs/slo.md`; burn-rate fixtures | `promtool test rules` → **SUCCESS**: the 14.4x page fires, the 6x and 1x do not, and a 1-in-20-for-10-min blip does not page |
 
-- [ ] Add `.github/workflows/plan.yml` (PR plan gate) and `dependabot.yml`
-  - Scope: SHA-pinned actions, gitleaks → fmt → validate → checkov → plan → PR comment;
-    plan uses a read-only OIDC role from Phase 1
-  - Acceptance criteria: `actionlint` clean; a PR run posts a plan
-  - Automated validation: `actionlint .github/workflows/plan.yml`
-  - Manual validation: one real PR run
-  - Blockers: Phase 1 OIDC role must exist first; the workflow can be merged in a
-    non-actionable state until then
-
-## Blocked / deferred by decision
+## Blockers
 
 | Item | Waiting on |
 |---|---|
-| Phase 1 AWS Budget + OIDC roles | Aravind approves the IAM change (Risky class) |
-| Phase 2 VPC provisioning | SPEC Q1 (node size) — changes nothing structural but changes the cost story |
-| Phase 5 ALB + Web ACL | SPEC Q3 (ALB vs node-IP entry) |
-| Phase 3 first apply | Aravind approves the first cost-bearing apply |
-| Phase 6 drain test (`zero failed requests`) | Needs a schedulable node to drain to. On the SPEC's one-workload-node topology the pods go **Pending**, not running. Same root cause as the CPU over-commit below — SPEC Q1. |
-| Phase 6 collector `debug` → Tempo exporter | Phase 11 (Tempo does not exist yet) |
-| adservice / shippingservice tracing | `docs/adr/0004-adservice-tracing-gap.md` — a pinned OTel Java agent and a live-pod answer on where its temp dir lives under `readOnlyRootFilesystem: true` |
+| Phase 3 first apply | Aravind's approval — it is the first cost-bearing apply (~$61/mo) |
+| Phase 1 apply | Aravind's approval — an IAM change (Risky class) |
+| Phase 5 ALB + Web ACL | SPEC Q3 — the ALB decision |
+| Phase 6 drain test (`zero failed requests`) | A schedulable node to drain to. **Root cause now identified and fixed: the workload-node taint.** See U1 |
+| Phase 6 collector `debug` → Tempo | Phase 11 (Tempo does not exist yet) |
+| adservice / shippingservice tracing | `docs/adr/0004-adservice-tracing-gap.md` — a pinned OTel Java agent, and where its temp dir lives under `readOnlyRootFilesystem: true` |
+| k3s Traefik histogram buckets | Phase 5 — Traefik's defaults (0.1/0.3/1.2/5.0) make the p95 latency SLI resolve to one of four values |
+| External probe target | Phase 5 Terraform output |
+
+## Decisions taken in-session (SPEC unresolved questions, now resolved)
+
+| # | Was | Now | Consequence |
+|---|---|---|---|
+| Q1 | node shape | **3 × t3.small servers + 1 × t3.medium workload node**, and **all four nodes schedulable** | the only shape that fits; see U1 |
+| Q2 | TLS path | `<host>.ip.sslip.io` + cert-manager HTTP-01 | no Route 53 zone exists; gives a real public CA chain |
+| Q3 | ALB | ALB + WAF, then full teardown at Phase 14 | two-layer edge, $28/mo of the budget |
+| Q4 | Jenkins placement | in-cluster, on the schedulable pool | a separate node would be the 5th instance and the 9th vCPU — impossible |
 
 ## Unknowns recorded rather than guessed
 
-Nothing below is filled with a fabricated value. Each is a decision with a runtime consequence,
-not a task that can be closed by writing something plausible.
-
 | # | Unknown | Measured value | What it blocks |
 |---|---|---|---|
-| U1 | **`boutique` CPU requests vs one t3.medium.** | `2820m` of requests against a node's `2000m` | Phase 6 "all 13 workloads Available". A node-sized `requests.cpu: "2000m"` quota turns this into `FailedCreate`, so `quota.yaml` caps at `3` instead and documents the three ways to close it. Preference is option 2 (relax the workload-node taint so `boutique` can use the 3 servers: 6 vCPU), which is what SPEC's own 10GiB/8vCPU diagram already assumes |
-| U2 | **Shippingservice / adservice tracing gap.** | Both `initTracing()` bodies are TODOs upstream (issue #422) | Phase 11 trace completeness |
-| U3 | **cartservice has no instrumentation at all upstream** — not a stub, never built | `grep -r otel src/cartservice/` → nothing | a `shipping` span on the checkout trace |
-| U4 | **`OTEL_TRACES_SAMPLER*` is inert for the six instrumented v0.10.7 images** | they hard-code `AlwaysSample()` and read only `COLLECTOR_SERVICE_ADDR` | nothing — the real sampling decision is the collector's `tail_sampling`. Set so a successor image picks it up |
-| U5 | **OTel Collector `runAsUser`** | resolved from the registry API, not guessed: `sha256:5f92255513d9…` declares `USER 10001:10001` | nothing; upstream's `1000` is followed by the image's own declaration instead |
-| U6 | **`redis:alpine` tag is not pinned by SPEC** | resolved to `sha256:3811787313eb…` on 2026-10-08 | nothing, but the digest ages; re-resolve when the image is rebuilt |
-| U7 | **Startup-probe budgets** | 60s (Go/Python/JS), 90s (adservice JVM, cartservice .NET), chosen not measured — no cluster yet | nothing, but the first real run should confirm 90s is enough and not more |
+| U1 | **Node budget: 3600m CPU / 4048Mi of requests against one workload node's 1830m / 3741Mi schedulable = 196.7% CPU, 108.2% RAM.** 2820m of it is `boutique`. | `docs/resource-budget.md` | nothing any more — resolved by making all four nodes schedulable (4 × 1830m = 7320m, ~9042Mi). Recorded here because it is the reason Phase 3 must **not** taint the k3s servers. |
+| U2 | **A t3 instance is burstable at a 20% baseline ≈ 400m sustained**, not 2000m. Requests are not the binding limit — sustained CPU is. | `docs/resource-budget.md` | modelled in `scripts/cost-estimate.sh` as a CPU-credit surcharge guard. Light demo traffic should stay under baseline; sustained load is the risk. |
+| U3 | Shippingservice / adservice tracing | both `initTracing()` bodies are upstream TODOs (issue #422) | Phase 11 trace completeness |
+| U4 | cartservice instrumentation | none upstream, not a stub, never built | the checkout trace has a hole |
+| U5 | `OTEL_TRACES_SAMPLER*` | inert for the six instrumented images; they hard-code `AlwaysSample()` | nothing — real sampling is the collector's `tail_sampling` |
+| U6 | `redis:alpine` digest | `sha256:3811787313eb…` resolved from the registry, not guessed | re-resolve when the image is rebuilt |
+| U7 | Startup-probe budgets | 60s Go/Python/JS, 90s JVM/.NET — chosen, not measured | the first real run should confirm 90s is enough and not more |
 
 ## Completed
 
-Move a task here only after its acceptance criteria and validation passed. Record skipped
-validation and residual risk instead of marking incomplete work done.
-
-- 2026-10-08 SPEC/ROADMAP/AGENTS/TASKS scaffold written from live account evidence
-  (`aws sts get-caller-identity`, `describe-vpcs`, `describe-security-groups`,
-  `describe-instance-types`, quota checks, `ce get-cost-and-usage`) and from the real
-  `GoogleCloudPlatform/microservices-demo` repo at `v0.10.7` — validated by inspection, no
-  infrastructure touched
-- 2026-10-08 **Phase 6, manifest layer** (branch `feat/app-hardening`, no cluster and no
-  `kubectl apply` anywhere): `apps/boutique/upstream-kubernetes-manifests.yaml` vendored verbatim
-  with provenance (URL, tag, fetch date, sha256 of the upstream body, Apache-2.0);
-  `apps/boutique/base/` rewritten for all 13 workloads with PDB, HPA (10 — redis-cart and
-  loadgenerator exempt with a checked reason), topology spread, preferred anti-affinity,
-  priority classes, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false` on
-  pod and ServiceAccount, dedicated ServiceAccounts including one for `redis-cart` which had
-  none, `RollingUpdate maxSurge: 1 / maxUnavailable: 0`, `revisionHistoryLimit: 5`,
-  `progressDeadlineSeconds: 600`, `startupProbe` on every service with a 90s budget for the JVM
-  (.NET) cold-start pair, CPU requests == limits for Guaranteed QoS with upstream memory kept,
-  and OTel env wiring with both the spec-standard and upstream-native forms;
-  `apps/boutique/netpol/` default-deny plus one allow policy per service with an explicit
-  `kube-dns` egress carve-out on every one; `policy/security.rego` + `policy/resources.rego`
-  with three deliberately-failing fixtures; `apps/boutique/observability/` collector with real
-  processors (`memory_limiter`, `tail_sampling`, `batch`) replacing upstream's empty
-  `processors:`; `apps/boutique/quota.yaml` with the measured arithmetic; `docs/chaos-experiments.md`
-  and `scripts/chaos/inject-latency.sh`. Validated by `kustomize build`, `kubeconform -strict
-  -kubernetes-version 1.36.3`, `conftest` in both per-document and `--combine` modes, `gitleaks`
-  and `scripts/check.sh` (PASS 50 / FAIL 0 / MISSING 0). Cluster-dependent exit criteria are
-  named in the blockers table above, not silently marked done.
+- 2026-10-08 Phase 0 — scaffold from live account evidence (`aws sts get-caller-identity`,
+  `describe-vpcs`, `describe-security-groups`, `describe-instance-types`, quota checks,
+  `ce get-cost-and-usage`) and from the real `GoogleCloudPlatform/microservices-demo` `v0.10.7`.
+  Validated by inspection; no infrastructure touched.
+- 2026-10-08 Phase 1 — `bootstrap/` plans clean (14 add / 0 change / 0 destroy). Account verified
+  back to its pre-session state afterwards by independent read-only calls.
+- 2026-10-08 Phase 2 — `platform/` plans clean (42 add / 0 change / 0 destroy). Adds $0.00.
+- 2026-10-08 Phase 6 — manifest layer on `feat/app-hardening`. See the table above.
+- 2026-10-08 Phases 9, 10, 12 — observability config, rules, SLOs and burn-rate fixtures.

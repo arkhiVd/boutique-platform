@@ -1,0 +1,186 @@
+# Boutique golden signals — recording rules
+# -----------------------------------------------------------------------------
+# This is a BARE Prometheus rule file (`promtool check rules` accepts only
+# `groups:`, so it carries no apiVersion/kind/metadata). The kube-prometheus-
+# stack chart turns it into a PrometheusRule object at render time:
+# observability/kube-prometheus-stack/templates/platform-rules.yaml reads every
+# file under rules/ through Helm's .Files and adds the labels the Prometheus
+# Operator needs. One source of truth for the rules, one place for the labels.
+#
+# Every Boutique service has NO /metrics endpoint. Verified, not assumed: the
+# vendored upstream v0.10.7 tree contains no Prometheus instrumentation in any
+# src/ directory, and PROGRESS.md records the same conclusion as verified-absent.
+#
+# So the golden signals come from the two places that DO see every request:
+#
+#   1. Traefik's ingress metrics — `traefik_service_requests_total` and
+#      `traefik_service_request_duration_seconds`, both labelled with the
+#      Traefik service name. Traefik v3.7.13 (the image k3s v1.36.5+k3s1 ships,
+#      `rancher/mirrored-library-traefik:3.7.13` from the k3s HelmChart manifest)
+#      names that label `<namespace>-<service-name>-<port>@kubernetes` —
+#      confirmed in pkg/provider/kubernetes/ingress/kubernetes.go:
+#          serviceName := provider.Normalize(ingress.Namespace + "-" +
+#              pa.Backend.Service.Name + "-" + portString(pa.Backend.Service.Port))
+#      so for the frontend it is `boutique-frontend-80@kubernetes`.
+#
+#   2. The OTel Collector's spanmetrics connector (Phase 11) — server-side
+#      spans, `traces_spanmetrics_calls_total` and
+#      `traces_spanmetrics_duration_seconds`. The connector does not exist yet
+#      (apps/boutique/observability/opentelemetrycollector.yaml ships only
+#      memory_limiter, tail_sampling and batch), so those rules are written and
+#      documented but produce no series until Phase 11 adds the connector. They
+#      are NOT given the same names as the Traefik rules: overlap would make one
+#      series the sum of two sources and quietly double every request rate.
+#
+# Naming follows the Prometheus recording-rule convention
+# (https://prometheus.io/docs/practices/rules/): `level:metric:operation`, with
+# the aggregation level first. `job` here carries the LOGICAL SERVICE NAME
+# (frontend, checkoutservice, ...), which is the SRE-Workbook meaning, not the
+# scrape-job name.
+
+groups:
+  ## -----------------------------------------------------------------------
+  ## Traefik-derived golden signals (live today, no dependency on Phase 11)
+  ## -----------------------------------------------------------------------
+  - name: boutique.golden-signals.traefik
+    interval: 30s
+    rules:
+      # The one place the logical service name is derived. Everything
+      # downstream uses `job`, so a change in Traefik's naming convention is a
+      # change to exactly one expression.
+      #
+      # The `@kubernetes` suffix is the Ingress provider name
+      # (pkg/provider/kubernetes/ingress/kubernetes.go: `ProviderName = "kubernetes"`,
+      # joined by the aggregator with `@`). It is fixed for this deployment
+      # because k3s enables `providers.kubernetesIngress` and nothing else
+      # (k3s v1.36.5+k3s1 manifests/traefik.yaml).
+      - record: boutique:traefik_service
+        expr: |
+          label_replace(
+            traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"},
+            "job", "$1", "service", "^boutique-(.+)-[0-9]+@kubernetes$"
+          )
+
+      # --- request rate ---------------------------------------------------
+      - record: job:request_rate:ratio
+        expr: |
+          sum by (job) (
+            rate(traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m])
+          )
+        # Per-second, dimensionless. Labelled only `job`: adding `code` here
+        # would multiply the series by the number of HTTP status classes the
+        # loadgenerator can hit, and the thing an operator wants from a
+        # "request rate" panel is a line per service, not per status class.
+
+      # --- error ratio ----------------------------------------------------
+      # The SRE definition: errors / total. 5xx is what a Boutique user sees,
+      # so 4xx is deliberately NOT counted — a 404 on /cart is a client
+      # mistake, and counting it would let a broken loadgenerator script
+      # consume the availability budget without a single user noticing.
+      - record: job:error_ratio:ratio
+        expr: |
+          sum by (job) (
+            rate(traefik_service_requests_total{
+              code=~"5..", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+          /
+          sum by (job) (
+            rate(traefik_service_requests_total{
+              service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+            }[5m])
+          )
+
+      # --- latency quantiles ----------------------------------------------
+      # A HISTOGRAM, not a summary: Traefik v3.7.13 builds this metric with
+      # newHistogramFrom(HistogramOpts{Name: traefik_service_request_duration_seconds,
+      # Buckets: buckets}, ...) (pkg/observability/metrics/prometheus.go).
+      # histograms aggregate across pods; summaries do not, so a quantile over
+      # 2 replicas would be wrong.
+      - record: job:latency_p95:seconds
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (
+              rate(traefik_service_request_duration_seconds_bucket{
+                service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+              }[5m])
+            )
+          )
+      - record: job:latency_p99:seconds
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (job, le) (
+              rate(traefik_service_request_duration_seconds_bucket{
+                service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+              }[5m])
+            )
+          )
+
+      # --- the one honest caveat about the latency signals -----------------
+      # Traefik's default buckets are 0.1, 0.3, 1.2, 5.0 seconds
+      # (values.yaml: `metrics.prometheus.buckets: ""` -> the hardcoded default
+      # in pkg/observability/metrics/prometheus.go). With those buckets a p95
+      # can only ever resolve to 0.1, 0.3, 1.2 or 5.0 — "p95 is 0.3" really
+      # means "p95 is somewhere in (0.1, 0.3]". Phase 5 must set
+      # `metrics.prometheus.buckets` to a finer set (0.05, 0.1, 0.25, 0.5,
+      # 1, 2.5, 5) or the latency SLO below is decorative rather than
+      # measurable. This rule is recorded so the gap is visible in a query
+      # rather than hidden in a dashboard title.
+      - record: boutique:latency_bucket_resolution_seconds
+        expr: |
+          count(count by (le) (traefik_service_request_duration_seconds_bucket{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}))
+        # == 4 means the default buckets are in force.
+
+  ## -----------------------------------------------------------------------
+  ## spanmetrics-derived golden signals (Phase 11 owner, written now)
+  ## -----------------------------------------------------------------------
+  - name: boutique.golden-signals.spanmetrics
+    interval: 30s
+    rules:
+      # These exist so that the two independent views of the same request —
+      # the edge (Traefik) and the process (OTel spans) — can be compared, and
+      # so that a difference between them is itself a signal: if Traefik says
+      # requests are flowing and spanmetrics says no spans are arriving, the
+      # OTLP path is broken.
+      #
+      # Expected series shape, from the spanmetrics connector defaults in
+      # otel/opentelemetry-collector-contrib: `traces_spanmetrics_calls_total`
+      # with labels {service_name, span_name, status_code} where status_code
+      # is "" or "error", and `traces_spanmetrics_duration_seconds_bucket`
+      # with {service_name, span_name, le}.
+      #
+      # These rules produce NO SERIES until Phase 11. `promtool check rules`
+      # accepts them because it validates syntax, not existence — that is a
+      # known limitation of the local gate, and the Phase 11 exit criteria
+      # (`promtool query instant` returning non-zero span metrics) is what
+      # proves them live.
+      - record: span:request_rate:ratio
+        expr: |
+          sum by (job) (
+            rate(traces_spanmetrics_calls_total{service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"}[5m])
+          )
+      - record: span:error_ratio:ratio
+        expr: |
+          sum by (job) (
+            rate(traces_spanmetrics_calls_total{
+              service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice",
+              status_code="error"
+            }[5m])
+          )
+          /
+          sum by (job) (
+            rate(traces_spanmetrics_calls_total{
+              service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
+            }[5m])
+          )
+
+      # The cross-check between the two sources. A value other than 1 means
+      # the edge and the process disagree about how many requests happened.
+      - record: boutique:edge_to_span_ratio
+        expr: |
+          job:request_rate:ratio
+          /
+          on (job) group_left
+          span:request_rate:ratio

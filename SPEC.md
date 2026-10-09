@@ -103,7 +103,9 @@ Gathered before any design decision, from the account itself (`348032171026`, `u
                  │   k3s server b (t3.small) ─┼─► etcd quorum of 3, one per AZ (HA)   │
                  │   k3s server c (t3.small) ─┘                                        │
                  │                                                                   │
-                 │   k3s agent   (t3.medium)  ── all workloads live here              │
+                 │   k3s agent   (t3.medium)                                          │
+                 │                                                                   │
+                 │   ALL FOUR NODES ARE SCHEDULABLE — see "Scheduling model" below   │
                  │        │  Traefik (in-cluster L7, Host-based routing)             │
                  │        ▼                                                           │
   internet ──► ALB ──(TLS, WAF, access logs)──► target group ──► Traefik ──► frontend │
@@ -121,12 +123,45 @@ Gathered before any design decision, from the account itself (`348032171026`, `u
                  └───────────────────────────────────────────────────────────────────┘
 
   vCPU: 3×2 + 1×2 = 8 of the 8.0 quota — at the ceiling, no 5th instance is possible
-  RAM : 3×2 + 1×4 = 10 GiB against ~9.5 GiB of workload requests
+  RAM : 3×2 + 1×4 = 10 GiB
 ```
 
 **Delivery path:** PR → GitHub Actions (plan gate) → Jenkins (build/test/scan/sign/push to ECR)
 → ephemeral `pr-<n>` namespace + smoke gate → approval → promote to `boutique` with canary
 and auto-rollback on burn-rate alert.
+
+## Scheduling model — the finding that decided Phase 3
+
+The whole platform was originally drawn with three k3s **servers** plus one dedicated **worker**
+node, servers tainted `node-role.kubernetes.io/control-plane:NoSchedule` — the standard
+managed-service pattern. Measuring the real workload destroyed that layout:
+
+| namespace | CPU requests | memory requests |
+|---|---|---|
+| `boutique` (13 workloads) | 2820m | 2312Mi |
+| `observability` (4 charts) | 680m | 1224Mi |
+| `ci` (Jenkins + agents) | 100m | 512Mi |
+| OTel collector | 200m | 256Mi |
+| **total** | **3600m** | **4048Mi** |
+
+Against a single t3.medium's schedulable **1830m / 3741Mi**, that is **196.7% CPU and 108.2%
+RAM**. On the original layout, `boutique` would sit Pending forever and the Phase 6 drain test
+("drain one node, zero failed requests") would have nowhere to drain to.
+
+Two things follow, and both are now the SPEC's requirement:
+
+1. **All four nodes are schedulable.** The k3s servers carry **no** control-plane taint. This is
+   not a hack — kubeadm control-plane nodes are schedulable by default, and EKS is the managed
+   service that taints them because it pairs them with a separate autoscaled worker fleet. With a
+   hard 8-vCPU quota there is no separate fleet to pair with. Four schedulable nodes give
+   **7320m / ~9042Mi**, so the platform fits with roughly 50% headroom on both axes.
+2. **The quota is per-namespace, not per-node, and the real limit is sustained CPU, not
+   requests.** A t3 instance is burstable at a 20% baseline — **≈400m sustained per node, not
+   2000m**. Requests guarantee admission, not performance. `scripts/cost-estimate.sh` therefore
+   models the CPU-credit surcharge explicitly and fails the build if the estimated sustained
+   utilisation would push the window over the credit budget. The mitigation is the CPU requests
+   already being set (so no single pod can starve a node), plus the t3 instance credit balance.
+
 
 **State ownership:** Terraform state in S3 with native `use_lockfile` locking. Application
 state is `redis-cart` `emptyDir` (deliberate, matching upstream), with a documented loss

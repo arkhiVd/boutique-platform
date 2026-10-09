@@ -1,0 +1,66 @@
+# Jenkins exporter ServiceMonitor
+# -----------------------------------------------------------------------------
+# Scrapes the jenkinsci/prometheus-plugin at /prometheus on the Jenkins
+# controller's HTTP port.
+#
+# TWO THINGS ARE NOT TRUE YET, AND BOTH ARE STATED RATHER THAN PAPERED OVER:
+#
+#   1. The `ci` namespace does not exist. It is ROADMAP Phase 7.
+#   2. The prometheus-plugin is not installed. It is a `controller.plugins`
+#      entry in the Jenkins chart's values, which is Phase 7 work too.
+#
+# So this ServiceMonitor is written, validated, and selectable, and it will find
+# nothing until Phase 7 lands. The `TargetDown` alert pattern in
+# observability/rules/boutique-alerts.yaml (`absent(...) or up == 0`) is the
+# reason the gap is visible rather than silent.
+#
+# Metric names are verified from the plugin's own documentation
+# (docs/metrics/index.md at master), not from memory:
+#   default_jenkins_builds_last_build_result_ordinal{job_name}
+#       0=SUCCESS, 1=UNSTABLE, 2=FAILURE, 3=NOT_BUILT, 4=ABORTED
+#   default_jenkins_builds_failed_build_count{job_name}  (counter)
+#   default_jenkins_executors_queue_length               (gauge)
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jenkins-exporter
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: ci
+spec:
+  # 60s, not 30s. Jenkins metrics are gauges about build state that change on
+  # build boundaries, not per-request counters; a 60s interval cannot miss
+  # anything a 30s one would catch, and it halves the scrape cost.
+  namespaceSelector:
+    matchNames:
+      - ci
+  selector:
+    # Matches the Jenkins chart's controller Service. Rendered and checked
+    # against jenkins/jenkins 5.9.68, the SPEC's pinned version: the Service is
+    # named `<release>-jenkins` and carries
+    #   app.kubernetes.io/component: jenkins-controller
+    #   app.kubernetes.io/instance: <release>
+    # with a single port named `http` on 8080.
+    #
+    # `app.kubernetes.io/component` rather than `app.kubernetes.io/instance`:
+    # the component name is a chart constant, the instance name is whatever the
+    # release was called, and a monitor that breaks when someone renames the
+    # release is a monitor nobody trusts.
+    matchLabels:
+      app.kubernetes.io/component: jenkins-controller
+  endpoints:
+    - port: http
+      path: /prometheus
+      interval: 60s
+      scrapeTimeout: 20s
+      # The plugin's per-build metrics carry `job_name` and, when per-build
+      # metrics are enabled, `number`. honourLabels is ON here and it matters:
+      # the plugin emits its own `job` label (the Jenkins job name) for some
+      # collectors, and merging that into Prometheus's scrape `job` label would
+      # silently rename the scrape target. Keeping the scraped labels means the
+      # Jenkins job name survives in `job_name` and the scrape target keeps its
+      # own identity.
+      honorLabels: true

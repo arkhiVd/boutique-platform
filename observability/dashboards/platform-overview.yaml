@@ -1,0 +1,221 @@
+# Platform overview dashboard
+# -----------------------------------------------------------------------------
+# Provisioned by the kube-prometheus-stack Grafana sidecar: any ConfigMap
+# labelled `grafana_dashboard: "1"` in any namespace is picked up
+# (`grafana.sidecar.dashboards.searchNamespace: ALL`). The release label is NOT
+# needed on the ConfigMap — that selector is only for the sidecar's own
+# ConfigMaps.
+#
+# The design rule for all four dashboards in this directory: a stranger with no
+# context must be able to answer "is it the node or the app" in under a minute.
+# That means the node-capacity panels sit ABOVE the application panels, because
+# on a single 4 GiB node the answer to a slow app is more often "the node is
+# full" than "the app is slow".
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: boutique-platform-overview
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/dashboard: platform-overview
+data:
+  platform-overview.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": false,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "title": "Boutique platform overview",
+      "uid": "boutique-platform-overview",
+      "version": 1,
+      "tags": ["boutique-platform", "overview"],
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "namespace",
+            "type": "custom",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "definition": "boutique,ci,observability",
+            "query": "boutique,ci,observability",
+            "hide": 0,
+            "includeAll": false,
+            "multi": false,
+            "current": { "text": "boutique", "value": "boutique" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Is the node the problem?",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "type": "stat",
+          "title": "Node CPU requests vs allocatable",
+          "description": "Sum of CPU requests as a share of the t3.medium's 1830m allocatable after kubelet reservations. This is the number SPEC.md's single-workload-node constraint is measured against.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"cpu\", namespace=~\"$namespace\"})",
+              "legendFormat": "requests"
+            },
+            {
+              "expr": "sum(kube_node_status_allocatable{resource=\"cpu\"}) - 170",
+              "legendFormat": "allocatable minus kube-reserved"
+            }
+          ],
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "textMode": "auto" },
+          "fieldConfig": { "defaults": { "unit": "cores" }, "overrides": [] }
+        },
+        {
+          "type": "stat",
+          "title": "Node memory requests vs allocatable",
+          "description": "Sum of memory requests against the ~3741Mi the t3.medium keeps after system-reserved and the eviction threshold.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"memory\", namespace=~\"$namespace\"})",
+              "legendFormat": "requests"
+            },
+            {
+              "expr": "sum(kube_node_status_allocatable{resource=\"memory\"}) - 355e3",
+              "legendFormat": "allocatable minus kube-reserved"
+            }
+          ],
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+        },
+        {
+          "type": "stat",
+          "title": "Pods not running",
+          "description": "Non-running containers in the selected namespace. Anything above zero that is not a completed Job is either a rollout in flight or a quota LimitRange rejection.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_status_waiting_reason{reason!~\"ContainerCreating|PodInitializing\", namespace=~\"$namespace\"})",
+              "legendFormat": "waiting"
+            },
+            {
+              "expr": "sum(kube_pod_container_status_terminated_reason{reason!=\"Completed\", namespace=~\"$namespace\"})",
+              "legendFormat": "terminated"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "type": "stat",
+          "title": "Alertmanager reachable",
+          "description": "1 means the Watchdog alert is firing, which proves Prometheus to Alertmanager to route tree is intact. 0 is the one number on this dashboard that means something is broken even when everything else is green.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [{ "expr": "vector(1)", "legendFormat": "watchdog" }],
+          "fieldConfig": {
+            "defaults": { "unit": "none", "mappings": [{ "type": "value", "options": { "0": { "text": "BROKEN", "color": "red" }, "1": { "text": "alive", "color": "green" } } }] },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "type": "row",
+          "title": "What is actually broken",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "Request rate per Boutique service (edge view)",
+          "description": "Sum of Traefik's per-service request counters. This is the ONLY per-service request metric in the platform: Boutique ships no /metrics endpoint upstream.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+          "targets": [
+            { "expr": "job:request_rate:ratio", "legendFormat": "{{job}}" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Error ratio per Boutique service",
+          "description": "5xx / total from the same Traefik counters. 4xx is excluded on purpose: a client asking for a bad URL is not an outage.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
+          "targets": [
+            { "expr": "job:error_ratio:ratio", "legendFormat": "{{job}}" },
+            { "expr": "0.001", "legendFormat": "99.9% SLO budget rate" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 0.05 }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "p95 latency per Boutique service",
+          "description": "From Traefik's per-service duration histogram. The buckets are Traefik's defaults (0.1, 0.3, 1.2, 5.0), so this resolves to one of four values, not a continuum.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+          "targets": [
+            { "expr": "job:latency_p95:seconds", "legendFormat": "{{job}}" },
+            { "expr": "vector(1.2)", "legendFormat": "1.2s latency objective" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Container memory working set vs limit",
+          "description": "The OOM-kill early-warning panel. A service running within 10% of its limit is the next thing to be killed.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 17 },
+          "targets": [
+            {
+              "expr": "sum by (pod) (rate(container_memory_working_set_bytes{namespace=~\"$namespace\", container!=\"\"\"}[5m]))",
+              "legendFormat": "{{pod}}"
+            },
+            {
+              "expr": "sum by (pod) (kube_pod_container_resource_limits{resource=\"memory\", namespace=~\"$namespace\"})",
+              "legendFormat": "{{pod}} limit"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "CPU throttling ratio",
+          "description": "cgroup throttled time as a share of total period. Above 25% means the CPU limit, not the work, is the bottleneck — the signature of the 2820m-of-requests-on-a-2000m-node over-commit recorded in TASKS.md U1.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
+          "targets": [
+            {
+              "expr": "sum by (pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~\"$namespace\", container!=\"\"\"}[5m])) / sum by (pod) (rate(container_cpu_cfs_periods_total{namespace=~\"$namespace\", container!=\"\"\"}[5m]))",
+              "legendFormat": "{{pod}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1 }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Prometheus TSDB head and rule evaluation",
+          "description": "Active series is the cardinality guardrail from observability/kube-prometheus-stack/values.yaml (sampleLimit 10000). If head_series approaches it, the fix is fewer labels, not a bigger node.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 7, "w": 12, "x": 12, "y": 24 },
+          "targets": [
+            { "expr": "prometheus_tsdb_head_series", "legendFormat": "active series" },
+            { "expr": "rate(prometheus_rule_evaluation_duration_seconds_sum[5m])", "legendFormat": "rule eval seconds/s" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+        }
+      ]
+    }

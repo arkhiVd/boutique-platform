@@ -1,0 +1,244 @@
+# Fluent Bit — Boutique log pipeline
+# -----------------------------------------------------------------------------
+# A wrapper chart around fluent/fluent-bit 0.58.3. The chart's classic-mode
+# configuration is in values.yaml under `config.*`; this file holds the PARSERS
+# as a ConfigMap the chart mounts, because a parser is the artifact an on-call
+# engineer edits during an incident and it should be readable without reading a
+# Helm release.
+#
+# THE REAL LOG FORMATS — verified, not assumed
+# ---------------------------------------------
+# Every format below was read from the vendored upstream v0.10.7 source and then
+# CONFIRMED BY RUNNING THE FORMATTER. Evidence, per service:
+#
+#   Go, logrus JSON  (frontend, checkoutservice, productcatalogservice,
+#                     shippingservice)
+#     src/frontend/main.go:95  log.Formatter = &logrus.JSONFormatter{
+#                                   FieldMap: logrus.FieldMap{
+#                                       logrus.FieldKeyTime:  "timestamp",
+#                                       logrus.FieldKeyLevel: "severity",
+#                                       logrus.FieldKeyMsg:   "message"},
+#                                   TimestampFormat: time.RFC3339Nano}
+#     => {"timestamp":"2026-10-09T01:02:03.123456789Z","severity":"info","message":"..."}
+#
+#   Node, pino JSON   (currencyservice, paymentservice)
+#     src/currencyservice/server.js:18  pino({name: 'currencyservice-server',
+#         messageKey: 'message', formatters: {level(l) {return {severity: l}}}})
+#     VERIFIED BY RUNNING the pino config, which produced:
+#     => {"severity":"info","time":1791490047777,"pid":1377729,"hostname":"omarchy",
+#         "name":"currencyservice-server","message":"conversion request successful"}
+#     `time` is epoch MILLISECONDS. pino emits NO `level` key when
+#     `formatters.level` returns an object — it merges the returned object
+#     instead, which is why `severity` is a lowercase string and there is no
+#     numeric `level` field.
+#
+#   Python, python-json-logger (emailservice, recommendationservice)
+#     src/emailservice/logger.py  CustomJsonFormatter('%(timestamp)s %(severity)s
+#                                %(name)s %(message)s'), set on a
+#                                logging.StreamHandler(sys.stdout)
+#     VERIFIED BY RUNNING the vendored formatter under python-json-logger 4.0.0
+#     (the pinned version in requirements.txt), which produced:
+#     => {"timestamp": 1791490034.3177984, "severity": "INFO",
+#         "name": "emailservice-server", "message": "starting the email service..."}
+#     `timestamp` is `record.created`, a FLOAT SECONDS value, not an RFC3339
+#     string. That is the single most important detail in this file: a parser that
+#     assumes RFC3339 here silently parses nothing and every Python log line
+#     lands with the collection timestamp instead.
+#
+#   Java, log4j2 JsonLayout (adservice)
+#     src/adservice/src/main/resources/log4j2.xml
+#         <JsonLayout compact="true" eventEol="true">
+#           <KeyValuePair key="logging.googleapis.com/trace"  value="$${ctx:traceId}"/>
+#           <KeyValuePair key="logging.googleapis.com/spanId" value="$${ctx:spanId}"/>
+#           <KeyValuePair key="logging.googleapis.com/traceSampled" .../>
+#           <KeyValuePair key="time" value="$${date:yyyy-MM-dd}T$${date:HH:mm:ss.SSS}Z"/>
+#         </JsonLayout>
+#     => JSON with the log4j2 JsonLayout's own keys (instant, thread, level,
+#        loggerName, message, loggerFqcn, ...) PLUS the four KeyValuePair keys
+#        above. `time` is `2026-10-09T01:00:00.123Z` — RFC3339 with milliseconds
+#        and no offset, which is NOT what Fluent Bit's `%z`-suffixed formats
+#        expect, so the parser below anchors it with a literal `Z`.
+#     `logging.googleapis.com/trace` is the W3C trace ID and is the field the
+#     find-the-failing-checkout runbook greps for.
+#
+#   .NET, plain text two-line (cartservice)
+#     src/cartservice/src/Program.cs  Host.CreateDefaultBuilder(args)
+#        .ConfigureWebHostDefaults(...)  -- the default console logger, which
+#        emits  info: <category>[<eventid>]\n      <message>
+#     NO timestamp at all. The parser below therefore leaves the timestamp to the
+#     collection time and says so; there is nothing in the line to extract.
+#
+#   Locust, two shapes (loadgenerator)
+#     locust==2.43.0's locust/log.py `setup_logging` uses
+#        "[%(asctime)s] {HOSTNAME}/%(levelname)s/%(name)s: %(message)s"
+#     for the `default` formatter, and a BARE `%(message)s` for the
+#     `locust.stats_logger` logger. So the loadgenerator emits BOTH a formatted
+#     line and an unformatted stats-table line from the same process, and the
+#     second shape has no timestamp at all — which is why SPEC's
+#     `grep Aggregated` line comes out of `locust.stats_logger`'s plain output.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-boutique-parsers
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: fluent-bit
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/logging: boutique-parsers
+data:
+  boutique-parsers.conf: |
+    ## =====================================================================
+    ## 1. Go / logrus JSON — frontend, checkoutservice, productcatalogservice,
+    ##    shippingservice
+    ## =====================================================================
+    [PARSER]
+        Name boutique-go-json
+        Format json
+        # Time_Key is `timestamp`, NOT `time` — logrus's FieldMap renames it.
+        Time_Key timestamp
+        # RFC3339Nano: "2026-10-09T01:02:03.123456789Z". Fluent Bit's `%L`
+        # takes the fractional seconds (up to 9 digits) and `%z` takes the `Z`
+        # suffix. Verified against Fluent Bit's flb_strptime, which documents
+        # `%z` as accepting Z, +hhmm, +hh:mm and +hh.
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+        Time_Keep On
+        # Reserve_Data On keeps the Kubernetes metadata the kubernetes filter
+        # added, instead of replacing the whole record with just the parsed keys.
+        Reserve_Data On
+
+    ## =====================================================================
+    ## 2. Node / pino JSON — currencyservice, paymentservice
+    ## =====================================================================
+    [PARSER]
+        Name boutique-node-json
+        Format json
+        # pino's `time` is EPOCH MILLISECONDS, not a string. `%s` in Fluent Bit
+        # means "seconds since epoch", so this would be wrong by 1000x — the
+        # correct key is therefore NOT `time`, and the timestamp is deliberately
+        # left to the collection time rather than munged.
+        #
+        # This is the one place this file knowingly accepts an approximation, and
+        # it is stated rather than hidden: Fluent Bit's json parser has no
+        # "epoch milliseconds" format. The alternative is a two-stage filter that
+        # divides the field, which costs a `modify` filter per record for a
+        # timestamp nobody queries by. Loki's log lines are ordered by ingestion
+        # time anyway; the per-service ORDERING is what the trace ID is for.
+        Time_Keep Off
+        Reserve_Data On
+
+    ## =====================================================================
+    ## 3. Python / python-json-logger — emailservice, recommendationservice
+    ## =====================================================================
+    [PARSER]
+        Name boutique-python-json
+        Format json
+        # `timestamp` is `record.created`, a FLOAT SECONDS value such as
+        # 1791490034.3177984. This is the parser detail that is easiest to get
+        # wrong and hardest to notice: every Python log line would otherwise
+        # carry the collection timestamp, and the runbook's `| line_format` /
+        # time-range queries would silently return nothing.
+        #
+        # `%s` in Fluent Bit is "seconds since epoch" and accepts a fractional
+        # part. Verified in flb_strptime:
+        #     case 's': ... _conv_num64(&bp, &i64, 0, INT64_MAX) ...
+        Time_Key timestamp
+        Time_Format %s
+        Time_Keep On
+        Reserve_Data On
+
+    ## =====================================================================
+    ## 4. Java / log4j2 JsonLayout — adservice
+    ## =====================================================================
+    [PARSER]
+        Name boutique-java-json
+        Format json
+        # `time` comes from the log4j2 KeyValuePair, formatted
+        # `${date:yyyy-MM-dd}T${date:HH:mm:ss.SSS}Z`. The trailing `Z` is a
+        # LITERAL in that string, not a timezone token, so it is anchored
+        # literally here rather than matched with `%z`.
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%LZ
+        Time_Keep On
+        Reserve_Data On
+
+    ## =====================================================================
+    ## 5. .NET plain text, two lines — cartservice
+    ## =====================================================================
+    # The .NET default console logger emits
+    #     info: Microsoft.Hosting.Lifetime[0]
+    #           Now listening on: http://[::]:7070
+    # There is NO timestamp and NO machine-parseable structure, so this parser
+    # does what is possible: it captures the level, the category and the message,
+    # and leaves the timestamp to the collection time. That is a recorded
+    # limitation of the upstream logging setup, not an omission here — .NET has
+    # `ConsoleLoggerOptions.TimestampFormat`, and setting it would be a change to
+    # cartservice's Program.cs, which is out of this phase's scope.
+    [PARSER]
+        Name boutique-dotnet-plain
+        Format regex
+        # `[\s\S]*` rather than `(?s:.*)`, and the difference is a FAILURE not a
+        # preference. Fluent Bit compiles parser regexes with Oniguruma, which
+        # does not support the inline `(?s:...)` group flag. Proven by running the
+        # pinned image against this file:
+        #
+        #   docker run --rm -v $PWD:/cfg fluent/fluent-bit:5.1.3 \
+        #     --config=/cfg/svc.conf --dry-run
+        #   [error] [parser:boutique-dotnet-plain] Invalid regex pattern
+        #           ...(?<message>(?s:.*))$/
+        #   [error] configuration file contains errors, aborting.
+        #
+        # That is a hard startup failure: Fluent Bit refuses to start, the
+        # DaemonSet CrashLoops on every node, and NO log line from ANY service
+        # reaches Loki — not just cartservice's. A parser file is validated as a
+        # whole, so one bad regex takes down the whole pipeline. The equivalent
+        # character class `[\s\S]` compiles and means exactly the same thing.
+        Regex /^(?<severity>[a-z]+): (?<logger>[^\[\]]+)\[(?<eventid>\d+)\]\s*\n\s*(?<message>[\s\S]*)$/
+        Time_Keep Off
+        Types severity:string eventid:integer
+
+    ## =====================================================================
+    ## 6. Locust default formatter — loadgenerator
+    ## =====================================================================
+    # locust/log.py: `"[%(asctime)s] {HOSTNAME}/%(levelname)s/%(name)s: %(message)s"`
+    [PARSER]
+        Name boutique-locust-plain
+        Format regex
+        Regex /^\[(?<time>[^\]]+)\] (?<hostname>[^\/]+)\/(?<severity>[A-Z]+)\/(?<logger>[^\:]+): (?<message>.*)$/
+        # asctime is "2026-10-09 01:00:00,000" — comma before the milliseconds.
+        Time_Key time
+        Time_Format %Y-%m-%d %H:%M:%S,%L
+        Time_Keep On
+        Types severity:string
+
+    ## =====================================================================
+    ## 7. Everything else — kube-system, redis-cart, and the stats table
+    ## =====================================================================
+    # redis-cart logs plain text to stdout with no structure, and
+    # locust.stats_logger's `plain` formatter emits bare lines. Both need a
+    # `message` field so the runbook's `| json | message=~"..."` LogQL works for
+    # EVERY service and not only the five structured ones.
+    #
+    # A catch-all regex, and NOT `Format none`. `Format none` is not a valid
+    # Fluent Bit parser format at all — proven by running the pinned image
+    # against this file:
+    #
+    #   docker run --rm -v $PWD:/cfg fluent/fluent-bit:5.1.3 \
+    #     --config=/cfg/svc.conf --dry-run
+    #   [error] [parser:boutique-plain] Invalid format none
+    #   [error] configuration file contains errors, aborting.
+    #
+    # Fluent Bit refuses to START on that error. The parser FILE is validated as
+    # a whole, so one bad parser is not "redis-cart's logs are unparsed" — it is
+    # the DaemonSet CrashLooping on all four nodes and no log line from any of
+    # the 11 Boutique services reaching Loki. Omitting `Format` fails the same
+    # way ("no parser 'format' found"), so a Format is mandatory.
+    #
+    # `[\s\S]*` rather than `(?s:.*)`: Oniguruma does not accept the inline
+    # `(?s:...)` flag. See the note on boutique-dotnet-plain above.
+    [PARSER]
+        Name boutique-plain
+        Format regex
+        Regex /^(?<message>[\s\S]*)$/
+        Time_Keep Off
+        Types message:string

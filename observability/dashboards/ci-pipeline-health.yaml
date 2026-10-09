@@ -1,0 +1,223 @@
+# CI pipeline health dashboard
+# -----------------------------------------------------------------------------
+# Provisioned by the kube-prometheus-stack Grafana sidecar (label
+# `grafana_dashboard: "1"`).
+#
+# ROADMAP Phase 9 also asks that "the CI pipeline [be] a monitored system
+# (Jenkins exporter)". The metrics come from the jenkinsci/prometheus-plugin,
+# whose exact metric names are verified from the plugin's own documentation:
+#
+#   default_jenkins_builds_last_build_result_ordinal
+#        0=SUCCESS, 1=UNSTABLE, 2=FAILURE, 3=NOT_BUILT, 4=ABORTED
+#   default_jenkins_builds_failed_build_count, _total_build_count (counters)
+#   default_jenkins_builds_running_build_duration_milliseconds (gauge)
+#   default_jenkins_executors_queue_length, _defined, _online (gauges)
+#   default_jenkins_nodes_online (gauge)
+#
+# The `ci` namespace does not exist yet — it is Phase 7 — so every panel on this
+# dashboard is empty today. That is stated here rather than hidden, because an
+# empty dashboard that looks like a working one is the failure mode.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ci-pipeline-health
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/dashboard: ci-pipeline-health
+data:
+  ci-pipeline-health.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": false,
+      "title": "CI pipeline health (Jenkins)",
+      "uid": "ci-pipeline-health",
+      "version": 1,
+      "tags": ["boutique-platform", "ci", "jenkins"],
+      "time": { "from": "now-24h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "job",
+            "label": "Jenkins job",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(default_jenkins_builds_last_build_result_ordinal, job_name)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Pipeline state",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+        },
+        {
+          "type": "stat",
+          "title": "Jenkins reachable",
+          "description": "default_jenkins_up from the prometheus-plugin. 0 means the controller is not accepting requests, which is the one state where every other panel here is meaningless.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+          "targets": [{ "expr": "max(default_jenkins_up)", "legendFormat": "up" }],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "up", "color": "green" } } }
+              ]
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "type": "stat",
+          "title": "Failing jobs",
+          "description": "Count of jobs whose LAST build result is FAILURE (ordinal 2). This is the number JenkinsBuildFailed in observability/rules/boutique-alerts.yaml pages on.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+          "targets": [
+            { "expr": "count(default_jenkins_builds_last_build_result_ordinal == 2)", "legendFormat": "FAILURE" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                { "type": "range", "options": { "from": 0.5, "to": 100, "result": { "text": "{{ id }}", "color": "red" } } }
+              ]
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "type": "stat",
+          "title": "Unstable jobs",
+          "description": "Count of jobs whose last build result is UNSTABLE (ordinal 1) — a failing test, not a failing platform. Not alerted: a knowingly failing test branch is the pipeline's own gate.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+          "targets": [
+            { "expr": "count(default_jenkins_builds_last_build_result_ordinal == 1)", "legendFormat": "UNSTABLE" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "type": "stat",
+          "title": "Executor queue length",
+          "description": "default_jenkins_executors_queue_length. Above 5 for 10 minutes fires JenkinsQueueBacklog, which on this platform almost always means the workload node cannot schedule an agent pod (TASKS.md U1) rather than a Jenkins misconfiguration.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+          "targets": [{ "expr": "max(default_jenkins_executors_queue_length)", "legendFormat": "queued" }],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "type": "row",
+          "title": "Build outcomes over time",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Build completion by result (per hour)",
+          "description": "Counters from default_jenkins_builds_*_build_count. A rising aborted count alongside a flat success count is the signature of agent pods being evicted mid-build.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
+          "targets": [
+            {
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_success_build_count[1h]))",
+              "legendFormat": "{{job_name}} success"
+            },
+            {
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_failed_build_count[1h]))",
+              "legendFormat": "{{job_name}} failed"
+            },
+            {
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_unstable_build_count[1h]))",
+              "legendFormat": "{{job_name}} unstable"
+            },
+            {
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_aborted_build_count[1h]))",
+              "legendFormat": "{{job_name}} aborted"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true } }
+        },
+        {
+          "type": "timeseries",
+          "title": "Last build result per job",
+          "description": "The ordinal gauge, per job. A line that does not return to 0 after a failure is a job nobody has re-run.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+          "targets": [
+            {
+              "expr": "default_jenkins_builds_last_build_result_ordinal{job_name=~\"$job\"}",
+              "legendFormat": "{{job_name}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "min": 0,
+              "max": 4,
+              "mappings": [
+                { "type": "value", "options": { "0": { "text": "SUCCESS" }, "1": { "text": "UNSTABLE" }, "2": { "text": "FAILURE" }, "3": { "text": "NOT_BUILT" }, "4": { "text": "ABORTED" } } }
+              ]
+            },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Running build duration",
+          "description": "default_jenkins_builds_running_build_duration_milliseconds, per job. On a 2 vCPU node a duration that grows linearly with queue length is the over-commit, not the build.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+          "targets": [
+            {
+              "expr": "max by (job_name) (default_jenkins_builds_running_build_duration_milliseconds{job_name=~\"$job\"})",
+              "legendFormat": "{{job_name}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+        },
+        {
+          "type": "row",
+          "title": "Agents and nodes",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }
+        },
+        {
+          "type": "timeseries",
+          "title": "Executor states",
+          "description": "default_jenkins_executors_defined / _online / _busy / _idle. online below defined means an agent pod is not scheduling, which is the same root cause as the queue-length alert.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+          "targets": [
+            { "expr": "max(default_jenkins_executors_defined)", "legendFormat": "defined" },
+            { "expr": "max(default_jenkins_executors_online)", "legendFormat": "online" },
+            { "expr": "max(default_jenkins_executors_busy)", "legendFormat": "busy" },
+            { "expr": "max(default_jenkins_executors_idle)", "legendFormat": "idle" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+        },
+        {
+          "type": "timeseries",
+          "title": "Jenkins nodes online",
+          "description": "default_jenkins_nodes_online. Ephemeral Kubernetes agents should make this oscillate with the build rate rather than stay flat.",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+          "targets": [
+            { "expr": "max(default_jenkins_nodes_online)", "legendFormat": "nodes online" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+        }
+      ]
+    }

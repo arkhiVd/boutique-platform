@@ -1,0 +1,180 @@
+# Loki alert rules
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; observability/loki/templates/prometheusrules.yaml
+# wraps it into a PrometheusRule at render time, adding the release label the
+# Prometheus Operator's selector requires.
+#
+# Metric names are verified from Loki v3.6.12 source, not from memory:
+#
+#   loki_request_duration_seconds            histogram {method, route, status_code, ws}
+#     -- from the vendored dskit server metrics:
+#        vendor/github.com/grafana/dskit/server/metrics.go
+#        RequestDuration: NewHistogramVec({Name: "request_duration_seconds"},
+#        []string{"method", "route", "status_code", "ws"})
+#   loki_per_tenant_request_duration_seconds histogram {..., tenant}
+#   loki_per_tenant_request_total            counter   {..., tenant}
+#   loki_discarded_samples_total             counter   {reason, tenant, retention_hours,
+#                                                       policy, format}
+#     -- from pkg/validation/validate.go:
+#        DiscardedSamples: NewCounterVec({Name: "discarded_samples_total"},
+#        []string{ReasonLabel, "tenant", "retention_hours", "policy", "format"})
+#        and the reason constants from the same file:
+#        stream_limit, per_stream_rate_limit, rate_limited (per-stream), line_too_long,
+#        out_of_order, too_far_behind, greater_than_max_sample_age, too_far_in_future
+#   loki_ingester_streams                    gauge
+#
+# The `reason` label values matter for the third alert: `stream_limit` fires when
+# a NEW stream cannot be created, which is exactly the cardinality failure the
+# limits in observability/loki/values.yaml exist to prevent — so that specific
+# reason is alerted, and `rate_limited` is not, because a burst is normal.
+
+groups:
+  - name: loki.alerts
+    interval: 30s
+
+    rules:
+      ## -------------------------------------------------------------------
+      ## LokiRequestErrors — the platform-scoped half.
+      ##
+      ## observability/rules/boutique-alerts.yaml carries a rule with the SAME
+      ## NAME but a different, narrower expression: that one is scoped to the
+      ## push route, so a zero record of it means "logs are not being accepted",
+      ## which is the symptom an application owner cares about. This one is
+      ## scoped to every route, so it catches a failing QUERY API too. They are
+      ## distinguishable in Alertmanager by the `route` label, and both are
+      ## `severity: ticket`.
+      ##
+      ## The ratio form rather than a raw counter: 2 failures out of 2 is 100%
+      ## and 2 out of 40,000 is nothing, and a raw counter pages on both.
+      ## -------------------------------------------------------------------
+      - alert: LokiRequestErrors
+        annotations:
+          summary: "Loki is returning 5xx on {{ $labels.route }}"
+          description: >-
+            {{ $value | humanizePercentage }} of requests to Loki route
+            {{ $labels.route }} returned 5xx over the last 10 minutes. A failing
+            PUSH route means logs are not being stored; a failing QUERY route
+            means logs are stored but not readable. Both are tickets on this
+            platform, because neither is a user-visible outage of the
+            application, and neither has an action that a single operator can
+            take at 03:00 beyond "read the runbook".
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          sum by (route) (
+            rate(loki_request_duration_seconds_count{status_code=~"5.."}[10m])
+          )
+          /
+          sum by (route) (
+            rate(loki_request_duration_seconds_count[10m])
+          )
+          > 0.05
+        for: 10m
+        labels:
+          severity: ticket
+          platform.boutique/component: logs
+          scope: platform
+
+      ## -------------------------------------------------------------------
+      ## LokiRequestLatency — the query path is what an engineer waits on.
+      ##
+      ## p99 over the querier routes only. The push route is a write and its
+      ## latency is bounded by the ingestion_rate_mb limit, not by anything a
+      ## human notices; including it would dilute the number that matters.
+      ##
+      ## The 2s threshold is not arbitrary: observability/loki/values.yaml sets
+      ## limits_config.query_timeout to 2m and the READ side of the platform is
+      ## supposed to answer a "find the failing checkout" query inside the
+      ## 30-second window the runbook promises. 2s p99 leaves room for a query
+      ## that is legitimately slow; 10s means the query frontend is queueing.
+      ## -------------------------------------------------------------------
+      - alert: LokiRequestLatency
+        annotations:
+          summary: "Loki query latency is {{ $value }}s on route {{ $labels.route }}"
+          description: >-
+            p99 request latency for Loki route {{ $labels.route }} is
+            {{ $value }} seconds over the last 15 minutes. The read path is what
+            an engineer waits on during an incident; the Phase 10 runbook
+            promises a 30-second answer to "find the failing checkout", and a
+            query frontend that queues makes that promise false.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (route, le) (
+              rate(loki_request_duration_seconds_bucket{route=~".*query.*|.*loki.*"}[15m])
+            )
+          ) > 2
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: logs
+          scope: platform
+
+      ## -------------------------------------------------------------------
+      ## LokiLogLinesDropped — the cardinality and rate-limit guard.
+      ##
+      ## This is the alert that makes the bound in observability/loki/values.yaml
+      ## observable rather than aspirational. Two reasons are alerted:
+      ##
+      ##   stream_limit          a new stream cannot be created. This IS the
+      ##                         cardinality failure. If it fires, the label set
+      ##                         is wrong and the fix is to drop a label in the
+      ##                         Fluent Bit pipeline, not to raise a limit.
+      ##   per_stream_rate_limit one stream is ingesting faster than its share.
+      ##                         Almost always a service that started logging in
+      ##                         a tight loop.
+      ##
+      ## `rate_limited` (the tenant-level limit) is deliberately NOT alerted: it
+      ## is set 130x above the measured rate, so firing on it would mean a real
+      ## storm, and the stream alert above is the better signal for that.
+      ##
+      ## The `for: 10m` is there because a single dropped line during a restart
+      ## is normal and a dropped line every minute for ten minutes is not.
+      ## -------------------------------------------------------------------
+      - alert: LokiLogLinesDropped
+        annotations:
+          summary: "Loki is dropping log lines ({{ $labels.reason }})"
+          description: >-
+            Loki discarded {{ $value }} log lines in the last 10 minutes with
+            reason {{ $labels.reason }}. `stream_limit` means a new stream could
+            not be created — the cardinality bound in
+            observability/loki/values.yaml has been hit, and the fix is to drop
+            a label in the Fluent Bit pipeline, not to raise a limit.
+            `per_stream_rate_limit` means one stream is ingesting faster than
+            its share, which is usually a service logging in a tight loop.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: |
+          increase(
+            loki_discarded_samples_total{reason=~"stream_limit|per_stream_rate_limit"}[10m]
+          ) > 0
+        for: 10m
+        labels:
+          severity: ticket
+          platform.boutique/component: logs
+          platform.boutique/signal: cardinality
+
+      ## -------------------------------------------------------------------
+      ## The companion to the bound above: how many streams actually exist.
+      ## This is the number the cardinality comment in
+      ## observability/loki/values.yaml arithmetic is checked against, and it is
+      ## the number to look at BEFORE `LokiLogLinesDropped` fires.
+      ## Not an alert — a guardrail with a visible threshold, so that a rising
+      ## stream count is seen while it is still a planning conversation rather
+      ## than an incident.
+      ## -------------------------------------------------------------------
+      - alert: LokiIngesterStreamsHigh
+        annotations:
+          summary: "Loki active stream count is {{ $value }}"
+          description: >-
+            Loki is holding {{ $value }} active streams. The platform's bound is
+            90, and the alert threshold is set at 300, which is where the single
+            binary's memory starts to matter on a 4 GiB node. A value climbing
+            towards 300 means a label was added somewhere — most likely `pod` —
+            and the fix is in the Fluent Bit pipeline.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
+        expr: loki_ingester_streams > 300
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: logs
+          platform.boutique/signal: cardinality

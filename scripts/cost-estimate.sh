@@ -16,6 +16,9 @@ PRICED_ON="2026-10-08"
 : "${P_T2_MICRO:=0.0116}"; : "${P_T2_SMALL:=0.0232}"
 : "${P_GP3_GB:=0.08}"; : "${P_ALB_HR:=0.0225}"; : "${P_LCU_HR:=0.008}"
 : "${P_SNAP_GB:=0.05}"; : "${P_DATA_GB:=0.09}"; : "${P_LOG_GB:=0.50}"
+# t3 CPU-credit surcharge: an "unlimited" instance that exceeds its baseline accrues
+# $0.05 per vCPU-hour on the surplus. Modelled so the sustained-CPU trap is visible.
+: "${P_CPU_SURCHARGE:=0.05}"; : "${BASELINE_FRACTION:=0.20}"
 
 # The shape, as "<count>x <type> + <count>x <type>". Defaults to the SPEC's
 # recommended shape: three k3s servers for etcd quorum plus one workload node.
@@ -25,6 +28,13 @@ PRICED_ON="2026-10-08"
 : "${ALB:=1}"; : "${LCU:=2}"; : "${SNAP_GB:=4}"; : "${DATA_OUT_GB:=60}"; : "${LOG_GB:=2}"
 : "${WINDOW_DAYS:=43}"; : "${CREDIT_BUDGET:=200}"
 : "${VCPU_QUOTA:=8}"
+# Measured platform CPU requests (mCPU) from the rendered manifests: 3600m total,
+# of which 2820m is the `boutique` namespace. See docs/resource-budget.md.
+: "${MEASURED_REQUEST_MILLI:=3600}"
+# Expected sustained CPU as a fraction of the t3 baseline under demo
+# loadgenerator traffic. Requests are not usage; this is the honest
+# operating point, and the worst case is printed separately.
+: "${SUSTAINED_FRACTION:=0.80}"
 
 # --- resolve the shape into count/price/vcpu/ram per node type -------------------
 SHAPE_ROWS=""
@@ -75,7 +85,8 @@ awk -v shape="$SHAPE" -v rows="$SHAPE_ROWS" -v gb="$NODE_GB" \
     -v fe="$FREE_TIER_EBS_GB" -v pgp3="$P_GP3_GB" \
     -v alb="$ALB" -v pah="$P_ALB_HR" -v lcu="$LCU" -v pl="$P_LCU_HR" \
     -v snap="$SNAP_GB" -v psn="$P_SNAP_GB" -v dg="$DATA_OUT_GB" -v pd="$P_DATA_GB" \
-    -v lg="$LOG_GB" -v plog="$P_LOG_GB" -v wd="$WINDOW_DAYS" -v cb="$CREDIT_BUDGET" \
+    -v lg="$LOG_GB" -v plog="$P_LOG_GB" -v sur="$P_CPU_SURCHARGE" -v basef="$BASELINE_FRACTION" -v hrs="$HOURS_PER_MONTH" -v MEASURED_REQUEST_MILLI="$MEASURED_REQUEST_MILLI" -v SUSTAINED_FRACTION="$SUSTAINED_FRACTION" \
+    -v wd="$WINDOW_DAYS" -v cb="$CREDIT_BUDGET" \
     -v priced="$PRICED_ON" -v cqn="$VCPU_QUOTA" '
 BEGIN {
   n_lines = split(rows, L, "\n")
@@ -139,6 +150,30 @@ BEGIN {
   printf "Remaining %d-day window                                  = $%.2f  of a $%d credit (%.0f%%)\n", wd, win, cb, win * 100 / cb
   printf "Nodes fully inside the pooled 750 free hours: %.2f\n", free_node
   printf "vCPU: %d of the %.0f quota    RAM: %d GiB\n", tot_cpu, cqn, tot_ram
+
+  # t3 CPU-credit model. A t3 instance is burstable at a 20% baseline, so the
+  # cluster sustains 0.20 * total vCPU — NOT the 2000m a t3 advertises. Requests
+  # are an admission guarantee, not a performance guarantee. Two numbers matter:
+  #   * the committed cost, which the guard enforces
+  #   * the surcharge risk, which depends on sustained usage, not requests
+  baseline  = tot_cpu * 1000 * basef
+  req_cpu   = MEASURED_REQUEST_MILLI          # measured platform requests, mCPU
+  exp_sust  = baseline * SUSTAINED_FRACTION   # expected sustained under demo load
+  worst_sur = req_cpu - baseline;  if (worst_sur < 0) worst_sur = 0
+  exp_sur   = exp_sust - baseline; if (exp_sur < 0) exp_sur = 0
+  exp_risk  = exp_sur  / 1000 * sur * hrs
+  worst_risk= worst_sur / 1000 * sur * hrs
+
+  printf "\nt3 CPU-credit model (t3 is burstable at a 20%% baseline, so the cluster\n"
+  printf "  sustains %.0fm sustained, not the %dm the instances advertise):\n", baseline, tot_cpu * 1000
+  printf "  platform requests      %.0fm  (admission guarantee only)\n", req_cpu
+  printf "  expected sustained     %.0fm  = %.0f%% of baseline -> $%.2f/mo surcharge risk\n", exp_sust, SUSTAINED_FRACTION * 100, exp_risk
+  printf "  worst case sustained   %.0fm  = requests fully used -> $%.2f/mo surcharge risk\n", req_cpu, worst_risk
+  printf "  committed total        $%.2f/month   $%.2f over %d days (guarded)\n", total, total * wd / 30.4, wd
+  printf "  total incl. expected   $%.2f/month   $%.2f over %d days\n", total + exp_risk, (total + exp_risk) * wd / 30.4, wd
+  if (worst_risk > 0)
+    printf "  !! total incl. worst case $%.2f/month  $%.2f over %d days - OVER the $%d credit\n", total + worst_risk, (total + worst_risk) * wd / 30.4, wd, cb
+  win = (total + exp_risk) * wd / 30.4
 
   bad = 0
   if (win > cb) {
