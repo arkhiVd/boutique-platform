@@ -410,9 +410,32 @@ kube-prometheus-stack:
       userKey: admin-user
       passwordKey: admin-password
 
+    ## This chart's share of the node's CPU, measured by
+    ## `scripts/resource-budget.py` over the rendered manifests:
+    ##   prometheus 210m (200 here + the 10m config-reloader below)
+    ##   grafana     25m  (this line, cut from 50m — see below)
+    ##   alertmanager 20m + 10m reloader
+    ##   operator   20m
+    ##   kube-state-metrics 20m
+    ##   node-exporter 20m  (per node; the DaemonSet runs on all four)
+    ##
+    ## CPU IS THE BINDING CONSTRAINT ON THIS NODE, NOT MEMORY. The rendered
+    ## grand total is 3,565m of requests against the ~1,830m the kubelet leaves
+    ## schedulable on a t3.medium, and that is dominated by the `boutique`
+    ## namespace's own 2,820m (recorded by the Phase 6 work in
+    ## apps/boutique/quota.yaml as a known gap). Nothing in THIS chart closes
+    ## that gap, so the only defensible move here is to stop reserving CPU for
+    ## work that does not happen: Grafana spends CPU on query evaluation and
+    ## dashboard rendering, which is to say only while a human is looking at it.
+    ## Reserving 50m for that is 2.7% of the node's entire CPU for an idle UI.
+    ##
+    ## 25m is the request; the 300m LIMIT below is unchanged, so a dashboard
+    ## that genuinely needs 200m still gets it once something else is idle. A
+    ## request is a reservation, and this is the one component on the node whose
+    ## steady-state is genuinely near zero.
     resources:
       requests:
-        cpu: 50m
+        cpu: 25m
         memory: 96Mi
       limits:
         cpu: 300m
@@ -473,17 +496,50 @@ kube-prometheus-stack:
       enabled: false
 
     ## Prometheus and Loki are the two datasources the dashboards in
-    ## observability/dashboards/ query. `prometheus` is provisioned by the chart;
-    ## Loki is added because Phase 10's dashboards need it and Grafana's default
-    ## datasource is otherwise absent a second data source.
+    ## observability/dashboards/ query. `prometheus` is provisioned by the
+    ## chart; Loki is added because the log-tier queries in
+    ## docs/runbooks/find-the-failing-checkout.md and the Phase 10 log dashboard
+    ## both need it, and Grafana auto-generates a UID for it unless one is set —
+    ## which would make every panel that references it by UID silently unbound.
+    ## The UID is fixed here so those references are stable.
+    ##
+    ## The four dashboards in observability/dashboards/ are Prometheus-driven and
+    ## do not reference this uid today; it is provisioned for Explore (the
+    ## runbook's LogQL path) and for Phase 10's log dashboard, and it is why
+    ## ROADMAP Phase 10 calls for one.
+    ##
+    ## THE URL is the Loki chart's SingleBinary Service. Rendered and checked
+    ## against loki 7.3.0 with a release named `loki`: the StatefulSet's Service
+    ## is `loki` with a single port named `http-metrics` on 3100. There is no
+    ## gateway Service in SingleBinary mode with `gateway.enabled: false`,
+    ## which is the configuration in observability/loki/values.yaml — an nginx
+    ## proxy in front of a single binary is a process that adds an auth
+    ## boundary and no benefit.
+    ##
+    ## THIS KEY IS AT THE `grafana:` LEVEL, NOT UNDER `grafana.ingress:`.
+    ## That is not a style choice. Helm silently ignores a key the subchart
+    ## does not read, so an `additionalDataSources` nested one level deeper
+    ## renders nothing: `helm template` succeeds, `helm lint --strict` passes,
+    ## and the only symptom is in Grafana, where the Loki datasource does not
+    ## exist and every panel that queries it reports "datasource not found".
+    ## This exact indentation error was made, rendered, linted and committed to
+    ## this file, and it was caught by dumping the rendered
+    ## `<release>-kube-prometheus-stack-grafana-datasource` ConfigMap and
+    ## finding no `type: loki` entry. The chart reads
+    ## `grafana.additionalDataSources` (templates/grafana/configmaps-datasources.yaml).
     additionalDataSources:
       - name: Loki
         type: loki
+        uid: loki
         access: proxy
-        url: http://loki-gateway.observability.svc.cluster.local:80
+        url: http://loki.observability.svc.cluster.local:3100
         isDefault: false
         jsonData:
           maxLines: 1000
+          # The `derivedFields` below turn a trace ID in a log line into a link
+          # to Tempo. That requires the Tempo datasource, which is Phase 11. It
+          # is left OUT on purpose rather than added as a link that 404s.
+        derivedFields: []
 
   ## ---------------------------------------------------------------------------
   ## Default rules
