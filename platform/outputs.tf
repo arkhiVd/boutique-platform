@@ -68,3 +68,86 @@ output "alert_email" {
     topic_arn = "arn:aws:sns:us-east-1:${data.aws_caller_identity.current.account_id}:boutique-platform-alerts"
   }
 }
+
+# ---------------------------------------------------------------------------
+# Phase 3 outputs.
+# ---------------------------------------------------------------------------
+
+output "k3s_version" {
+  description = "The exact k3s build the nodes install. Pinned in nodes.tf because the stable channel is a moving target and a node rejoining later must join the same build it left."
+  value       = local.k3s_version
+}
+
+output "leader_instance_id" {
+  description = "The designated k3s leader -- the instance whose AZ is local.leader_az. This is the target scripts/bootstrap-cluster.sh opens an SSM session to, and the node that runs the etcd snapshot timer."
+  value       = aws_instance.k3s_server[local.leader_az].id
+}
+
+output "leader_private_ip" {
+  # Taken from the instance rather than from the SSM parameter: the provider
+  # marks every aws_ssm_parameter `value` sensitive (it has no way to know a
+  # String parameter from a SecureString one), and a private address is not a
+  # secret while an output marked sensitive hides it from the plan for no reason.
+  description = "Private address the two followers and the workload node join on, read from SSM at boot."
+  value       = aws_instance.k3s_server[local.leader_az].private_ip
+}
+
+output "node_instance_ids" {
+  description = "Every instance this stack creates, by role. Used by scripts/doctor.sh's SSM path and by the Phase 14 teardown check."
+  value = {
+    servers = { for az, inst in aws_instance.k3s_server : az => inst.id }
+    worker  = aws_instance.k3s_worker.id
+  }
+}
+
+output "schedulable_nodes" {
+  description = "The four nodes and the AZ each lands in. Read this against `kubectl get nodes -o wide` after the apply: the SPEC's scheduling model is that all four are schedulable, with no control-plane taint."
+  value = merge(
+    { for az, inst in aws_instance.k3s_server : inst.private_ip => "server-${az}" },
+    { (aws_instance.k3s_worker.private_ip) = "worker-${local.worker_az}" }
+  )
+}
+
+output "k3s_node_names" {
+  description = "The Kubernetes node names cloud-init registers, so `kubectl get nodes` output can be checked against something planned rather than interpreted afterwards."
+  value = merge(
+    { for az, inst in aws_instance.k3s_server : "server-${az}" => "boutique-leader-${inst.id}" if az == local.leader_az },
+    { for az, inst in aws_instance.k3s_server : "server-${az}" => "boutique-follower-${inst.id}" if az != local.leader_az },
+    { "worker-${local.worker_az}" = "boutique-agent-${aws_instance.k3s_worker.id}" }
+  )
+}
+
+output "kms_key_arn" {
+  description = "The CMK encrypting the root volumes and the k3s join token. The documented token-rotation command names this ARN."
+  value       = aws_kms_key.platform.arn
+}
+
+output "etcd_snapshot_bucket" {
+  description = "Where the Phase 4 etcd snapshot timer writes, and the only bucket the node role can write to."
+  value       = aws_s3_bucket.etcd_snapshots.id
+}
+
+output "etcd_snapshot_prefix" {
+  description = "The S3 prefix under etcd_snapshot_bucket that the timer uploads into. Matches the s3:PutObject/DeleteObject grants in iam-nodes.tf exactly."
+  value       = "s3://${aws_s3_bucket.etcd_snapshots.id}/${local.etcd_snapshot_folder}/"
+}
+
+output "ami_id" {
+  # nonsensitive because an AMI ID is published by AWS in every AMI console and
+  # query; the provider marks every parameter `value` sensitive without
+  # distinguishing a public one from a SecureString. The only value in this stack
+  # that must stay unsurfaced is the k3s token, and that one never reaches a
+  # `value` attribute at all -- see the header of nodes.tf.
+  description = "The Amazon Linux 2023 AMI every node boots, read from SSM's public parameter at plan time."
+  value       = nonsensitive(data.aws_ssm_parameter.amazon_linux_2023.value)
+}
+
+output "instance_profile_arn" {
+  description = "The instance profile the launch templates pass to every node. Narrowed in iam-nodes.tf to SSM, ECR pull, CloudWatch, KMS, and the etcd snapshot prefix."
+  value       = aws_iam_instance_profile.boutique_node.arn
+}
+
+output "k3s_join_token_parameter" {
+  description = "The SSM parameter holding the join token. This is the whole point of the write-only design: the plan shows the name and never the value."
+  value       = aws_ssm_parameter.k3s_token.name
+}

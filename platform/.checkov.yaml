@@ -56,3 +56,22 @@ skip-check:
   # thing to add when a phase needs it; recorded here rather than passed over.
   # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/logging-9-enable-vpc-flow-logging
   - CKV2_AWS_11
+
+  # Cross-region replication on the etcd snapshot bucket. This is a deliberate
+  # deviation and the same one bootstrap/.checkov.yaml makes for the state bucket:
+  # replicating a lab cluster's snapshots into a second region doubles the storage
+  # footprint and the request cost for a stack destroyed at Phase 14, and the
+  # recovery objective that matters here is "one snapshot is loadable", which
+  # scripts/etcd-restore-drill.sh proves. A CRR decision belongs with a
+  # multi-region decision, which SPEC.md lists as a non-goal.
+  # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-general-policies/ensure-that-s3-bucket-has-cross-region-replication-enabled
+  - CKV_AWS_144
+
+  # Event notifications on the etcd snapshot bucket. The bucket's only reader is
+  # scripts/etcd-restore-drill.sh, run by hand; there is no consumer that would
+  # react to an SNS event, and wiring one would add a topic, a policy and a
+  # subscription for a message nobody handles. The meaningful alert is "a snapshot
+  # that was expected is not there", which scripts/doctor.sh already reports from
+  # the Kubernetes API (ETCDSnapshotFile objects) without a second event bus.
+  # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/bc-aws-2-62
+  - CKV2_AWS_62

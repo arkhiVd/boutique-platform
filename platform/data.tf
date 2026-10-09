@@ -24,6 +24,20 @@ locals {
   # the leading slash the API name has, hence the trimprefix.
   k3s_channel_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${trimprefix(var.k3s_channel_parameter_name, "/")}"
 
+  # The k3s join token (SecureString, Phase 3) and the designated leader's
+  # private address (String, Phase 3). Both are read by every node at boot, and
+  # the node role's grants in iam-nodes.tf name exactly these two ARNs -- a node
+  # that could read any other parameter in the account would be a much larger
+  # hole than the S3 scoping below.
+  k3s_token_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${trimprefix(local.k3s_token_parameter_name, "/")}"
+
+  k3s_leader_ip_parameter_arn = "arn:${data.aws_partition.current.partition}:ssm:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:parameter/${trimprefix(local.k3s_leader_ip_parameter_name, "/")}"
+
+  # The parameter names live in nodes.tf, next to the resources that create them.
+  k3s_token_parameter_name = "/boutique-platform/k3s/token"
+
+  k3s_leader_ip_parameter_name = "/boutique-platform/k3s/leader-ip"
+
   # Only the three AZs the SPEC names, in a deterministic order.
   azs = [for az in data.aws_availability_zones.available.names : az if contains(var.azs, az)]
 

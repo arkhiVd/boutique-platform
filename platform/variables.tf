@@ -98,3 +98,88 @@ variable "node_role_name" {
   default     = "boutique-platform-node"
   description = "Name of the instance role and instance profile. Also the ARN the bootstrap apply role is allowed to pass to EC2."
 }
+
+# ---------------------------------------------------------------------------
+# Phase 3: the cluster.
+# ---------------------------------------------------------------------------
+
+variable "k3s_token" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+  nullable  = false
+
+  description = <<-EOT
+    The k3s join token. EPHEMERAL and WRITE-ONLY: Terraform passes it to
+    aws_ssm_parameter.k3s_token as a write-only attribute and then discards it, so
+    it appears in neither the plan nor the state nor any plan file.
+
+    Because an ephemeral variable cannot have a default, EVERY Terraform command
+    needs one:
+
+        TF_VAR_k3s_token="$(openssl rand -hex 32)" terraform plan
+        TF_VAR_k3s_token="..."                       terraform apply
+
+    Generate one with `openssl rand -hex 32`. Rotation is either
+    `terraform apply -var k3s_token=<new> -var k3s_token_version=2` or the
+    documented aws ssm put-parameter command in platform/README.md.
+
+    Never write this into a tracked file. *.tfvars is gitignored, so a local
+    terraform.tfvars is acceptable for a workstation, but it is plaintext on disk.
+  EOT
+
+  validation {
+    condition     = length(var.k3s_token) >= 32
+    error_message = "k3s_token must be at least 32 characters: `openssl rand -hex 32` produces 64."
+  }
+}
+
+variable "k3s_token_version" {
+  type        = number
+  default     = 1
+  description = "The write-only attribute's version. Bump it together with a new k3s_token to make the provider re-issue the SSM parameter; without a bump, a changed token is silently ignored."
+
+  validation {
+    condition     = var.k3s_token_version >= 1 && floor(var.k3s_token_version) == var.k3s_token_version
+    error_message = "k3s_token_version must be a positive integer, 1 or greater."
+  }
+}
+
+variable "node_volume_size_gb" {
+  type        = number
+  default     = 16
+  description = "Size of each node's encrypted gp3 root volume. 4 x 16 GiB = 64 GiB, of which 30 GiB is the free tier, which is what scripts/cost-estimate.sh assumes."
+
+  validation {
+    condition     = var.node_volume_size_gb >= 8 && var.node_volume_size_gb <= 512
+    error_message = "node_volume_size_gb must be between 8 and 512. The SPEC's cost model assumes 16 GiB x 4 nodes."
+  }
+}
+
+variable "api_ready_wait_seconds" {
+  type        = number
+  default     = 300
+  description = "How long a node's cloud-init waits for the kube-apiserver to report healthy before giving up. Strict on the designated leader (the apply fails) and advisory on the other nodes (the systemd unit keeps retrying)."
+
+  validation {
+    condition     = var.api_ready_wait_seconds >= 60
+    error_message = "api_ready_wait_seconds must allow at least 60s: k3s takes about that long to write its first serving certificate."
+  }
+}
+
+variable "ssm_parameter_wait_seconds" {
+  type        = number
+  default     = 600
+  description = "How long a node's cloud-init polls SSM for the join token and the leader address. Long on purpose: on a cold cluster the leader is still installing k3s when the followers boot."
+}
+
+variable "etcd_snapshot_retention_days" {
+  type        = number
+  default     = 30
+  description = "How long an etcd snapshot stays in S3 before the lifecycle rule expires it. The Phase 3 timer writes 4 a day, so 30 days is about 120 recovery points and stays inside the S3 5 GiB free tier."
+
+  validation {
+    condition     = var.etcd_snapshot_retention_days >= 1 && var.etcd_snapshot_retention_days <= 365
+    error_message = "etcd_snapshot_retention_days must be between 1 and 365. The SPEC's window is 43 days."
+  }
+}

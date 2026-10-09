@@ -104,6 +104,14 @@ data "aws_iam_policy_document" "boutique_node" {
   # The etcd snapshot target, and the one thing a node can write to S3. The
   # bucket itself is created in Phase 4 with the snapshot schedule; the grant is
   # already in place so the policy never has to be reopened.
+  #
+  # Three separate statements, because AWS scopes list and delete differently
+  # from write: ListBucket acts on the bucket ARN and returns keys, while
+  # PutObject and DeleteObject act on object ARNs. `k3s etcd-snapshot ls` needs
+  # the list, `k3s etcd-snapshot prune`/`delete` needs DeleteObject, and the
+  # Phase 4 timer needs PutObject. Without the list, a snapshot that uploaded
+  # successfully cannot be seen from the node, which is the worst of the three
+  # failures: the backup exists and nobody can prove it.
   statement {
     sid       = "EtcdSnapshotUpload"
     effect    = "Allow"
@@ -111,13 +119,77 @@ data "aws_iam_policy_document" "boutique_node" {
     resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}/etcd-snapshots/*"]
   }
 
-  # One parameter, read by the startup script to learn the k3s channel. A node
+  statement {
+    sid       = "EtcdSnapshotList"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}"]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["etcd-snapshots/*"]
+    }
+  }
+
+  statement {
+    sid       = "EtcdSnapshotDelete"
+    effect    = "Allow"
+    actions   = ["s3:DeleteObject"]
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}/etcd-snapshots/*"]
+  }
+
+  # The CMK that encrypts the node's root volume and the k3s join token. A role
+  # that cannot Decrypt the key cannot read the token, which makes this the
+  # statement that the whole Phase 3 token design depends on.
+  statement {
+    sid    = "KmsDecryptPlatformKey"
+    effect = "Allow"
+    actions = [
+      "kms:Decrypt",
+      "kms:DescribeKey",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKeyWithoutPlaintext",
+    ]
+    resources = [aws_kms_key.platform.arn]
+  }
+
+  # RunInstances with a CMK-encrypted volume makes EC2 create a grant on the key
+  # on the caller's behalf; without this, the instance fails to launch with
+  # "not authorized to perform kms:CreateGrant". Conditioned on
+  # kms:GrantIsForAWSResource so the node cannot hand the key to a principal.
+  statement {
+    sid       = "KmsCreateGrantForVolumesOnly"
+    effect    = "Allow"
+    actions   = ["kms:CreateGrant"]
+    resources = [aws_kms_key.platform.arn]
+
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
+    }
+  }
+
+  # Two plain String parameters the bootstrap needs: the k3s channel, and the
+  # private address of the designated leader. Scope is one ARN each -- a node
   # cannot read the account's other parameters.
   statement {
-    sid       = "ReadK3sChannel"
+    sid       = "ReadNodeParameters"
     effect    = "Allow"
     actions   = ["ssm:GetParameter"]
-    resources = [local.k3s_channel_parameter_arn]
+    resources = [local.k3s_channel_parameter_arn, local.k3s_leader_ip_parameter_arn]
+  }
+
+  # The k3s join token, as a SecureString. Separate from the statement above
+  # because this is the one parameter whose disclosure is a cluster compromise:
+  # anyone holding it can join a node to the cluster. The kms:Decrypt grant above
+  # is what makes this readable at all.
+  statement {
+    sid       = "ReadK3sJoinToken"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = [local.k3s_token_parameter_arn]
   }
 }
 
