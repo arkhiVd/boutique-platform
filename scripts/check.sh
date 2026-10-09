@@ -125,7 +125,11 @@ cyan "== kubernetes manifests =="
 HELM_SOURCES='(values\.yaml|Chart\.ya?ml|Chart\.lock)'
 BARE_RULE_FILES='(/rules/|/slos/|alerts\.yaml$)'
 CHART_TEMPLATES='/templates/'
-MANIFESTS="$(find apps ci observability -name '*.yaml' -not -path '*charts*' 2>/dev/null \
+# `cluster/` is the Phase 3/4 policy layer: RBAC, PDBs, NetworkPolicies,
+# ResourceQuotas, LimitRanges, PriorityClasses. It is shorter than the app
+# overlay but it is the layer that decides what the cluster REFUSES to run, so it
+# goes through the same schema and policy gates rather than being read by eye.
+MANIFESTS="$(find apps ci cluster observability -name '*.yaml' -not -path '*charts*' 2>/dev/null \
   | grep -Ev "$HELM_SOURCES" | grep -Ev "$BARE_RULE_FILES" | grep -Ev "$CHART_TEMPLATES" | sort)"
 # CRD schemas are not bundled with kubeconform. The default location covers the
 # Kubernetes API only, so PrometheusRule and ServiceMonitor objects would fail
@@ -143,7 +147,7 @@ if need conftest conftest && [[ -d policy ]]; then
   # passing a missing path makes conftest exit on a stat error, which would look
   # exactly like a policy failure and would be a false FAIL.
   CONFTEST_TARGETS=()
-  for d in apps ci observability; do
+  for d in apps cluster ci observability; do
     [[ -d "$d" ]] && CONFTEST_TARGETS+=("$d")
   done
   # Two categories of file are excluded by path, deliberately:
@@ -314,7 +318,11 @@ fi
 
 cyan "== shell =="
 if need shellcheck shellcheck; then
-  while IFS= read -r f; do check "shellcheck $f" -- shellcheck -x "$f"; done < <(find scripts -name '*.sh' | sort)
+  # scripts/ AND platform/: the Phase 3 cloud-init bootstrap and the Phase 4 etcd
+  # snapshot script render INTO the launch template's user_data, so a shellcheck
+  # finding in them is a finding that will run on every node on every boot.
+  while IFS= read -r f; do check "shellcheck $f" -- shellcheck -x "$f"; done \
+    < <(find scripts platform -name '*.sh' -not -path '*/.terraform/*' | sort)
 fi
 while IFS= read -r f; do check "bash -n $f" -- bash -n "$f"; done < <(find . -name '*.sh' -not -path './.git/*' | sort)
 

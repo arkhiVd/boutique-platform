@@ -87,6 +87,25 @@ jobs:
           role-session-name: boutique-plan-${{ github.run_id }}
           aws-region: us-east-1
 
+      # Phase 3's k3s join token is an EPHEMERAL variable, and an ephemeral
+      # variable cannot have a default: without one, `terraform plan` stops with
+      # "No value for required variable". That is the property that keeps the
+      # token out of the state and out of git (platform/nodes.tf's header has the
+      # two verified facts), and its cost is that every Terraform command has to
+      # be handed a value.
+      #
+      # The value below never reaches AWS: this workflow runs plan only, never
+      # apply, and the plan output prints `+ value = (sensitive value)` with the
+      # literal value appearing in neither the plan text, the plan JSON, nor a
+      # saved plan file. It is a fixed non-secret string rather than a repo secret
+      # on purpose -- a secret that CI never sends to AWS is a secret with no
+      # reason to exist, and a fixed string cannot drift.
+      #
+      # If the repo secret K3S_TOKEN_PLAN_ONLY is ever set to the real token,
+      # nothing changes for CI: it still only ever plans.
+      - name: provide the ephemeral k3s token variable for the plan
+        run: echo "TF_VAR_k3s_token=${K3S_TOKEN_PLAN_ONLY:-ci-plan-only-not-a-credential}" >> "$GITHUB_ENV"
+
       - name: terraform init (backend)
         if: github.actor != 'dependabot[bot]'
         run: terraform init
