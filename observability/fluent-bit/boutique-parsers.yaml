@@ -177,11 +177,23 @@ data:
     [PARSER]
         Name boutique-dotnet-plain
         Format regex
-        # (?s) makes `.` match newlines, so the indented continuation line on the
-        # following line is captured into `message`. The docker/cri multiline
-        # parser in the chart's `inputs` merges the two physical lines into one
-        # record first.
-        Regex /^(?<severity>[a-z]+): (?<logger>[^\[\]]+)\[(?<eventid>\d+)\]\s*\n\s*(?<message>(?s:.*))$/
+        # `[\s\S]*` rather than `(?s:.*)`, and the difference is a FAILURE not a
+        # preference. Fluent Bit compiles parser regexes with Oniguruma, which
+        # does not support the inline `(?s:...)` group flag. Proven by running the
+        # pinned image against this file:
+        #
+        #   docker run --rm -v $PWD:/cfg fluent/fluent-bit:5.1.3 \
+        #     --config=/cfg/svc.conf --dry-run
+        #   [error] [parser:boutique-dotnet-plain] Invalid regex pattern
+        #           ...(?<message>(?s:.*))$/
+        #   [error] configuration file contains errors, aborting.
+        #
+        # That is a hard startup failure: Fluent Bit refuses to start, the
+        # DaemonSet CrashLoops on every node, and NO log line from ANY service
+        # reaches Loki — not just cartservice's. A parser file is validated as a
+        # whole, so one bad regex takes down the whole pipeline. The equivalent
+        # character class `[\s\S]` compiles and means exactly the same thing.
+        Regex /^(?<severity>[a-z]+): (?<logger>[^\[\]]+)\[(?<eventid>\d+)\]\s*\n\s*(?<message>[\s\S]*)$/
         Time_Keep Off
         Types severity:string eventid:integer
 
@@ -203,12 +215,30 @@ data:
     ## 7. Everything else — kube-system, redis-cart, and the stats table
     ## =====================================================================
     # redis-cart logs plain text to stdout with no structure, and
-    # locust.stats_logger's `plain` formatter emits bare lines. Neither has a
-    # timestamp. `boutique-plain` exists so that a formatted line is guaranteed
-    # for EVERY record entering the Loki output: the Loki output plugin requires
-    # a `line_format` of json or key_value, and a record with no parsed fields
-    # would otherwise be shipped as an empty object.
+    # locust.stats_logger's `plain` formatter emits bare lines. Both need a
+    # `message` field so the runbook's `| json | message=~"..."` LogQL works for
+    # EVERY service and not only the five structured ones.
+    #
+    # A catch-all regex, and NOT `Format none`. `Format none` is not a valid
+    # Fluent Bit parser format at all — proven by running the pinned image
+    # against this file:
+    #
+    #   docker run --rm -v $PWD:/cfg fluent/fluent-bit:5.1.3 \
+    #     --config=/cfg/svc.conf --dry-run
+    #   [error] [parser:boutique-plain] Invalid format none
+    #   [error] configuration file contains errors, aborting.
+    #
+    # Fluent Bit refuses to START on that error. The parser FILE is validated as
+    # a whole, so one bad parser is not "redis-cart's logs are unparsed" — it is
+    # the DaemonSet CrashLooping on all four nodes and no log line from any of
+    # the 11 Boutique services reaching Loki. Omitting `Format` fails the same
+    # way ("no parser 'format' found"), so a Format is mandatory.
+    #
+    # `[\s\S]*` rather than `(?s:.*)`: Oniguruma does not accept the inline
+    # `(?s:...)` flag. See the note on boutique-dotnet-plain above.
     [PARSER]
         Name boutique-plain
-        Format none
+        Format regex
+        Regex /^(?<message>[\s\S]*)$/
         Time_Keep Off
+        Types message:string

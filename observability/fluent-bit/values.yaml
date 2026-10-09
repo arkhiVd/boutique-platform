@@ -87,7 +87,9 @@ fluent-bit:
     ## which is indexed per log line and creates no stream. That is exactly what
     ## Loki 3.x structured metadata is for
     ## (https://grafana.com/docs/loki/latest/get-started/labels/structured-metadata/),
-    ## and the runbook queries it with `| pod_name="..."`.
+    ## and the runbook queries it with `| pod="..."` — the METADATA key is `pod`
+    ## (see the output below), not `pod_name`, because the output's own key name
+    ## is what ends up in Loki's schema.
     filters: |
       # ---- 1. Kubernetes metadata ------------------------------------------
       [FILTER]
@@ -134,15 +136,34 @@ fluent-bit:
           Rule $kubernetes['labels']['app'] ^.+$ boutique.plain false
 
       # ---- 3a. Parse the tagged formats -------------------------------------
-      # Preserve_Log Off (the default) DELETES the raw `log` key after parsing, so
-      # the record sent to Loki carries the parsed `message` rather than both
-      # copies. On a node where every byte is a cost, shipping both would double
-      # the ingestion rate.
+      # `Preserve_Key` is absent from every filter below, and that is the
+      # behaviour we want: the tail input puts the raw container line in a
+      # record key called `log`, the parser reads it, and with
+      # `preserve_key: false` (the default) the parser REMOVES it from the
+      # result. `reserve_data: true` keeps everything else the record already
+      # had — which for a tail-input record is the whole `kubernetes` map added
+      # by filter 1.
+      #
+      # So the record sent to the Loki output is
+      #     {severity, message, timestamp, ..., kubernetes: {...}}
+      # and NOT the raw JSON string duplicated into `log`. On a node where
+      # every byte is a cost, shipping both would double the ingestion rate.
+      #
+      # THE PROPERTIES THIS FILTER ACCEPTS ARE EXACTLY FIVE:
+      #   Key_Name, Parser, Preserve_Key, Reserve_Data, Unescape_key
+      # Verified by running the pinned image:
+      #   fluent-bit -F parser -h
+      # "try the command: /fluent-bit/bin/fluent-bit -F parser -h" is Fluent
+      # Bit's own diagnostic for an unknown property, and it lists them.
+      # `Parser_Cri` used to be set here and is NOT one of them — it belongs to
+      # the tail INPUT plugin. Fluent Bit treats an unknown filter property as
+      # a fatal configuration error ("check properties and additonal vaildations
+      # for filter plugins is failed"), which again means the DaemonSet never
+      # starts and no logs reach Loki at all, not just the decorated service's.
       [FILTER]
           Name parser
           Match boutique.go
           Parser boutique-go-json
-          Parser_Cri On
           Key_Name log
           Reserve_Data On
 
@@ -150,7 +171,6 @@ fluent-bit:
           Name parser
           Match boutique.node
           Parser boutique-node-json
-          Parser_Cri On
           Key_Name log
           Reserve_Data On
 
@@ -158,7 +178,6 @@ fluent-bit:
           Name parser
           Match boutique.python
           Parser boutique-python-json
-          Parser_Cri On
           Key_Name log
           Reserve_Data On
 
@@ -166,7 +185,6 @@ fluent-bit:
           Name parser
           Match boutique.java
           Parser boutique-java-json
-          Parser_Cri On
           Key_Name log
           Reserve_Data On
 
@@ -231,34 +249,192 @@ fluent-bit:
       #     $kubernetes['pod_name'], $kubernetes['container_name']
       # So the kubernetes map needs no flattening before the output reads it, and
       # a `nest` or `lift` filter would be an extra stage per record on a 2 vCPU
-      # node for nothing. The cardinality bound in this chain is the output's
-      # `Labels` list below — three keys and nothing else — and not a filter.
+      # # ---- 7. Guarantee the three label sources exist ----------------------
+      # The Loki output below builds its stream labels from record accessors
+      # into the `kubernetes` map. A record accessor that resolves to nothing
+      # produces an EMPTY label VALUE, and Loki's push validation rejects a
+      # stream whose labels fail validation
+      # (https://grafana.com/docs/loki/latest/operations/request-validation-rate-limits/,
+      # `invalid_labels` / `missing_labels`). The consequence is not "one bad
+      # line is dropped": the whole batch is rejected, `Retry_Limit` re-sends
+      # it, and every line from that pod is lost until the label reappears.
+      #
+      # Two cases actually occur on this cluster:
+      #   - `app` is a POD LABEL. Every Boutique Deployment has it
+      #     (apps/boutique/base/*.yaml, `app: <service>`), but kube-system's
+      #     coredns carries `k8s-app`, kube-router carries none, and the
+      #     fluent-bit chart's own pods carry `app.kubernetes.io/name` rather
+      #     than `app`. So `app` is missing for a real subset of pods.
+      #   - `namespace_name` / `container_name` are derived by the kubernetes
+      #     filter from the log file path
+      #     `/var/log/containers/<pod>_<namespace>_<container>-<id>.log`. They
+      #     are absent only if that filter fails on a record, which happens for
+      #     a line written before the filter started.
+      #
+      # `Copy` is conditional by definition — it copies only when the source
+      # key exists and the destination does not
+      # (https://docs.fluentbit.io/manual/pipeline/filters/modify) — so this
+      # filter cannot fail. The record accessor is accepted as the STRING:KEY
+      # parameter, which is why no flattening stage is needed first.
+      [FILTER]
+          Name modify
+          Match *
+          Copy $kubernetes['labels']['app']       app_label
+          Copy $kubernetes['namespace_name']      ns_label
+          Copy $kubernetes['container_name']      container_label
 
+      # `Add` writes only when the key does NOT already exist, so this is the
+      # fallback and never overwrites a real value. One filter, three rules:
+      # the values are sentinel strings, which is what makes them visible in a
+      # query rather than silently absent — `{app="unlabelled"}` is a stream an
+      # operator can find in Grafana, an empty label value is a retry loop.
+      [FILTER]
+          Name modify
+          Match *
+          Add app_label      unlabelled
+          Add ns_label       unknown
+          Add container_label unknown
 
-          # ---- batching ---------------------------------------------------
-          # 5s / 1MiB / 1000 records, whichever first. At the measured 60 lines/s
-          # the record count fires every ~17s, so this is really a 1MiB cap. The
-          # values exist so that a log storm is batched into 1MiB POSTs rather than
-          # one POST per line, which on this node is the difference between Loki
-          # seeing a steady stream and seeing 60 requests a second.
-          Batch_Size 1000
-          Batch_Wait 5s
-          Auto_Format_JSON On
+      # ---- 8. pod_name, to structured metadata -----------------------------
+      # A second `Copy` for the one field that must survive `Remove_Keys`
+      # below. The Loki output reads structured metadata through a record
+      # accessor, so a top-level copy is what makes `pod=$pod_name` resolvable
+      # after the whole `kubernetes` map has been deleted from the record.
+      [FILTER]
+          Name modify
+          Match *
+          Copy $kubernetes['pod_name'] pod_name
+
+    ## -------------------------------------------------------------------------
+    ## THE OUTPUT — the reason this chart exists
+    ## -------------------------------------------------------------------------
+    ## THIS SECTION WAS MISSING, AND THE RENDER KEPT THE CHART'S DEFAULT.
+    ## Without a `config.outputs` key the fluent-bit chart falls back to its
+    ## own values.yaml, whose default is TWO ELASTICSEARCH OUTPUTS pointing at
+    ## `elasticsearch-master`. `helm template` renders that happily, `helm
+    ## lint --strict` passes on it, and the DaemonSet starts and runs and
+    ## forwards nothing — there is no Elasticsearch in this cluster. The
+    ## batching directives that were written into the `filters` block above
+    ## were silently inert for the same reason: they are OUTPUT parameters.
+    ##
+    ## Every parameter below is verified against the built-in Loki output
+    ## plugin's documentation (https://docs.fluentbit.io/manual/data-pipeline/
+    ## outputs/loki), not against the Grafana COMMUNITY plugin's
+    ## `grafana-loki` output, which uses different key names (`Url` vs
+    ## `Host`/`Port`, `RemoveKeys` vs `Remove_Keys`, `BatchWait` vs
+    ## `Batch_Wait`).
+    outputs: |
+      [OUTPUT]
+          Name loki
+          Match *
+          # The SingleBinary Service the loki chart renders in the same
+          # namespace. Rendered and checked against loki 7.3.0: the Service is
+          # named `loki` with a single port named `http-metrics` on 3100. The
+          # namespace is interpolated because the chart applies `tpl` to
+          # `config.outputs`, so this stays correct if the release is installed
+          # somewhere other than `observability`.
+          Host {{ .Values.lokiHost }}.{{ .Release.Namespace }}.svc.cluster.local
+          Port 3100
+          Uri /loki/api/v1/push
+          # Single-tenant. observability/loki/values.yaml sets
+          # `auth_enabled: false` for the same reason, and a `tenant_id` here
+          # would make Loki reject every push as an unknown tenant.
+
+          ## --- the cardinality bound, in three keys -------------------------
+          # ONLY these three become labels. `pod` is NOT among them, and that
+          # is the whole bound: {namespace, app, container} is bounded by the
+          # number of Deployments and containers per pod (~90 streams), where
+          # {namespace, pod, container} is bounded by every pod that ever
+          # existed inside the retention window (~550). See the arithmetic in
+          # observability/loki/values.yaml.
+          #
+          # The values are TOP-LEVEL record keys copied by the modify filters
+          # above rather than nested accessors, because the accessor is
+          # resolved once here and the fallback value is guaranteed to exist.
+          Labels namespace=$ns_label, app=$app_label, container=$container_label
+
+          ## --- pod, the one field worth keeping per line --------------------
+          # Loki 3.x structured metadata: indexed per LINE, so it creates no
+          # stream and costs nothing in the stream count. `pod` is the field
+          # every log query narrows to ("which replica logged this"), and
+          # promoting it to a label is exactly the cardinality failure the
+          # bound above avoids. docs/runbooks/find-the-failing-checkout.md
+          # queries it with `| pod="..."`.
+          Structured_Metadata pod=$pod_name
+
+          ## --- what is removed, and why ------------------------------------
+          # `kubernetes` is the whole nested metadata map — namespace_name,
+          # pod_name, container_name, labels{}, docker_id, pod_id, host. With
+          # `Line_Format json` the record is dumped as the log line, so leaving
+          # it in would ship the entire Kubernetes metadata object inside every
+          # line. The three values used as labels were copied to top-level keys
+          # first, so nothing is lost by removing it.
+          #
+          # `Remove_Keys` takes key names, not record accessors
+          # (https://docs.fluentbit.io/manual/data-pipeline/outputs/loki).
+          Remove_Keys kubernetes
+
+          ## --- the line format --------------------------------------------
+          # `json` + `Drop_Single_Key raw` is the combination that makes both
+          # log shapes readable:
+          #   - a PARSED record (the four JSON formats) has several keys
+          #     (severity, message, timestamp, ...), so `Drop_Single_Key` does
+          #     not fire and the line is the JSON object. That is what makes
+          #     `| json | severity="ERROR"` work in LogQL without a Loki
+          #     parser stage — the parser already ran in Fluent Bit.
+          #   - an UNPARSED record (`Format none` for redis-cart, locust's
+          #     stats table, anything unmatched) has one key left, so
+          #     `raw` ships its value unquoted and the line reads as text.
           Line_Format json
-          # Drop_Single_Key raw: after the labels and structured metadata are
-          # extracted, the remaining record is a map, and `raw` ships the single
-          # remaining string value unquoted instead of `"the message"`. This is why
-          # a log line in Grafana reads as text rather than as a JSON blob.
           Drop_Single_Key raw
+
+          ## --- batching, and the two lines that are NOT here ----------------
+          # `Batch_Size` and `Batch_Wait` are deliberately ABSENT. They are
+          # OUTPUT-SCHEDULER properties in Fluent Bit, not properties of the
+          # loki output plugin, and this plugin rejects them as unknown:
+          #
+          #   fluent-bit 5.1.3 --config=... --dry-run
+          #   [error] [config] loki: unknown configuration property 'batch_size'.
+          #           The following properties are allowed: uri, tenant_id,
+          #           tenant_id_key, tenant_id_key_error_handling, labels,
+          #           structured_metadata, structured_metadata_map_keys,
+          #           auto_kubernetes_labels, drop_single_key, label_keys,
+          #           remove_keys, line_format, label_map_path, http_user,
+          #           http_passwd, buffer_size, bearer_token, header, compress
+          #
+          # That is the binary's own error, taken from running the pinned image.
+          # The output does its own chunk accumulation internally, bounded by
+          # `buffer_size`, and the 5s `Flush` in the SERVICE section is what
+          # actually paces a flush on this node.
+          #
+          # `Buffer_Size` IS accepted (it is on the list above): the HTTP
+          # response buffer, default 512KB, left at the default.
+          #
           # Retry, not discard. Loki being briefly unavailable is normal on a
           # single-node platform; a lost log line during an incident is the one
-          # thing that cannot be recovered.
+          # thing that cannot be recovered. The plugin's own default is
+          # `retry_limit: 1` (from `fluent-bit -o loki -h`), i.e. one retry and
+          # then the chunk is dropped, so 5 is a deliberate change and not a
+          # restatement of the default. Values the plugin documents:
+          # a positive integer, 'no_limits', 'false'/'off' to disable the
+          # limit, 'no_retries' to disable retries.
           Retry_Limit 5
+          # One worker. The DaemonSet already runs once per node, and the log
+          # rate is ~60 lines/s, so more workers is scheduling overhead.
           Workers 1
-          # gzip. Halves the wire cost of every POST at the price of ~2% CPU, and
-          # on a public-subnet node with no NAT every byte leaving the cluster
-          # crosses the IGW.
+          # gzip. Halves the wire cost of every POST at the price of ~2% CPU,
+          # and on a public-subnet node with no NAT every byte leaving the
+          # cluster crosses the IGW.
           Compress gzip
+
+  ## ---------------------------------------------------------------------------
+  ## The Loki host, as a value
+  ## ---------------------------------------------------------------------------
+  #  Split out of the output template so a non-default namespace or a renamed
+  #  Loki release is `--set fluent-bit.lokiHost=...` away. The namespace and
+  #  the cluster domain are appended inside `config.outputs`, because that is
+  #  the one string the chart runs through `tpl`.
+  lokiHost: loki
 
   ## ---------------------------------------------------------------------------
   ## Resources
