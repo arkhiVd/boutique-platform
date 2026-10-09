@@ -163,7 +163,7 @@ groups:
       ## HONEST STATE: this platform configures NO remote_write. There is no
       ## second Prometheus to write to and no budget for one on a 4 GiB node
       ## (SPEC's cost table has no second compute line), so
-      #  `prometheus_remote_storage_samples_total` does not exist in this
+      ## `prometheus_remote_storage_samples_total` does not exist in this
       ## deployment and this alert cannot fire today. It is written now,
       ## validated now, and it becomes live the moment
       ## `prometheus.prometheusSpec.additionalRemoteWrite` is set — which is a
@@ -215,39 +215,64 @@ groups:
           platform.boutique/component: observability
 
       ## -------------------------------------------------------------------
-      ## Loki — the APPLICATION-scoped half of the log-pipeline alert.
+      ## Fluent Bit -> Loki delivery failures — the APP-scoped half.
       ##
       ## Deliberately NOT the same rule as `LokiRequestErrors` in
       ## observability/loki/alerts.yaml. That file owns the PLATFORM-scoped
-      ## copy (is Loki itself returning 5xx); this one owns the APP-scoped copy
-      ## (is the Boutique log pipeline still delivering). Same alertname,
-      ## different labels, so Alertmanager treats them as two groups and an
-      ## operator can tell "Loki is broken" from "Boutique stopped logging"
-      ## without opening a dashboard.
+      ## copy (is Loki itself returning 5xx on its own routes); this one owns
+      ## the DELIVERY copy (is Fluent Bit still managing to hand the records
+      ## over). Same alertname, different expressions, distinguishable in
+      ## Alertmanager by the `scope` label, so an operator can tell "Loki is
+      ## broken" from "the agent cannot reach Loki" without a dashboard.
       ##
-      ## `vector(1)` rather than a metric: at Phase 9 Fluent Bit does not exist
-      ## yet (it is Phase 10), so the honest expression is the one that is true
-      ## once it does. The Loki log-count metrics below are the real signal and
-      ## they are Phase 10's.
+      ## THE METRIC NAMES, AND THE ONE THAT WAS WRONG.
+      ## `fluentbit_output_errors_total` and
+      ## `fluentbit_output_retries_failed_total` are the Loki output plugin's own
+      ## counters, verified against Fluent Bit's monitoring documentation
+      ## (https://docs.fluentbit.io/manual/monitoring/metrics). What was here
+      ## before was `log_lines_dropped_total{namespace="boutique"}` — a series
+      ## that does not exist. Fluent Bit's drop counter is
+      ## `fluentbit_filter_drop_records_total`, and it is per FILTER plugin, not
+      ## per namespace.
+      ##
+      ## THE `namespace` LABEL IS GONE, AND THAT IS THE POINT.
+      ## Fluent Bit's HTTP /metrics endpoint is per-plugin-instance, not per
+      ## record: the exporter is a process, so `fluentbit_output_errors_total`
+      ## carries `name` (the output plugin's name, `loki`) and `tag`, and no
+      ## Kubernetes namespace at all. An expression that filters on
+      ## `namespace="boutique"` therefore evaluates on an empty input and can
+      ## never fire. The namespace-scoped question — "are the BOUTIQUE logs
+      ## specifically being delivered" — is answered instead by
+      ## `LokiLogLinesDropped` in observability/loki/alerts.yaml, which reads
+      ## `loki_discarded_samples_total` from the server side and sees the
+      ## namespace once the labels are attached.
+      ##
+      ## So this alert is the agent-side signal: Fluent Bit has records it
+      ## cannot deliver, whatever namespace they came from.
       ## -------------------------------------------------------------------
       - alert: LokiRequestErrors
         annotations:
-          summary: "Boutique log ingestion is failing (scope: app)"
+          summary: "Fluent Bit cannot deliver logs to Loki (scope: agent)"
           description: >-
-            The Fluent Bit to Loki pipeline for the boutique namespace is
-            returning errors or dropping records. This is the application-scoped
-            half of the Loki alert; observability/loki/alerts.yaml carries the
-            platform-scoped half, which tells you whether Loki itself is the
-            thing returning 5xx.
+            The Fluent Bit Loki output has recorded errors or exhausted retries
+            over the last 10 minutes. Records are being dropped at the agent,
+            so they never reach Loki at all and no query can find them. The
+            platform-scoped half of this alert, in observability/loki/alerts.yaml,
+            tells you whether Loki itself is returning 5xx; this half tells you
+            the delivery path is broken.
           runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks
         expr: |
-          sum(rate(log_lines_dropped_total{namespace="boutique"}[10m])) > 0
+          sum by (job) (
+            rate(fluentbit_output_errors_total[10m])
+          ) > 0
           or
-          sum(rate(fluentbit_output_errors_total{namespace="boutique"}[10m])) > 0
+          sum by (job) (
+            rate(fluentbit_output_retries_failed_total[10m])
+          ) > 0
         for: 10m
         labels:
           severity: ticket
-          scope: app
+          scope: agent
           platform.boutique/component: logs
 
       ## -------------------------------------------------------------------

@@ -1,0 +1,92 @@
+# Fluent Bit ServiceMonitor
+# -----------------------------------------------------------------------------
+# Scrapes Fluent Bit's HTTP server, which the chart enables at
+# `HTTP_Server On` / `HTTP_Port 2020` in observability/fluent-bit/values.yaml.
+#
+# WHY THIS FILE EXISTS. observability/rules/boutique-alerts.yaml carries the
+# APP-scoped half of the LokiRequestErrors alert:
+#
+#     sum(rate(fluentbit_output_errors_total{namespace="boutique"}[10m])) > 0
+#     or
+#     sum(rate(log_lines_dropped_total{namespace="boutique"}[10m])) > 0
+#
+# Both of those series come from THIS endpoint and from nowhere else. Without
+# it the record has no series, the alert evaluates false forever, and the
+# platform's answer to "are the Boutique logs being delivered" is silence — the
+# loudest possible failure of a log pipeline to report itself.
+#
+# Metrics Fluent Bit exposes at 2020/metrics (from its own Prometheus endpoint,
+# https://docs.fluentbit.io/manual/monitoring/metrics):
+#
+#   fluentbit_input_records_total            {name, tag}
+#   fluentbit_filter_drop_records_total      {name, plugin_id}
+#   fluentbit_output_proc_records_total      {name, tag}
+#   fluentbit_output_errors_total            {name, tag}
+#   fluentbit_output_retries_total           {name, tag}
+#   fluentbit_output_retries_failed_total    {name, tag}
+#   fluentbit_storage_mem_chunks             ...
+#
+# NOTE ON THE `namespace` LABEL: Fluent Bit's own HTTP metrics do NOT carry a
+# `namespace` label — the exporter is a process, and it emits the same label set
+# for every container it tails. The alert expression above uses
+# `fluentbit_output_errors_total{namespace="boutique"}` because the loki output
+# is tagged with `Match *` and the tail plugin with `Tag kube.*`, so the
+# `tag`/`name` labels are `loki` and `tail`, not `boutique`.
+#
+# THAT IS A REAL GAP, AND IT IS RECORDED RATHER THAN PAPERED OVER. To make the
+# alert actually name the boutique namespace, the Fluent Bit ConfigMap would
+# have to run one OUTPUT PER NAMESPACE (or set a `namespace` label through the
+# kubernetes filter into the output's own metrics), and the output plugin's
+# Prometheus endpoint is per-plugin-instance, not per-record. The scoped
+# expression therefore does not fire today.
+#
+# The unscoped form works and is what the alert should have been:
+#
+#     sum(rate(fluentbit_output_errors_total[10m])) > 0
+#
+# observability/rules/boutique-alerts.yaml uses the SCOPED form. It is kept
+# because "the boutique log pipeline is failing" is the question an on-call
+# engineer asks, and a namespace-agnostic alert answers a different one. Fixing
+# this needs either a per-namespace output or a Loki-side count per namespace
+# (which is what `LokiLogLinesDropped` in observability/loki/alerts.yaml
+# provides, and why it is the app-scoped alert that actually works). Phase 10
+# action item.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fluent-bit
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: logs
+spec:
+  # 60s, not 30s. Fluent Bit's metrics are counters flushed on its own `Flush`
+  # interval, which observability/fluent-bit/values.yaml sets to 5s, and the
+  # numbers only change when a batch is pushed. A 30s interval over a 5s counter
+  # produces 6 identical samples and doubles the series for no information.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - observability
+  # The fluent-bit chart's Service. Verified by rendering
+  # observability/fluent-bit against fluent/fluent-bit 0.58.3: the Service is
+  # named `<release>-fluent-bit` and carries
+  #   app.kubernetes.io/name: fluent-bit
+  #   app.kubernetes.io/instance: <release>
+  # with a single port named `http` on 2020, which is the `metricsPort` value in
+  # the chart's values.yaml.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluent-bit
+  endpoints:
+    # PORT NAME, NOT NUMBER. The port is `http` in the rendered Service, not
+    # `http-metrics` as the loki chart names its own — the two charts choose
+    # different names for the same idea and binding by name is what makes this
+    # monitor survive both. `http` is 2020 today because `metricsPort: 2020`
+    # in observability/fluent-bit/values.yaml.
+    - port: http
+      path: /metrics
+      interval: 60s
+      scrapeTimeout: 20s

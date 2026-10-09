@@ -222,13 +222,22 @@ loki:
     ## -----------------------------------------------------------------------
     ## Alerts
     ## -----------------------------------------------------------------------
-    ## NOT configured here. The chart's `alerting.loki` takes a JavaScript-ish
-    ## expression, and putting alert rules there would make them un-checkable by
-    ## promtool. The alerts live as a bare rule file at
-    ## observability/rules/loki-alerts.yaml and are loaded by the same
-    ## platform-rules.yaml template that loads the metrics rules. The chart's own
-    ## alerting block is therefore left off, and the Loki metrics are scraped by
-    ## the standalone ServiceMonitor rather than by the chart's.
+    ## NOT configured here. The chart's `alerting.loki` block takes a
+    ## JavaScript-ish expression evaluated by Loki's own ruler, and putting the
+    ## rules there would make them invisible to `promtool check rules` — the
+    ## gate this repo uses to prove no rule has a syntax error.
+    ##
+    ## The alerts therefore live as a bare rule file at
+    ## observability/loki/alerts.yaml, and
+    ## observability/loki/templates/prometheusrules.yaml wraps it into a
+    ## PrometheusRule with the `release` label the Prometheus Operator's default
+    ## ruleSelector requires. One place for the rules, one place for the labels,
+    ## and `promtool check rules observability/loki/alerts.yaml` passes.
+    ##
+    ## The Loki metrics those alerts read (`loki_request_duration_seconds`,
+    ## `loki_discarded_samples_total`, `loki_ingester_streams`) are scraped by
+    ## observability/servicemonitors/loki.yaml, NOT by the chart's own
+    ## `serviceMonitor`, which is disabled below.
 
   ## =========================================================================
   ## Component selectors — one level of nesting, because these keys are NOT
@@ -244,11 +253,18 @@ loki:
       ##   compactor: one cycle at a time, ~60 MiB
       ##   querier:   max_query_series 500 x ~4 KiB = ~2 MiB, plus the Go runtime
       ##   baseline:  ~120 MiB for the process itself
-      ## 128Mi requests / 512Mi limits is the envelope: the request is what the
-      ## scheduler reserves against the node, the limit is what an unbounded query
-      ## is allowed to reach before the kubelet stops it.
+      ##
+      ## 60m requests (down from 100m) / 512Mi limits is the envelope. The CPU
+      ## cut is the same argument as the Grafana one in
+      ## observability/kube-prometheus-stack/values.yaml: CPU is the binding
+      ## constraint on the ONE t3.medium, and 100m is 5.5% of the node's entire
+      ## CPU for a component whose measured ingestion rate is ~60 log lines per
+      ## second. A query that genuinely needs 400m still gets it — that is what
+      ## the 500m limit is for, and the `LokiRequestLatency` alert in
+      ## observability/loki/alerts.yaml is the visible symptom if it does not
+      ## arrive.
       requests:
-        cpu: 100m
+        cpu: 60m
         memory: 128Mi
       limits:
         cpu: 500m
