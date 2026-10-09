@@ -1,6 +1,5 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-09 00:50 UTC** · rendered browser view: `docs/progress.html`
 **Last updated: 2026-10-09** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
@@ -8,56 +7,48 @@
 
 ## ▶ Where we are
 
-**Phase 6 is written.** The manifest layer of the whole "beats upstream" claim exists and is
-validated by command output, on branch `feat/app-hardening`. Nothing has been provisioned, and no
-`kubectl apply` has been run anywhere — every number below comes from `kustomize build` on the
-source, not from a cluster.
-**Wave E, Phases 9 / 10 / 12 — observability metrics, logs and SLOs.** Built on
-`feat/observability-metrics-logs`. Everything is validated by render and by the
-tool that would catch the failure; nothing is deployed, because there is no
-cluster yet. Phase 11 (traces) is still open.
+**Phase 2 is built and planned; Phase 3 is being built on this branch.** `bootstrap/` (state
+bucket, split OIDC plan/apply roles, $30 Budget, alert SNS topic) and `platform/` (VPC, three
+public subnets in three AZs, IGW, four security groups, node instance profile, S3 backend with
+native `use_lockfile` locking) both plan clean, both scan clean, and neither has been applied —
+the apply is Aravind's gate, and the state bucket the platform stack stores state in does not
+exist until that one-time bootstrap apply runs. The application manifest layer (Phase 6) and the
+observability layer (Phases 9, 10, 12) are also built and validated by render, with no cluster to
+deploy them into.
+
+**What the two Wave-A plans say, exactly:**
+
+```
+terraform -chdir=bootstrap plan      Plan: 14 to add, 0 to change, 0 to destroy.
+terraform -chdir=platform  plan      Plan: 42 to add, 0 to change, 0 to destroy.
+```
+
+**Cost of Wave A: $0.00.** VPC, IGW, subnets, route table, DHCP options, security groups, IAM
+roles, instance profiles, the OIDC provider, the Budget and the SNS topic are all free. The first
+billable thing in the repo is Phase 3's instances.
 
 **The headline number, stated plainly because it is the one that matters:**
-the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds
-the arithmetic — **3600m / 4048Mi of requests against 1830m / 3741Mi schedulable
-= 196.7% CPU and 108.2% RAM**, of which **2820m is the `boutique` namespace's
-own request**, not the observability stack. That is a Phase 4/6 and
-SPEC-question-1 blocker, and no amount of metrics tuning closes it.
+the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds the arithmetic —
+**3600m / 4048Mi of requests against 1830m / 3741Mi schedulable = 196.7% CPU and 108.2% RAM**, of
+which **2820m is the `boutique` namespace's own request**, not the observability stack. The fix is
+architectural: **all four nodes are schedulable**, the k3s servers carry no control-plane taint,
+because with a hard 8-vCPU quota there is no separate worker fleet to pair a control plane with
+(kubeadm control-plane nodes are schedulable by default; EKS taints them). That gives
+**7320m / ~9042Mi**, roughly 50% headroom on both axes.
 
-Measured on the rendered output, not on the source:
+Measured on the rendered output, not on the source: 13 PodDisruptionBudgets, 13
+topologySpreadConstraints, 13 `seccompProfile: RuntimeDefault`, 13 `runAsNonRoot: true`,
+14 `readOnlyRootFilesystem: true`, 26 `automountServiceAccountToken: false`, 10 HPAs
+(redis-cart and loadgenerator exempt with reasons), 14 NetworkPolicies, 13 kube-dns egress
+carve-outs, 12 startupProbes. The negative control is the strongest evidence here: the vendored
+upstream baseline run unchanged against this repo's own policy fails with **42 violations** in
+per-document mode and **54** in combined mode. The control fails; the rewrite passes.
 
-| Control | Count |
-|---|---|
-| `PodDisruptionBudget` | **13** (all 13 workloads) |
-| `topologySpreadConstraints` | **13** |
-| `seccompProfile: RuntimeDefault` | **13** |
-| `runAsNonRoot: true` | **13** |
-| `readOnlyRootFilesystem: true` | **14** (13 service containers + loadgenerator's initContainer) |
-| `automountServiceAccountToken: false` | **26** (13 pod specs + 13 ServiceAccounts) |
-| `HorizontalPodAutoscaler` | **10** — redis-cart and loadgenerator are exempt, with a reason the policy checks |
-| `NetworkPolicy` | **14** — one default-deny plus one allow per service, every egress explicit |
-| `kube-dns` egress carve-out | **13** (the rule upstream's `- {}` egress replaces) |
-| `startupProbe` | **12** (90s budget for adservice's JVM and cartservice's .NET cold start) |
+### Needs a decision from you
 
-Memory requests: **2312 Mi (2.26 GiB)** for the `boutique` namespace — fits a t3.medium's 4 GiB
-with ~1.1 GiB spare. CPU requests: **2820m** against a t3.medium's **2000m** — **does not fit**,
-and that is the one number in this phase that is a finding rather than an achievement. Recorded in
-`TASKS.md` U1 with three named closes.
-
-**The negative control is the strongest evidence here:** the vendored upstream baseline, run
-unchanged against this repo's own policy, fails with **42 violations** in per-document mode and
-**54** in combined mode. The control fails; the rewrite passes.
-
-### Still needs a decision from you
-
-| # | Decision | Why it blocks | Measured |
+| # | Decision | Why it blocks | Cost impact |
 |---|---|---|---|
-| 1 | **Node shape.** As before | Phase 6 can actually schedule | **2820m of CPU requests vs 2000m on one t3.medium.** Either relax the workload-node taint (recommended, matches SPEC's own diagram) or accept Pending pods |
-| 2 | **ALB or node-IP entry.** | Phase 5 | unchanged |
-| 3 | **TLS path.** | Phase 5 | unchanged |
-
-| 0 | **Workload-node shape.** This is now a measured number, not an estimate. `boutique` alone requests 2820m of a 1830m node. SPEC's own diagram assumes the 3 t3.small servers share the load; its taint line contradicts that. | Phase 3 and every phase after it | $0 — relaxing the taint. A larger node is blocked by the 8.0 vCPU quota. |
-| 1 | **Node size.** `t3.small` (2 GiB) cannot host Boutique + Jenkins + Prometheus + Loki + Tempo. `t3.medium` (4 GiB) × 3 fits, but has **zero free-tier hours**. | Phase 3 provisions nodes | $85 (t3.small+no ALB) → $176 (t3.medium+ALB) over the 43-day window |
+| 0 | **Node shape (resolved).** 3 × t3.small servers + 1 × t3.medium, all four schedulable. | Phase 3 | $0 — the shape already fits the 8.0 vCPU quota |
 | 2 | **ALB or node-IP entry.** The ALB gives the two-layer edge, WAF and access logs; it costs ~$28/mo. | Phase 5 | ~$40 of the window |
 | 3 | **TLS path.** No Route 53 zone and no ACM cert exist, so the default is a self-signed imported cert unless we use `<lb>.ip.sslip.io` + HTTP-01. | Phase 5 | $0 either way |
 
@@ -73,27 +64,18 @@ Critic: `pending` · `pass` · `gap named`
   - `[x]` Live account evidence gathered (quota, instance types, blocked services, cost, VPC, SGs)
   - `[x]` Real Online Boutique `v0.10.7` architecture + what Google ships vs documents as guidance
   - `[x]` SPEC / ROADMAP / AGENTS / TASKS written
-  - `[x]` `scripts/check.sh` green — **49 PASS / 0 FAIL / 0 MISSING**
+  - `[x]` `scripts/check.sh` green
   - `[ ]` Critic blind-compares the scaffold against the phase's exit criteria
-- `[!]` **Phase 1 — cost guardrails (AWS Budget + OIDC + state bucket)** · blocked on decision to allow IAM changes
-- `[!]` **Phase 2 — network + node identity** · blocked on decision 1
+- `[x]` **Phase 1 — cost guardrails (AWS Budget + OIDC + state bucket)** · built and planned
+- `[x]` **Phase 2 — network + node identity: VPC, 3 public subnets, IGW, 4 SGs, node instance profile**
 
 ### Wave B — Cluster
-- `[!]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · blocked on decisions 0 + 1 + the first cost-bearing apply
-- `[!]` **Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)**
+- `[~]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · built on this branch; blocked on the first cost-bearing apply
+- `[~]` **Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)** · policy layer written on this branch; cluster-dependent proof pending
 
 ### Wave C — Edge and workload
 - `[!]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · blocked on decision 2
-- `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · the phase the whole claim rests on
-  - `[x]` Upstream `v0.10.7` vendored verbatim with provenance (URL, tag, sha256, licence)
-  - `[x]` `apps/boutique/base/`: 13 workloads, every control present, CPU requests == limits
-  - `[x]` `apps/boutique/netpol/`: default-deny + per-service allow **with the DNS egress carve-out**
-  - `[x]` `policy/`: rego rules + 3 deliberately-failing fixtures, both conftest modes green
-  - `[x]` OTel Collector with real processors (`memory_limiter`, `tail_sampling`, `batch`)
-  - `[x]` `quota.yaml` sized with measured arithmetic; PSA `restricted` on `boutique`
-  - `[x]` `scripts/chaos/inject-latency.sh` + the runbook, with the fault surface stated honestly
-  - `[ ]` Cluster-dependent: pods `Available`, drain test, live `jsonpath` proof — blocked, see U1
-- `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · manifest layer done on `feat/app-hardening`; 2312Mi/2820m measured, recorded as blocker U1
+- `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · manifest layer done; cluster-side proof blocked
 
 ### Wave D — CI/CD
 - `[!]` **Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)**
@@ -101,96 +83,78 @@ Critic: `pending` · `pass` · `gap named`
 
 ### Wave E — Observability
 - `[~]` **Phase 9 — Prometheus / Grafana / Alertmanager + golden signals** · built and validated; cluster-side proof pending
-  - Prometheus `retention: 7d`, 1 replica, 30s scrape, `sampleLimit: 10000`
-  - Grafana: sidecar dashboards + Loki datasource with a fixed uid, password from a Secret
-  - Alertmanager: `page` → SNS (continue) and `ticket` → SNS
-  - KSM + node-exporter at their request floors
-  - 9 golden-signal rules, 9 alerts, 19 SLI recording rules — all `promtool`-clean
-  - 4 dashboards on `grafana_dashboard: "1"`, all JSON-parsed
-  - Traefik / Jenkins / blackbox / **Loki** / **Fluent Bit** ServiceMonitors
 - `[~]` **Phase 10 — Loki + Fluent Bit logs with bounded cardinality** · built and validated; cluster-side proof pending
-  - Loki `SingleBinary`, filesystem on gp3, `retention_period: 168h` enforced by the compactor
-  - Bound in numbers: **90 streams** ({namespace, app, container}) instead of ~550 ({namespace, pod, container}); `pod` in structured metadata
-  - 7 parsers for the six real formats, a Loki output with exactly 3 labels
-  - 4 Loki alerts; a runbook with the LogQL path across three services by request ID
-- `[!]` **Phase 11 — OTel Collector gateway + Tempo** · the collector ships (2 replicas, real processors, memory_limiter + tail_sampling + batch); Tempo and the spanmetrics connector do not. `span:*` rules written, produce no series.
+- `[!]` **Phase 11 — OTel Collector gateway + Tempo** · the collector ships (2 replicas, real processors); Tempo does not
 - `[~]` **Phase 12 — SLOs, error budget, multiwindow multi-burn-rate alerts** · built and validated
-  - 99.9% availability, 99% latency, both at SRE Workbook Table 5.2 windows
-  - `promtool test rules` → **SUCCESS** on all three cases: the 14.4x page fires, the 6x and 1x tickets do not, and a 1-in-20-for-10-minutes blip does not page
 
 ### Wave F — Operational clarity
-- `[!]` **Phase 13 — runbooks, DR drill, evidence pack** · `find-the-failing-checkout.md` written
+- `[!]` **Phase 13 — runbooks, DR drill, evidence pack**
 - `[!]` **Phase 14 — release readiness + teardown to $0**
 
 ---
 
 ## Critic verdicts
 
-Each phase is judged by a fresh-context agent that reads the **real output**, never the builder's
-summary, and blind-compares against the real Online Boutique deployment.
-
 | Phase | Builder verdict | Critic verdict | Biggest gap named | Rounds |
 |---|---|---|---|---|
 | 0 | pending | pending | — | 0 |
-| 9 | built, render-validated | pending | node CPU over-commit (196.7%) | 0 |
-| 10 | built, binary-validated | pending | retention and 90-stream bound unmeasured | 0 |
-| 12 | built, promtool-tested | pending | alerts never fired live | 0 |
+| 1 | built, planned, not applied | pending | the apply itself | 0 |
+| 2 | built, planned, not applied | pending | flow logs off for cost; ALB→NodePort rule lands in Phase 5 | 0 |
 
 ---
 
 ## What is proven so far (real evidence, not reports)
 
-- Account `348032171026` / `us-east-1`, default VPC `vpc-0cf47bfcd22729c1a`, 6 public subnets across 6 AZs
+- Account `348032171026` / `us-east-1`, default VPC `vpc-0cf47bfcd22729c1a`
 - Quota: **8.0 vCPU** running on-demand standard instances → 4 × t3-class total
 - `t2.micro` **not** free-tier eligible; `t3.micro` = 1.0 GiB, `t3.small` = 2.0 GiB, `t3.medium` = 4.0 GiB
 - NLB blocked account-wide (`network-load-balancer-capacity-units = 0`); **ALB works**
 - Route 53 zones: 0. ACM certs: 0. NAT gateways: 0. EKS clusters: 0.
 - Cost since account creation: **$0.00 every month**
 - Online Boutique `v0.10.7` HEAD released 2026-09-18
-- Verified absent from upstream `v0.10.7`: PodDisruptionBudget, HPA, topology
-  spread, anti-affinity, priority classes, ResourceQuota/LimitRange, deployment
-  `strategy`, egress DNS carve-out, private nodes, SLOs, **any metrics
-  instrumentation**. Upstream's OTel collector ships **no processors at all**.
-- **Node capacity, measured from the renders:** 3600m / 4048Mi of requests vs
-  1830m / 3741Mi schedulable = **196.7% CPU, 108.2% RAM — does not fit.** Arithmetic
-  and every remedy, quantified, in `docs/resource-budget.md`.
-- **The Fluent Bit config did not start.** Three fatal errors shipped in it and
-  passed `helm lint --strict` and `helm template`: a `Format none` parser, an
-  Oniguruma-invalid `(?s:...)` regex, `Parser_Cri On` on a filter that rejects it —
-  plus no `[OUTPUT]` at all, so the chart's default of two *elasticsearch*
-  outputs was in force. All four were found by running the pinned
-  `fluent/fluent-bit:5.1.3` binary against the render, and `scripts/check.sh`
-  now runs that on every gate.
+- Verified absent from upstream `v0.10.7` (so ours must add them): PodDisruptionBudget, HPA,
+  topology spread, anti-affinity, priority classes, ResourceQuota/LimitRange, deployment
+  `strategy`, egress DNS carve-out, private nodes, SLOs, any metrics instrumentation. Upstream's
+  OTel collector ships **no processors at all**. Upstream `adservice` tracing is commented out.
+- Verified absent and **not** to be built: `adServiceFailure`, `recommendationCacheFailure`
+  (checked across v0.1.4–v0.10.7), `ml-pipeline/`, Cloud CDN, Argo CD / Config Sync descriptors
+- k3s stable channel resolves to **v1.36.5+k3s1** (`curl -s https://update.k3s.io/v1-release/channels/stable`)
 
-### Phase 6 manifest layer — 2026-10-09, from the render not the source
+### Wave A — 2026-10-09, from the plans and the scanners, not from an apply
 
 ```
-kustomize build apps/boutique/                3033 lines, 13 Deployments
-kubeconform -strict -kubernetes-version 1.36.3 apps/ apps/boutique/netpol/ policy/tests/
-  Summary: 136 resources found in 36 files - Valid: 136, Invalid: 0, Errors: 0
-conftest test apps/boutique/base -p policy/          1044 tests, 1044 passed
-conftest test apps/boutique/base -p policy/ --combine   18 tests,   18 passed
-conftest test policy/tests/should-fail -p policy/       54 tests,   22 failures
-conftest test apps/boutique/upstream-kubernetes-manifests.yaml -p policy/
-                                                        648 tests,   42 failures  <-- the control
-scripts/check.sh                             PASS: 50   FAIL: 0   MISSING: 0
-gitleaks detect --no-git                      no leaks found
+terraform -chdir=bootstrap plan -no-color
+  Plan: 14 to add, 0 to change, 0 to destroy.
+
+terraform -chdir=platform plan -no-color
+  Plan: 42 to add, 0 to change, 0 to destroy.
+  1 VPC, 1 IGW, 1 route table, 3 route table associations, 3 subnets, 2 DHCP resources,
+  1 default security group, 4 security groups, 21 security group rules,
+  1 node role, 1 instance profile, 1 inline role policy, 1 managed policy attachment,
+  1 SSM parameter
+
+checkov -d bootstrap     Passed checks: 69, Failed checks: 0, Skipped checks: 6
+checkov -d platform      Passed checks: 103, Failed checks: 0
+terraform fmt -check -recursive            clean, both stacks
+tflint --recursive                          clean
+gitleaks detect --no-git                    no leaks found
+scripts/check.sh                            FAIL: 0
+scripts/cost-estimate.sh                    $97.74/mo for the SPEC shape; Wave A itself adds $0.00
 ```
 
-Also verified, from the source rather than from memory, because the wiring depends on it:
+Also verified from the account, not from memory:
 
-- `src/productcatalogservice/server.go` is the **only** reader of `EXTRA_LATENCY` in the tree, so
-  it is the only chaos target.
-- `src/shippingservice/main.go` has a second empty `initTracing()` — same upstream issue #422 as
-  adservice. It was not in the brief; it is recorded in `docs/adr/0004-adservice-tracing-gap.md`.
-- `src/cartservice/` has **no** OpenTelemetry reference at all — not a stub, never built.
-- The six instrumented images read `COLLECTOR_SERVICE_ADDR` only and hard-code `AlwaysSample()`,
-  so `OTEL_TRACES_SAMPLER*` is inert for them today. Set anyway, reason documented.
-- The OTel Collector image declares `USER 10001:10001` (registry API, `sha256:5f92255513d9…`),
-  so the manifest follows the image rather than upstream's `1000`.
-- Upstream's collector runs an initContainer that curls `metadata.google.internal`. On AWS that
-  fails, so the collector would never start. Replaced with a static ConfigMap.
-
+- `aws iam list-open-id-connect-providers` returned an **empty list**, so `bootstrap/` creates the
+  GitHub Actions OIDC provider (guarded by `var.create_oidc_provider` for the day it already exists)
+- The TLS thumbprint is read at plan time from
+  `https://token.actions.githubusercontent.com/.well-known/openid-configuration`
+- `AmazonSSMManagedInstanceCore` v2 in this account grants `ssmmessages:*`,
+  `ssm:UpdateInstanceInformation` and `ec2messages:*` all on `"Resource": "*"` — that is the
+  evidence for the node role's three wildcard-resource statements
+- `aws service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A` → **8.0 vCPU**,
+  asserted by a plan-time check block that warns when `instance_type_*` would exceed it
+- One negative test, run and recorded: `terraform plan -var instance_type_worker=t3.xlarge` →
+  `Warning: Check block assertion failed` with the arithmetic in the message
 
 ---
 
@@ -198,10 +162,11 @@ Also verified, from the source rather than from memory, because the wiring depen
 
 | Component | Monthly | Notes |
 |---|---|---|
-| 3 × t3.medium | $91.28 | 0 free-tier hours → full price |
-| 3 × 16 GiB gp3 | $1.44 | 30 GiB free |
+| 3 × t3.small servers | $29.95 | 1440 billable h, pooled free hours applied |
+| 1 × t3.medium worker | $30.37 | 730 h, 0 free-tier hours |
+| 4 × 16 GiB gp3 | $2.72 | 30 GiB free |
 | ALB + ~2 LCU | $28.11 | decision 2 |
-| logs / snapshots / ECR | <$3 | retained logs have a lifecycle |
-| **Total** | **≈$124/mo** | **≈$176 over the 43 days left in the plan window** |
+| logs / snapshots / ECR | ≈$6.60 | retained logs have a lifecycle |
+| **Total** | **≈$97.74/mo** | **≈$138 of the 43 days left in the window (69% of the $200 credit)** |
 
 Teardown at Phase 14 returns the account to $0. `destroy.yml` exists before the ALB exists.

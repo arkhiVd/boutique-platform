@@ -1,18 +1,20 @@
 # boutique-platform — tasks
 
-## Current phase: 3 — cluster bootstrap (blocked on the apply approval)
+## Current phase: 3 — cluster bootstrap (being built on this branch)
 
-Built and validated with **no cluster and no live infrastructure**: everything below is proven by
-`terraform plan`, `helm template`, `kustomize build`, `kubeconform`, `conftest`, `promtool`, and
-the Fluent Bit binary. Nothing is deployed. Cluster-dependent exit criteria are named in the
+Phases 0, 1 and 2 are built and planned but **not applied**: the apply is Aravind's gate, and the
+state bucket the `platform/` stack stores state in does not exist until that one-time bootstrap
+apply runs. Everything in this file is proven by `terraform plan`, `kustomize build`,
+`helm template`, `promtool`, `kubeconform`, `conftest` and `shellcheck`. Nothing is deployed, and
+no `kubectl apply` has been run anywhere. Cluster-dependent exit criteria are named in the
 blockers table rather than marked done.
 
 ## What is proven, and by what
 
 | Phase | What landed | Proven by |
 |---|---|---|
-| 0 | SPEC / ROADMAP / AGENTS / TASKS, `scripts/check.sh`, `scripts/cost-estimate.sh`, ADRs 0001–0003, CI plan gate | `check.sh` PASS 0 FAIL 0; gitleaks clean; actionlint clean |
-| 1 | `bootstrap/` — state bucket, split plan/apply OIDC roles, AWS Budget, SNS alerts | `terraform validate`, `plan: 14 to add, 0 to change, 0 to destroy`, `checkov 70 passed 0 failed 6 skipped` |
+| 0 | SPEC / ROADMAP / AGENTS / TASKS, `scripts/check.sh`, `scripts/cost-estimate.sh`, ADRs 0001–0003, CI plan gate | `check.sh` 0 FAIL; gitleaks clean; actionlint clean |
+| 1 | `bootstrap/` — state bucket, split OIDC plan/apply roles, AWS Budget, SNS alerts | `terraform validate`, `plan: 14 to add, 0 to change, 0 to destroy`, `checkov 70 passed 0 failed 6 skipped` |
 | 2 | `platform/` — VPC `10.90.0.0/16`, 3 public subnets, 4 security groups, narrow node instance profile | `plan: 42 to add, 0 to change, 0 to destroy`, `checkov 103 passed 0 failed`, `tflint` clean |
 | 6 | `apps/boutique/` — upstream v0.10.7 vendored verbatim with provenance; all 13 workloads hardened (PDB, HPA, topology spread, anti-affinity, `seccompProfile`, `automountServiceAccountToken: false`, CPU requests == limits, `startupProbe`); `netpol/` with the kube-dns carve-out upstream omits; `policy/` rego + 3 failing fixtures; OTel collector with real processors | `kustomize build` 3033 lines; `kubeconform` 136/136 valid; `conftest` 1044/1044 pass, 22/22 fixtures rejected; `gitleaks` clean |
 | 9 | `observability/kube-prometheus-stack/` on chart `92.1.1`; golden-signal recording rules; alerts; 4 dashboards; ServiceMonitors | `helm lint --strict` 0 failed; `promtool check rules` 9 rules |
@@ -24,7 +26,7 @@ blockers table rather than marked done.
 | Item | Waiting on |
 |---|---|
 | Phase 3 first apply | Aravind's approval — it is the first cost-bearing apply (~$61/mo) |
-| Phase 1 apply | Aravind's approval — an IAM change (Risky class) |
+| Phase 1/2 apply | Aravind's approval — the state bucket does not exist yet, and the Phase 2 apply is an IAM change (Risky class) |
 | Phase 5 ALB + Web ACL | SPEC Q3 — the ALB decision |
 | Phase 6 drain test (`zero failed requests`) | A schedulable node to drain to. **Root cause now identified and fixed: the workload-node taint.** See U1 |
 | Phase 6 collector `debug` → Tempo | Phase 11 (Tempo does not exist yet) |
@@ -59,8 +61,29 @@ blockers table rather than marked done.
   `describe-vpcs`, `describe-security-groups`, `describe-instance-types`, quota checks,
   `ce get-cost-and-usage`) and from the real `GoogleCloudPlatform/microservices-demo` `v0.10.7`.
   Validated by inspection; no infrastructure touched.
-- 2026-10-08 Phase 1 — `bootstrap/` plans clean (14 add / 0 change / 0 destroy). Account verified
-  back to its pre-session state afterwards by independent read-only calls.
-- 2026-10-08 Phase 2 — `platform/` plans clean (42 add / 0 change / 0 destroy). Adds $0.00.
-- 2026-10-08 Phase 6 — manifest layer on `feat/app-hardening`. See the table above.
-- 2026-10-08 Phases 9, 10, 12 — observability config, rules, SLOs and burn-rate fixtures.
+- 2026-10-09 Phase 1, `bootstrap/` — the S3 state bucket
+  `boutique-platform-tfstate-<account>-us-east-1` (versioning, SSE-S3, all four
+  public-access-block flags, noncurrent versions expired at 30 days), the GitHub Actions OIDC
+  provider for `token.actions.githubusercontent.com`, the split `boutique-platform-plan`
+  (read-only) and `boutique-platform-apply` roles sharing one trust policy, the AWS Budget
+  `boutique-platform-monthly` at $30 with 50% and 80% forecast alerts, and the
+  `boutique-platform-alerts` SNS topic with its email subscription. Validated by
+  `terraform plan` (14 to add), `validate`, `fmt -check -recursive`,
+  `checkov -d bootstrap` (69 passed, 0 failed, 6 skipped with reasons),
+  `tflint --recursive`, and `gitleaks detect --no-git`. Residual risk: no apply has run.
+- 2026-10-09 Phase 2, `platform/` — VPC `10.90.0.0/16`, three public subnets in
+  `us-east-1a/b/c` with the Cloud Controller Manager and ELB subnet tags, IGW plus a
+  `0.0.0.0/0` route, `AmazonProvidedDNS` DHCP options, four security groups and 21 standalone
+  `aws_security_group_rule` resources, and the `boutique-platform-node` instance profile whose
+  inline policy is SSM, ECR-pull, CloudWatch, one S3 prefix and one SSM parameter. Validated by
+  `terraform plan` (42 to add), `validate`, `fmt -check -recursive`,
+  `checkov -d platform` (103 passed, 0 failed), `tflint --recursive`, `scripts/check.sh`
+  (0 FAIL), and `gitleaks detect --no-git`. Residual risk, recorded rather than hidden: no
+  `terraform apply` has been run for either stack, so the plan line is the proof and not the
+  applied result; VPC flow logs are off for cost; the ALB-to-NodePort rule lands in Phase 5;
+  the etcd snapshot bucket is created in Phase 4.
+- 2026-10-09 Phase 6, 9, 10, 12 — manifest and observability layers, on `feat/app-hardening` and
+  `feat/observability-metrics-logs`, merged here. See the table above.
+
+Move a task here only after its acceptance criteria and validation passed. Record skipped
+validation and residual risk instead of marking incomplete work done.
