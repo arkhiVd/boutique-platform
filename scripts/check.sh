@@ -55,6 +55,15 @@ check_show() {
 
 need() { command -v "$1" >/dev/null 2>&1 || { gone "$2"; return 1; }; }
 
+# Install providers for one Terraform root without ever touching a backend.
+# `-backend=false` is essential: a real `terraform init` here would try to reach
+# the S3 state bucket, which does not exist until bootstrap/ is applied, and
+# would fail with NoSuchBucket — indistinguishable from a broken config.
+local_init() {
+  terraform -chdir="$1" init -backend=false -no-color >/dev/null 2>&1 || \
+  terraform -chdir="$1" init -backend=false -no-color -input=false
+}
+
 cyan "== whitespace and conflict markers =="
 rc=0; git diff --check 2>/dev/null || rc=$?; score "$rc" "git diff --check"
 if grep -rIl -e '^<<<<<<< ' -e '^>>>>>>> ' --exclude-dir=.git . 2>/dev/null | grep -q .; then
@@ -73,6 +82,11 @@ if need terraform terraform && [[ -n "$TF_ROOTS" ]]; then
     check "tflint --recursive" -- tflint --recursive --format compact
   fi
   while IFS= read -r dir; do
+    # `terraform validate` cannot run before providers are installed: it fails with
+    # "there is no package for ... cached in .terraform/providers", which looks
+    # exactly like a broken configuration. `init -backend=false` installs the
+    # providers from the lock file without touching any state or backend.
+    local_init "$dir"
     check "terraform validate ($dir)" -- terraform -chdir="$dir" validate
   done <<< "$TF_ROOTS"
 else
