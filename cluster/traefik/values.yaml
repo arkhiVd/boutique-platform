@@ -1,0 +1,165 @@
+# Traefik chart values. Every override states why, because a value that is not
+# explained gets reverted by someone who does not know what it broke.
+
+traefik:
+  # --- deployment shape ---------------------------------------------------
+  # A DaemonSet, not a Deployment: the chart expresses it as deployment.kind,
+  # not a separate daemonset block (verified against the 39.0.1 values schema).
+  # The ALB's target group registers every node on the NodePort, and a node with
+  # no Traefik pod is a node whose only ALB target is unhealthy. A DaemonSet is
+  # what guarantees the invariant that a Ready node always runs Traefik.
+  deployment:
+    kind: DaemonSet
+
+  # --- entry points -------------------------------------------------------
+  ports:
+    web:
+      port: 8000
+      expose:
+        default: true
+      exposedPort: 80
+      nodePort: 32080
+      protocol: TCP
+      # Traefik itself upgrades plaintext to HTTPS at the entry point. This is
+      # the second layer of the two-layer edge: the ALB's port-80 listener also
+      # redirects, and this catches anything that still arrives on port 80 — a
+      # direct node-IP hit on :32080, for example, which never touches the ALB.
+      http:
+        redirections:
+          entryPoint:
+            to: websecure
+            scheme: https
+            permanent: true
+    websecure:
+      port: 8443
+      expose:
+        default: true
+      exposedPort: 443
+      nodePort: 32443
+      protocol: TCP
+      # TLS is enabled on this entry point (the chart's default). In self-signed
+      # cert mode the ALB holds the ACM cert and re-encrypts to Traefik's own
+      # self-signed one, so the hop is end-to-end encrypted. In http01 mode a
+      # cert-manager issued cert terminates here instead.
+    metrics:
+      port: 9100
+      protocol: TCP
+
+  # --- metrics ------------------------------------------------------------
+  # This is the fix for the recorded latency-SLI gap. Traefik's default buckets
+  # are 0.1, 0.3, 1.2, 5.0 and 15 seconds, so a p95 computed from them can only
+  # resolve to one of those five numbers. The Boutique app's own latency is
+  # concentrated in the sub-second range and the checkout path is the one we
+  # alert on, so the buckets below put six resolution points under one second.
+  metrics:
+    prometheus:
+      enabled: true
+      # The observability namespace labels this and scrapes it; see
+      # observability/servicemonitors/traefik.yaml.
+      # The ServiceMonitor is written by hand in observability/servicemonitors/
+      # (the same pattern used for every other source on this platform, and
+      # already reviewed). Rendering one from this chart would need the
+      # Prometheus Operator CRDs present just to template the chart, and would
+      # split the monitoring config across two places.
+      serviceMonitor:
+        enabled: false
+      # This is the fix for the recorded latency-SLI gap. Traefik's default
+      # buckets are 0.1, 0.3, 1.2, 5.0 and 15 seconds, so a p95 computed from them
+      # can only resolve to one of those five numbers. The Boutique app's own
+      # latency is concentrated in the sub-second range and the checkout path is
+      # the one the latency SLO alerts on, so the buckets below put six
+      # resolution points under one second.
+      #
+      # A comma-separated string, because the chart schema wants a string: it is
+      # passed to --metrics.prometheus.buckets as one flag argument.
+      buckets: "0.05,0.1,0.25,0.5,1,2.5,5,10"
+      addRouters: true
+      addServicesLabels: true
+
+  # --- persistence and logging --------------------------------------------
+  logs:
+    general:
+      level: INFO
+    access:
+      enabled: true
+      # Access logs to stdout so Fluent Bit collects them into Loki with no
+      # sidecar. The WAF log is CloudWatch, the ALB log is S3, and this one is
+      # Loki: three logs at three layers, each owned by the layer that sees the
+      # request.
+      format: json
+      fields:
+        general:
+          defaultmode: keep
+          names:
+            ClientHost: keep
+            RequestPath: keep
+            RequestMethod: keep
+            DownstreamStatus: keep
+            OriginStatus: keep
+            Duration: keep
+            RequestHost: keep
+            ServiceName: keep
+        headers:
+          defaultmode: drop
+          names:
+            X-Forwarded-For: keep
+            User-Agent: keep
+
+  # --- resources ----------------------------------------------------------
+  # Sized against the measured platform budget. The full stack is 3600m of CPU
+  # requests over a four-node cluster with a 1600m sustained t3 baseline, and
+  # Traefik is on the path of every single request, so it is given a
+  # guaranteed-feeling request and a ceiling it will not reach in normal use.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  # --- security -----------------------------------------------------------
+  # DaemonSet pods run with a host-network-lite posture (they read the node's
+  # network namespace only if hostNetwork is set; it is not) and drop caps.
+  securityContext:
+    capabilities:
+      drop: [ALL]
+    readOnlyRootFilesystem: true
+    runAsGroup: 65532
+    runAsNonRoot: true
+    runAsUser: 65532
+  podSecurityContext:
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+
+  # --- scheduling ---------------------------------------------------------
+  # Run on every schedulable node, so the ALB target group is always whole.
+  tolerations: []
+  affinity:
+    nodeAffinity: null
+
+  # The TLS cert resolver is only used in the http01 cert mode. It is declared
+  # here so the resolver exists when cert-manager issues a real certificate;
+  # in self-signed mode, the ALB holds the ACM cert and Traefik's default
+  # self-signed cert covers the inner hop.
+  # No ACME arguments here. The chart refuses to render a DaemonSet with any
+  # `--certificatesresolvers.*.acme.*` argument, because ACME writes acme.json and
+  # a DaemonSet runs one pod per node — each with its own copy — so renewal would
+  # race and clobber. The HTTP-01 challenge therefore runs in cert-manager
+  # (cluster/traefik/templates/certmanager.yaml), which is a single Deployment and
+  # stores its account key in a Secret, and Traefik picks the issued certificate
+  # up from that Secret. The IngressRoutes reference certResolver only by name,
+  # and in self-signed mode that resolver is never used.
+  additionalArguments: []
+
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 1Gi
+
+# --- the CRDs the ingress routes use ---------------------------------------
+# Traefik's CRDs are installed by the chart as dependencies; these extraObjects
+# pin them so a chart upgrade cannot silently replace a CRD version we tested.
+crds:
+  enabled: true

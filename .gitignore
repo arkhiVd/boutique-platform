@@ -49,3 +49,6 @@ Chart.lock
 
 # logs
 *.log
+
+# local TLS material (generated scripts, never a certificate in git)
+.boutique-platform/

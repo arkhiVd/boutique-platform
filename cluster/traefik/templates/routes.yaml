@@ -1,0 +1,174 @@
+# k3s ships Traefik by default, and `platform/nodes.tf` line 91 disables it with
+# `--disable traefik`. That is deliberate: k3s's bundled Traefik is a pinned
+# version we do not control, configured through HelmChartConfig patching a chart
+# we never vendored. Installing Traefik ourselves instead means:
+#
+#   * the version is pinned in a Chart.yaml like every other chart in this repo,
+#     and Dependabot sees it;
+#   * the values live in a file a reviewer can read, not in a patch that has to be
+#     reasoned about against upstream's template;
+#   * `metrics.prometheus.buckets` can be set, which the latency SLI needs (see
+#     below), through the documented value path.
+#
+# Deployment as a DaemonSet so every schedulable node is a Traefik endpoint. The
+# four-node shape in SPEC.md is the reason: one node down still leaves three
+# ALB targets healthy, which is what makes the ALB health check non-catastrophic.
+#
+# The k3s Traefik bundle would also pull in ServiceLB, which is a Kubernetes load
+# balancer implementation for a cloud that has no cloud provider configured. It
+# can only create a NodePort Service, and NodePort is exactly what the ALB
+# target groups point at — so a bundled ServiceLB would be a second, competing
+# entry path that bypasses the Web ACL. `--disable servicelb` is on for that.
+#
+# This is a plain Traefik install, not a k3s HelmChartConfig, so the CRDs the
+# ingress routes below need are installed by this chart as dependencies.
+
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: compress
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  compress:
+    minResponseBodyBytes: 1024
+    excludedContentTypes:
+      - text/event-stream
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ratelimit
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  # A second rate limit inside the cluster, independent of the WAF's rate rule.
+  # The WAF sees source IPs as seen by the ALB; this one sees the connection
+  # source, so it still protects the path if the ALB is ever bypassed by
+  # reaching a node IP directly.
+  rateLimit:
+    average: 100
+    burst: 200
+    period: 1m
+    # Key on the source address, not a header. X-Forwarded-For is
+    # attacker-controlled at this point: the ALB overwrites it, but a request
+    # that never reached the ALB (a direct node-IP hit on :32080) carries
+    # whatever the client sent, so keying a rate limit on it would make the
+    # limit bypassable by rotating a header value. The default sourceCriterion
+    # is the client IP, which is the correct key here.
+    sourceCriterion:
+      requestHost: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-scheme
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  # If a request reaches Traefik over plaintext HTTP — which is what happens
+  # when the ALB's port-80 redirect does not fire because someone hit a node IP
+  # on :32080 directly — upgrade it here too. Defence in depth: the edge redirect
+  # is the primary control, this is the backstop.
+  redirectScheme:
+    scheme: https
+    # A string, because the CRD schema types the port as a string (verified
+    # against the traefik.io/middleware_v1alpha1 CRD; a number fails validation).
+    port: "443"
+    permanent: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: frontend
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    # The storefront. `/` only: the Boutique app serves every path under the
+    # root (/, /product/{id}, /cart, /cart/checkout) with no URL prefix, and
+    # BASE_URL is unset, so a PathPrefix of `/` is the correct and only mapping.
+    - match: Host(`{{ .Values.frontendHost }}`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: frontend
+          namespace: boutique
+          port: 80
+      middlewares:
+        - name: compress
+        - name: ratelimit
+    # The health and metrics endpoints the ALB target group needs. These are
+    # matched separately so the rate limit cannot consume a probe's burst
+    # budget during a scrape storm.
+    - match: Host(`{{ .Values.frontendHost }}`) && PathPrefix(`/ping`)
+      kind: Rule
+      services:
+        - name: frontend
+          namespace: boutique
+          port: 80
+      priority: 1000
+  tls:
+    certResolver: edge
+    domains:
+      - main: "{{ .Values.frontendHost }}"
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`{{ .Values.grafanaHost }}`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: grafana
+          namespace: observability
+          port: 80
+      middlewares:
+        - name: compress
+  # Grafana carries the whole observability story, so it gets the same TLS
+  # termination as the storefront rather than a plaintext hop.
+  tls:
+    certResolver: edge
+    domains:
+      - main: "{{ .Values.grafanaHost }}"
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jenkins
+  namespace: traefik
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`{{ .Values.jenkinsHost }}`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: ci
+          namespace: ci
+          port: 8080
+      middlewares:
+        - name: compress
+  # Jenkins is the CI engine, and an unauthenticated reachable Jenkins is a
+  # remote-code-execution surface. It is reachable only on https and only
+  # through the edge; the bastion-free, ALB-only topology is what makes that
+  # acceptable.
+  tls:
+    certResolver: edge
+    domains:
+      - main: "{{ .Values.jenkinsHost }}"

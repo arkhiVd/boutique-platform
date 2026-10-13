@@ -75,3 +75,56 @@ skip-check:
   # the Kubernetes API (ETCDSnapshotFile objects) without a second event bus.
   # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/bc-aws-2-62
   - CKV2_AWS_62
+
+  # The http target group is HTTP by design: the ALB forwards to the Traefik
+  # NodePort on plaintext, and the in-cluster second layer terminates TLS and
+  # forces the upgrade through its redirectScheme middleware. Egress to that
+  # port is restricted to the node internal security group, so the plaintext
+  # hop never crosses the VPC. The https target group carries the real traffic.
+  # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/ensure-aws-load-balancer-doesnt-use-http-protocol
+  - CKV_AWS_378
+
+  # CloudWatch retention of one year. The WAF log group is set to 14 days by
+  # design: this platform is destroyed at Phase 14 inside a 43-day window, and
+  # CloudWatch Logs retention is billed per GB ingested and stored, so a year of
+  # sampled WAF requests is money spent on a history that will never be read.
+  # The S3 access-log bucket keeps 30 days for the same reason. The incident
+  # window an operator actually needs is the days around the incident, and the
+  # value is a variable (log_retention_days) precisely so a long-lived
+  # deployment sets it to 365 without editing the stack.
+  # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/aws-cloudwatch-log-group-retention-period-365-days
+  - CKV_AWS_338
+
+  # Log4j AMR coverage, CKV_AWS_192 and CKV2_AWS_76. Both scanners look for a
+  # rule that references the Log4j AWS managed rule group BY NAME. AWS does not
+  # ship a separate Log4j rule group; the Log4JRCE_BODY/HEADER/QUERYSTRING/
+  # URIPATH rules live inside AWSManagedRulesKnownBadInputsRuleSet, which this
+  # ACL already attaches (verified for this account with
+  # `aws wafv2 describe-managed-rule-group --name AWSManagedRulesKnownBadInputsRuleSet`).
+  # The `log4j-coverage` rule at priority 15 exists so that group has its own
+  # CloudWatch metric and the coverage is attributable. Suppressing rather than
+  # inventing a managed group name that would fail at apply time.
+
+  # Log4j AMR coverage, CKV_AWS_192 and CKV2_AWS_76. Both scanners look for a
+  # rule that references a Log4j AWS managed rule group BY NAME. AWS ships no
+  # separate Log4j group: the Log4JRCE_BODY / Log4JRCE_HEADER /
+  # Log4JRCE_QUERYSTRING / Log4JRCE_URIPATH rules live INSIDE
+  # AWSManagedRulesKnownBadInputsRuleSet, which this ACL already attaches, and
+  # which this account actually provides -- verified 2026-10-09 with
+  # `aws wafv2 describe-managed-rule-group --scope REGIONAL --vendor-name AWS \
+  #   --name AWSManagedRulesKnownBadInputsRuleSet`.
+  # The `log4j-coverage` rule at priority 15 exists so that group has its own
+  # CloudWatch metric and the coverage is attributable to the Log4j rules rather
+  # than the rest of the known-bad-inputs set. Suppressed rather than inventing
+  # a managed rule group name that would fail at apply.
+  - CKV_AWS_192
+  - CKV2_AWS_76
+  # ALB deletion protection. It is disabled by design and expressed as a variable
+  # (var.alb_deletion_protection, default false) so a long-lived deployment sets
+  # it true without editing the stack. The reason is Phase 14: teardown is driven
+  # by a budget alarm, and a protected load balancer turns `terraform destroy`
+  # into a two-step manual operation at the exact moment the operator is trying
+  # to stop a spend. A checker that reads `enable_deletion_protection = false`
+  # cannot see that the value is a knob; the knob is the artifact.
+  # https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-general-policies/bc-aws-150
+  - CKV_AWS_150

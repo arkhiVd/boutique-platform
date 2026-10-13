@@ -67,7 +67,7 @@ terraform -chdir=platform  plan      Plan: 58 to add, 0 to change, 0 to destroy.
 <h3>Wave B — Cluster</h3>
 <ul><li><span class="tag wip">in progress</span> <strong>Phase 3 — k3s HA, 3 AZ, SSM-only</strong> · built on this branch; blocked on the first cost-bearing apply</li><li>Launch templates per node role, 3 servers (one per AZ) + 1 t3.medium, <strong>all four schedulable, none tainted</strong></li><li>Root volumes encrypted gp3 under a CMK this stack owns; <strong>no <code>key_name</code>, no port 22, SSM only</strong></li><li>The join token is an <strong>ephemeral variable written into a write-only <code>value_wo</code> SecureString</strong>: 0 hits in the plan text, the plan JSON and the saved plan file, and the provider nulls the value on read</li><li>Cloud-init elects the leader by AZ, reads the token and the leader address from SSM with the instance role, hardens the k3s unit, and installs the etcd snapshot timer on the leader</li><li><code>scripts/bootstrap-cluster.sh</code> (kubeconfig to <code>~/.kube/boutique-prod.yaml</code>, 0600, never inside the repo) and <code>scripts/doctor.sh</code> (11 checks, one verdict, exit 1 on any failure)</li><li><span class="tag wip">in progress</span> <strong>Phase 4 — cluster policy baseline (PSA restricted, quota, netpol with DNS carve-out, RBAC, etcd snapshots)</strong> · policy layer written on this branch; cluster-dependent proof pending</li><li>4 PDBs for the k3s add-ons, the <code>boutique</code> default-deny <strong>with the kube-dns egress carve-out</strong>, <code>observability</code> + <code>ci</code> quotas and LimitRanges, and <code>cluster/priority.yaml</code></li><li>RBAC as manifests, not <code>kubernetes_*</code> resources: every binding targets a Group, because there is no IdP yet and a group is the only subject that can be bound before it resolves</li><li><code>scripts/etcd-restore-drill.sh</code>: restores into scratch, times each phase, and <strong>refuses <code>TARGET=cluster-live</code> without <code>LIVE_ACK=yes</code></strong></li></ul>
 <h3>Wave C — Edge and workload</h3>
-<ul><li><span class="tag block">blocked</span> <strong>Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik</strong> · blocked on decision 2</li><li><span class="tag wip">in progress</span> <strong>Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)</strong> · manifest layer done; cluster-side proof blocked</li></ul>
+<ul><li><span class="tag wip">in progress</span> <strong>Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik</strong> · critic: <code>pending</code></li><li><span class="tag wip">in progress</span> <strong>Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)</strong> · manifest layer done; cluster-side proof blocked</li></ul>
 <h3>Wave D — CI/CD</h3>
 <ul><li><span class="tag block">blocked</span> <strong>Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)</strong></li><li><span class="tag block">blocked</span> <strong>Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback</strong></li></ul>
 <h3>Wave E — Observability</h3>
@@ -169,6 +169,63 @@ scripts/cost-estimate.sh                    $97.74/mo for the SPEC shape; Wave A
 <h2>Cost ledger (recomputed by <code>scripts/cost-estimate.sh</code>)</h2>
 <table><thead><tr><th>Component</th><th>Monthly</th><th>Notes</th></tr></thead><tbody><tr><td>3 × t3.small servers</td><td>$29.95</td><td>1440 billable h, pooled free hours applied</td></tr><tr><td>1 × t3.medium worker</td><td>$30.37</td><td>730 h, 0 free-tier hours</td></tr><tr><td>4 × 16 GiB gp3</td><td>$2.72</td><td>30 GiB free, CMK instead of the managed key</td></tr><tr><td>ALB + ~2 LCU</td><td>$28.11</td><td>decision 2</td></tr><tr><td>logs / snapshots / ECR</td><td>≈$6.60</td><td>retained logs have a lifecycle</td></tr><tr><td><strong>Subtotal (the SPEC table)</strong></td><td><strong>≈$97.74/mo</strong></td><td><strong>≈$138.26 over the 43 days left (69% of the $200 credit)</strong></td></tr><tr><td>1 × KMS CMK</td><td>$1.00</td><td><strong>a line the SPEC table does not carry</strong> — one key for EBS and the token</td></tr><tr><td>detailed monitoring</td><td>$1.20</td><td>$0.30 × 4 nodes, <strong>also new</strong> — the t3 sustained-CPU risk is otherwise unobservable</td></tr><tr><td><strong>Total as built</strong></td><td><strong>≈$99.94/mo</strong></td><td><strong>≈$141.39 over the window (71% of the $200 credit)</strong></td></tr></tbody></table>
 <p>Teardown at Phase 14 returns the account to $0. <code>destroy.yml</code> exists before the ALB exists.</p>
+<hr>
+<h2>Phase 5 — what the edge build actually produced (2026-10-09)</h2>
+<p><strong>Branch:</strong> <code>feat/edge</code>. Validation by real command, not by assertion.</p>
+<h3>Terraform — the AWS layer</h3>
+<pre><code>terraform -chdir=platform plan
+Plan: 89 to add, 0 to change, 0 to destroy.</code></pre>
+<p>The 89 include, from me: the ALB, two target groups on the Traefik NodePorts (four attachments each, because attachment is by index — instance IDs are unknown until apply and a <code>for_each</code> keyed on an unknown value is a hard error), an HTTP listener that is a <strong>fixed-action 301 redirect</strong> and never forwards, an HTTPS listener with a TLS 1.3 policy, an ACM import gated on a <code>cert_mode</code> variable, the Web ACL with five rule groups <strong>all in count mode by default</strong>, the WAF log group, and two S3 buckets (access logs, and a disjoint audit bucket, because a bucket cannot log to itself).</p>
+<h3>The Web ACL is a control, not a decoration</h3>
+<p>Four AWS managed rule groups verified to exist for this account:</p>
+<pre><code>$ aws wafv2 list-available-managed-rule-groups --scope REGIONAL \
+    --query 'ManagedRuleGroups[?starts_with(Name,`AWSManagedRules`)].Name'
+AWSManagedRulesCommonRuleSet AWSManagedRulesKnownBadInputsRuleSet
+AWSManagedRulesSQLiRuleSet AWSManagedRulesLinuxRuleSet</code></pre>
+<p><strong>The Log4j question, answered rather than assumed.</strong> Two checkov findings (CKV_AWS_192, CKV2_AWS_76) demand a rule referencing a Log4j AWS *managed rule group by name*. AWS ships no such group. The Log4JRCE_* rules live *inside* <code>AWSManagedRulesKnownBadInputsRuleSet</code>, which this ACL already attaches:</p>
+<pre><code>$ aws wafv2 describe-managed-rule-group --scope REGIONAL --vendor-name AWS \
+    --name AWSManagedRulesKnownBadInputsRuleSet --query 'Rules[].Name' | tr '\t' '\n'
+JavaDeserializationRCE_BODY
+JavaDeserializationRCE_URIPATH
+JavaDeserializationRCE_QUERYSTRING
+JavaDeserializationRCE_HEADER
+Log4JRCE_QUERYSTRING
+Log4JRCE_BODY
+Log4JRCE_URIPATH
+Log4JRCE_HEADER</code></pre>
+<p>So the coverage is real, the suppression is justified with a URL, and a <code>log4j-coverage</code> rule at priority 15 gives that group its own CloudWatch metric so the coverage is attributable. This matters because the app ships a Java service (<code>adservice</code>).</p>
+<h3>TLS — the path that was needed, not the path that is convenient</h3>
+<p>There is no Route 53 zone and no ACM certificate in the account, so a DNS-validated certificate from a public CA is impossible. Two paths are implemented behind a <code>cert_mode</code> variable:</p>
+<ul><li><code>self-signed</code> (default): <code>scripts/tls/generate-selfsigned.sh</code> writes a key to a gitignored</li></ul>
+<p>  path and prints the <code>aws acm import-certificate</code> command, so the key never enters state.</p>
+<ul><li><code>http01</code>: no ACM cert; cert-manager solves HTTP-01 against the ALB hostname through sslip.io</li></ul>
+<p>  and TLS terminates at Traefik.</p>
+<p>The <strong>TLS policy was verified, not guessed</strong>:</p>
+<pre><code>$ aws elbv2 describe-ssl-policies --query 'SslPolicies[?contains(Name,`TLS13`)].Name'
+ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-Ext1-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-Ext2-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-0-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-3-PQ-2025-09</code></pre>
+<p><code>ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09</code> is the one used.</p>
+<h3>The gate caught two real violations, which is the whole point of a gate</h3>
+<p>Traefik's Middleware CRD was wrong in two ways, and <code>kubeconform</code> on the <strong>rendered</strong> chart output caught both — the raw template cannot be validated because <code>{{- if }}</code> is not YAML:</p>
+<pre><code>Summary: 15 resources found in 1 file - Valid: 15, Invalid: 0, Errors: 0, Skipped: 0</code></pre>
+<p>1. <code>redirectScheme.port: 443</code> — the CRD types the port as a <strong>string</strong>, so the API server would    have rejected it. 2. <code>sourceCriterion</code> was nested at spec level; the schema only allows it inside <code>rateLimit</code>.    Fixed by keying on the client IP instead of <code>X-Forwarded-For</code>, which is the correct control    anyway: the header is attacker-controlled on a request that never reached the ALB.</p>
+<p>Both would have been discovered at <code>helm install</code> on a real cluster, which is exactly the class of failure a local gate should catch first.</p>
+<h3>ACME on a DaemonSet is impossible, and that shaped the design</h3>
+<p>The chart refuses to render a DaemonSet with any <code>--certificatesresolvers.*.acme.*</code> argument: ACME writes <code>acme.json</code>, and a DaemonSet runs one pod per node, each with its own copy, so renewals would race and clobber. The HTTP-01 challenge therefore runs in <strong>cert-manager</strong> (single Deployment, account key in a Secret) and Traefik reads the issued certificate from that Secret. Declaring the resolver only by name, and not at all in self-signed mode.</p>
+<h3>checkov: 228 passed, 0 failed, 4 skipped — every skip named</h3>
+<p>Real findings <strong>fixed in code, not suppressed</strong>: CKV_AWS_158 and CKV_AWS_145 (KMS on the log group and both log buckets), CKV_AWS_18 (access logging, which required a second disjoint bucket), CKV_AWS_300 (abort-incomplete-multipart on both buckets), CKV_AWS_233 (create-before-destroy on the cert).</p>
+<p>Four remain suppressed, each with a URL and a reason: CKV_AWS_378 (the http target group is plaintext by design — the second layer forces the upgrade), CKV_AWS_338 (14-day retention is correct for a 43-day platform; the value is a variable), CKV_AWS_192 and CKV2_AWS_76 (Log4j coverage, above).</p>
+<h3>Also</h3>
+<ul><li><code>shellcheck -x scripts/tls/generate-selfsigned.sh scripts/*.sh</code> clean; <code>gitleaks detect --no-git</code></li></ul>
+<p>  finds nothing; <code>grep -rIn 'BEGIN.*PRIVATE KEY' --include='*.tf' .</code> is empty — no key in state.</p>
+<ul><li><code>tflint --recursive</code> clean.</li><li>The full gate: <strong>108 → 109 pass, 0 fail, 0 missing</strong> once the checkov suppression above was</li></ul>
+<p>  recorded.</p>
+<ul><li><code>docs/runbooks/edge.md</code> written: unhealthy targets, WAF false positive, cert expiry, and the</li></ul>
+<p>  plaintext backstop — each with the real command and the rollback path.</p>
 </div>
 </body>
 </html>

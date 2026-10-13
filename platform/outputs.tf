@@ -151,3 +151,47 @@ output "k3s_join_token_parameter" {
   description = "The SSM parameter holding the join token. This is the whole point of the write-only design: the plan shows the name and never the value."
   value       = aws_ssm_parameter.k3s_token.name
 }
+
+# Phase 5 outputs. The ALB DNS and the hostnames built from it are the only
+# public entry points, and both are outputs rather than hardcoded because
+# neither exists until apply.
+
+output "alb_dns_name" {
+  description = "The edge ALB's public DNS name. The root hostname everything else is built from."
+  value       = aws_lb.edge.dns_name
+}
+
+output "alb_arn" {
+  description = "The edge ALB ARN, for the Web ACL association and the teardown script."
+  value       = aws_lb.edge.arn
+}
+
+output "edge_security_group_id" {
+  description = "The edge security group, for the runbook's allow-in check."
+  value       = aws_security_group.boutique_edge.id
+}
+
+output "traefik_target_group_arn" {
+  description = "The http target group. `aws elbv2 describe-target-health` against this is the first diagnostic for a total outage."
+  value       = aws_lb_target_group.traefik_http.arn
+}
+
+output "edge_certificate_arn" {
+  description = "The ACM certificate ARN. Null in http01 cert mode, where the certificate terminates at Traefik. Drops the sensitive taint it inherits from the imported cert's inputs: an ARN is a public identifier, not a secret, and marking it sensitive would hide the one value the runbook prints."
+  value       = var.cert_mode == "http01" ? null : nonsensitive(local.acm_certificate_arn)
+}
+
+output "frontend_url" {
+  description = "The storefront HTTPS URL. In self-signed cert mode the certificate is one we generated, so a browser warns — SPEC non-goal 7."
+  value       = "https://boutique.<your-sslip-domain>/"
+}
+
+output "web_acl_arn" {
+  description = "The Web ACL ARN, for the runbook's metric queries and the teardown."
+  value       = aws_wafv2_web_acl.edge.arn
+}
+
+output "waf_action" {
+  description = "`count` or `block`. Surfaced so the teardown-cost report and doctor.sh can state whether the edge is actually enforcing, without reading the tfvars."
+  value       = var.waf_action
+}

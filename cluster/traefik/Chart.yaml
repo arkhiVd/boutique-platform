@@ -1,0 +1,13 @@
+apiVersion: v2
+name: traefik
+description: >-
+  In-cluster L7 second layer of the two-layer edge. k3s's bundled Traefik is
+  disabled (platform/nodes.tf) so the version is pinned here and the metrics
+  values below are ours to set.
+type: application
+version: 1.0.0
+appVersion: "3.6.3"
+dependencies:
+  - name: traefik
+    version: "39.0.1"
+    repository: https://traefik.github.io/charts

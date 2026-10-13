@@ -85,7 +85,7 @@ Critic: `pending` · `pass` · `gap named`
   - `scripts/etcd-restore-drill.sh`: restores into scratch, times each phase, and **refuses `TARGET=cluster-live` without `LIVE_ACK=yes`**
 
 ### Wave C — Edge and workload
-- `[!]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · blocked on decision 2
+- `[~]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · critic: `pending`
 - `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · manifest layer done; cluster-side proof blocked
 
 ### Wave D — CI/CD
@@ -248,3 +248,129 @@ Also verified from the account, not from memory:
 | **Total as built** | **≈$99.94/mo** | **≈$141.39 over the window (71% of the $200 credit)** |
 
 Teardown at Phase 14 returns the account to $0. `destroy.yml` exists before the ALB exists.
+
+---
+
+## Phase 5 — what the edge build actually produced (2026-10-09)
+
+**Branch:** `feat/edge`. Validation by real command, not by assertion.
+
+### Terraform — the AWS layer
+
+```
+terraform -chdir=platform plan
+Plan: 89 to add, 0 to change, 0 to destroy.
+```
+
+The 89 include, from me: the ALB, two target groups on the Traefik NodePorts (four attachments
+each, because attachment is by index — instance IDs are unknown until apply and a `for_each`
+keyed on an unknown value is a hard error), an HTTP listener that is a **fixed-action 301
+redirect** and never forwards, an HTTPS listener with a TLS 1.3 policy, an ACM import gated on a
+`cert_mode` variable, the Web ACL with five rule groups **all in count mode by default**, the
+WAF log group, and two S3 buckets (access logs, and a disjoint audit bucket, because a bucket
+cannot log to itself).
+
+### The Web ACL is a control, not a decoration
+
+Four AWS managed rule groups verified to exist for this account:
+
+```bash
+$ aws wafv2 list-available-managed-rule-groups --scope REGIONAL \
+    --query 'ManagedRuleGroups[?starts_with(Name,`AWSManagedRules`)].Name'
+AWSManagedRulesCommonRuleSet AWSManagedRulesKnownBadInputsRuleSet
+AWSManagedRulesSQLiRuleSet AWSManagedRulesLinuxRuleSet
+```
+
+**The Log4j question, answered rather than assumed.** Two checkov findings (CKV_AWS_192,
+CKV2_AWS_76) demand a rule referencing a Log4j AWS *managed rule group by name*. AWS ships
+no such group. The Log4JRCE_* rules live *inside*
+`AWSManagedRulesKnownBadInputsRuleSet`, which this ACL already attaches:
+
+```bash
+$ aws wafv2 describe-managed-rule-group --scope REGIONAL --vendor-name AWS \
+    --name AWSManagedRulesKnownBadInputsRuleSet --query 'Rules[].Name' | tr '\t' '\n'
+JavaDeserializationRCE_BODY
+JavaDeserializationRCE_URIPATH
+JavaDeserializationRCE_QUERYSTRING
+JavaDeserializationRCE_HEADER
+Log4JRCE_QUERYSTRING
+Log4JRCE_BODY
+Log4JRCE_URIPATH
+Log4JRCE_HEADER
+```
+
+So the coverage is real, the suppression is justified with a URL, and a `log4j-coverage` rule at
+priority 15 gives that group its own CloudWatch metric so the coverage is attributable. This
+matters because the app ships a Java service (`adservice`).
+
+### TLS — the path that was needed, not the path that is convenient
+
+There is no Route 53 zone and no ACM certificate in the account, so a DNS-validated certificate
+from a public CA is impossible. Two paths are implemented behind a `cert_mode` variable:
+
+- `self-signed` (default): `scripts/tls/generate-selfsigned.sh` writes a key to a gitignored
+  path and prints the `aws acm import-certificate` command, so the key never enters state.
+- `http01`: no ACM cert; cert-manager solves HTTP-01 against the ALB hostname through sslip.io
+  and TLS terminates at Traefik.
+
+The **TLS policy was verified, not guessed**:
+
+```bash
+$ aws elbv2 describe-ssl-policies --query 'SslPolicies[?contains(Name,`TLS13`)].Name'
+ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-Ext1-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-Ext2-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-0-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-2-PQ-2025-09
+ELBSecurityPolicy-TLS13-1-3-PQ-2025-09
+```
+
+`ELBSecurityPolicy-TLS13-1-2-Res-PQ-2025-09` is the one used.
+
+### The gate caught two real violations, which is the whole point of a gate
+
+Traefik's Middleware CRD was wrong in two ways, and `kubeconform` on the **rendered** chart
+output caught both — the raw template cannot be validated because `{{- if }}` is not YAML:
+
+```
+Summary: 15 resources found in 1 file - Valid: 15, Invalid: 0, Errors: 0, Skipped: 0
+```
+
+1. `redirectScheme.port: 443` — the CRD types the port as a **string**, so the API server would
+   have rejected it.
+2. `sourceCriterion` was nested at spec level; the schema only allows it inside `rateLimit`.
+   Fixed by keying on the client IP instead of `X-Forwarded-For`, which is the correct control
+   anyway: the header is attacker-controlled on a request that never reached the ALB.
+
+Both would have been discovered at `helm install` on a real cluster, which is exactly the class
+of failure a local gate should catch first.
+
+### ACME on a DaemonSet is impossible, and that shaped the design
+
+The chart refuses to render a DaemonSet with any `--certificatesresolvers.*.acme.*` argument:
+ACME writes `acme.json`, and a DaemonSet runs one pod per node, each with its own copy, so
+renewals would race and clobber. The HTTP-01 challenge therefore runs in **cert-manager**
+(single Deployment, account key in a Secret) and Traefik reads the issued certificate from that
+Secret. Declaring the resolver only by name, and not at all in self-signed mode.
+
+### checkov: 228 passed, 0 failed, 4 skipped — every skip named
+
+Real findings **fixed in code, not suppressed**: CKV_AWS_158 and CKV_AWS_145 (KMS on the log
+group and both log buckets), CKV_AWS_18 (access logging, which required a second disjoint
+bucket), CKV_AWS_300 (abort-incomplete-multipart on both buckets), CKV_AWS_233
+(create-before-destroy on the cert).
+
+Four remain suppressed, each with a URL and a reason: CKV_AWS_378 (the http target group is
+plaintext by design — the second layer forces the upgrade), CKV_AWS_338 (14-day retention is
+correct for a 43-day platform; the value is a variable), CKV_AWS_192 and CKV2_AWS_76 (Log4j
+coverage, above).
+
+### Also
+
+- `shellcheck -x scripts/tls/generate-selfsigned.sh scripts/*.sh` clean; `gitleaks detect --no-git`
+  finds nothing; `grep -rIn 'BEGIN.*PRIVATE KEY' --include='*.tf' .` is empty — no key in state.
+- `tflint --recursive` clean.
+- The full gate: **108 → 109 pass, 0 fail, 0 missing** once the checkov suppression above was
+  recorded.
+- `docs/runbooks/edge.md` written: unhealthy targets, WAF false positive, cert expiry, and the
+  plaintext backstop — each with the real command and the rollback path.

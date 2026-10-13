@@ -209,6 +209,40 @@ if need helm "helm"; then
     # including the `.Files.Glob` loops that load the Prometheus rules, and it
     # fails on a `required` or a `fail` in a template.
     check "helm template $(basename "$d") $d" -- helm template "$(basename "$d")" "$d"
+
+    # A render is also the only thing that can be schema-validated for a chart
+    # whose manifests are Go template text: kubeconform cannot parse `{{- if }}`
+    # and reports an unhelpful parse error that looks like a policy failure.
+    # This check caught two real violations on the Traefik CRDs during Phase 5 —
+    # a `port` typed as a number where the middleware CRD wants a string, and a
+    # `sourceCriterion` nested one level above where the schema allows it. Both
+    # would have been rejected by the API server at apply time, so the gate has
+    # to run on the rendered output, not the template.
+    if [[ -f "$d/Chart.yaml" ]] && grep -q 'name: traefik' "$d/Chart.yaml" 2>/dev/null; then
+      # Capture the status explicitly; `$?` after an assignment is the status of
+      # the assignment, not of the command inside it.
+      render_err=""
+      render_rc=0
+      render_err="$(helm template "$(basename "$d")" "$d" \
+        --namespace traefik \
+        --set frontendHost=boutique.example \
+        --set grafanaHost=grafana.example \
+        --set jenkinsHost=jenkins.example \
+        --set tlsSecretName=tls-example 2>&1)" || render_rc=$?
+      if [[ $render_rc -eq 0 && -n "$render_err" ]]; then
+        printf '%s\n' "$render_err" > /tmp/kubeconform-render.yaml
+        check "kubeconform (rendered $d)" -- \
+          kubeconform -strict -summary -kubernetes-version 1.36.3 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            /tmp/kubeconform-render.yaml
+        rm -f /tmp/kubeconform-render.yaml
+      else
+        bad "helm template (rendered $d)" "$(basename "$d") render"
+        printf '%s\n' "$render_err" | tail -15 | sed 's/^/        /'
+        FAIL=$((FAIL+1))
+      fi
+    fi
   done < <(find . -name Chart.yaml -not -path './.terraform/*' | sort)
 fi
 
