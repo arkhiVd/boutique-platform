@@ -83,8 +83,8 @@ variable "instance_type_servers" {
 
 variable "instance_type_worker" {
   type        = string
-  default     = "t3.medium"
-  description = "Instance shape of the one workload node (Phase 3)."
+  default     = "t3.small"
+  description = "Instance shape of the one workload node (Phase 3). t3.medium is deliberately NOT the default: this account rejects RunInstances for any instance type whose FreeTierEligible flag is false, with InvalidParameterCombination 'The specified instance type is not eligible for Free Tier'. Verified 2026-10-14 in us-east-1: t3.small, t4g.small and c7i-flex.large are eligible; t3.medium and t2.* are not. Four equal t3.small nodes also model cheaper ($82.56/mo vs $97.74/mo)."
 }
 
 variable "k3s_channel_parameter_name" {

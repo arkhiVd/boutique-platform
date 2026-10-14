@@ -68,8 +68,15 @@ resource "aws_security_group_rule" "node_admin_egress_dns_tcp" {
 }
 
 resource "aws_security_group" "boutique_node_api" {
-  name        = "boutique-node-api"
-  description = "The kube-apiserver's front door: 6443/tcp from the operator CIDR only."
+  name = "boutique-node-api"
+  # No apostrophe here, and that is not a style choice. AWS rejects a security
+  # group description containing any character outside
+  # `a-zA-Z0-9 ._-:/()#,@[]+=&;{}!$*`, and an apostrophe is not in that set:
+  # CreateSecurityGroup came back with `Invalid security group description` on
+  # the first real apply of this stack (2026-10-14). Terraform's own variable
+  # and output descriptions are free text and were never affected, so nothing
+  # local ever caught it.
+  description = "The kube-apiserver front door: 6443/tcp from the operator CIDR only."
   vpc_id      = aws_vpc.boutique.id
 
   tags = {

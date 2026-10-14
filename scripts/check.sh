@@ -408,8 +408,8 @@ if need python3 python3; then
 fi
 
 cyan "== node capacity budget =="
-# The most important number in the repo: does the whole platform fit on the one
-# t3.medium in SPEC.md. Renders every chart, sums resources.requests across the
+# The most important number in the repo: does the whole platform fit on a single
+# node. Renders every chart, sums resources.requests across the
 # rendered manifests, and prints the comparison.
 #
 # The OVER-COMMIT IS A RECORDED FINDING, NOT A CHECK FAILURE. docs/resource-budget.md
@@ -423,8 +423,17 @@ cyan "== node capacity budget =="
 # exit 0 at or below 250% of schedulable and exit 1 above it, which still fails on
 # a regression that makes the situation materially worse.
 #
+# THE UNIT IS A REFERENCE NODE, NOT A REAL ONE. resource-budget.py defaults to
+# 4 GiB / 2 vCPU — a size the account can no longer launch (t3.medium is not
+# FreeTierEligible here) and therefore not the shape this repo deploys. It is
+# kept because the bound is expressed as a PERCENTAGE of that unit, and
+# 250% x 3741Mi = 9352Mi is the absolute ceiling this gate has always enforced.
+# Changing the unit would silently change the ceiling. The real arithmetic for
+# the deployed shape — 4 x t3.small, all four schedulable — lives in
+# docs/resource-budget.md, not here.
+#
 # `--node-count 1`, NOT 4. A DaemonSet schedules one pod per node, and the budget
-# has to answer "does it fit on the ONE t3.medium" — node-exporter and fluent-bit
+# has to answer "does it fit on ONE node" — node-exporter and fluent-bit
 # each contribute one replica here, not four. `--node-count 4` answers a different
 # question (the cluster-wide total) and would silently double those two.
 if need python3 python3 && [[ -d observability ]]; then

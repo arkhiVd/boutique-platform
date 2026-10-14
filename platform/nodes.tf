@@ -4,16 +4,21 @@
 # be read line by line before the apply.
 #
 # THE SHAPE (SPEC.md, "Scheduling model"):
-#   3 x t3.small as k3s servers, one per AZ, HA etcd
-#   1 x t3.medium as the workload node
-#   ALL FOUR NODES SCHEDULABLE -- no control-plane taint anywhere.
+#   4 x t3.small -- three as k3s servers (one per AZ, HA etcd), one as the
+#   workload node. ALL FOUR NODES SCHEDULABLE -- no control-plane taint anywhere.
 #
-# The measured workload is 3600m / 4048Mi of requests. One t3.medium schedules
-# 1830m / 3741Mi -- 196.7% CPU and 108.2% RAM -- so the original layout of
-# dedicated servers plus one worker that carries everything would leave
+# The shape was originally 3 x t3.small + 1 x t3.medium. The apply measured what
+# the spec could not: this account rejects RunInstances for t3.medium with
+# `InvalidParameterCombination: The specified instance type is not eligible for
+# Free Tier` (t3.medium FreeTierEligible=false in us-east-1). Four equal
+# t3.small nodes are both launchable and cheaper -- $82.56/mo vs $97.74/mo.
+#
+# The measured workload is 3850m / 4688Mi of requests. The cluster has 7320m /
+# ~6960Mi schedulable across four nodes -- 53% CPU and 67% RAM -- so the layout
+# of dedicated servers plus one worker that carries everything would leave
 # `boutique` Pending forever and leave the Phase 6 drain test nowhere to drain
-# to. With all four nodes schedulable the cluster has 7320m / ~9042Mi and roughly
-# 50% headroom on both axes. k3s is on the SPEC's side of this decision: it
+# to. With all four nodes schedulable there is roughly half the cluster free on
+# both axes. k3s is on the SPEC's side of this decision: it
 # labels server nodes node-role.kubernetes.io/control-plane=true and taints
 # nothing, which is what kubeadm does too. EKS taints because it pairs its
 # control plane with a separate autoscaled worker fleet, and this account has an
@@ -272,6 +277,44 @@ data "aws_iam_policy_document" "kms_platform" {
       values   = ["true"]
     }
   }
+
+  statement {
+    sid    = "CloudWatchLogsEncryptsTheWafLogGroup"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey",
+    ]
+    resources = ["*"]
+
+    # Needed, and the account root statement above does NOT cover it. CloudWatch
+    # Logs does not encrypt as the caller: it encrypts as the service, so the
+    # key must name the service principal. Probed on 2026-10-14 rather than
+    # assumed — with only the root and EC2 statements in place,
+    #   aws logs create-log-group --kms-key-id <this key>
+    # returned `AccessDeniedException: The specified KMS key does not exist or
+    # is not allowed to be used with Arn '...log-group:/aws/waf/...'`, while the
+    # identical call without a KMS key succeeded. That is why the first apply
+    # failed on aws_cloudwatch_log_group.waf.
+    principals {
+      type        = "Service"
+      identifiers = ["logs.${data.aws_region.current.region}.amazonaws.com"]
+    }
+
+    # Scoped to this account's WAF log groups rather than to `*`. CloudWatch
+    # Logs sends the log group ARN as an encryption context key, so this is what
+    # stops the log-delivery principal from using the CMK against anything else.
+    condition {
+      test     = "ArnLike"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values = [
+        "arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:aws-waf-logs-*",
+      ]
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -382,7 +425,14 @@ resource "aws_launch_template" "k3s_server" {
     aws_security_group.boutique_node_internal.id,
   ]
 
-  user_data = base64encode(replace(
+  # base64gzip, not base64encode. EC2 caps user data at 16384 bytes and counts
+  # the DECODED size, and cluster-bootstrap.sh is 17223 bytes on its own before
+  # either substitution -- CreateLaunchTemplate rejected both templates on the
+  # first apply (2026-10-14) with `InvalidUserData.Malformed: User data is
+  # limited to 16384 bytes.` gzip brings the same script well under the cap, and
+  # cloud-init decompresses it: it tests for the gzip magic bytes before
+  # parsing, so nothing in the script changes.
+  user_data = base64gzip(replace(
     replace(
       file("${path.module}/cluster-bootstrap.sh"),
       "BOUTIQUE_BOOTSTRAP_CONF", local.bootstrap_conf_server,
@@ -450,7 +500,7 @@ resource "aws_launch_template" "k3s_server" {
 # the four things a reader wants side by side.
 resource "aws_launch_template" "k3s_worker" {
   name_prefix   = "boutique-k3s-worker-"
-  description   = "boutique-platform k3s workload node: t3.medium, schedulable, no control-plane taint. user_data renders platform/cluster-bootstrap.sh."
+  description   = "boutique-platform k3s workload node: t3.small (this account rejects t3.medium -- FreeTierEligible=false), schedulable, no control-plane taint. user_data renders platform/cluster-bootstrap.sh."
   image_id      = data.aws_ssm_parameter.amazon_linux_2023.value
   instance_type = var.instance_type_worker
 
@@ -464,7 +514,14 @@ resource "aws_launch_template" "k3s_worker" {
     aws_security_group.boutique_node_internal.id,
   ]
 
-  user_data = base64encode(replace(
+  # base64gzip, not base64encode. EC2 caps user data at 16384 bytes and counts
+  # the DECODED size, and cluster-bootstrap.sh is 17223 bytes on its own before
+  # either substitution -- CreateLaunchTemplate rejected both templates on the
+  # first apply (2026-10-14) with `InvalidUserData.Malformed: User data is
+  # limited to 16384 bytes.` gzip brings the same script well under the cap, and
+  # cloud-init decompresses it: it tests for the gzip magic bytes before
+  # parsing, so nothing in the script changes.
+  user_data = base64gzip(replace(
     replace(
       file("${path.module}/cluster-bootstrap.sh"),
       "BOUTIQUE_BOOTSTRAP_CONF", local.bootstrap_conf_worker,

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Sum resources.requests across rendered manifests and prove the node fits.
 
-SPEC.md pins the workload node as ONE t3.medium: 4 GiB RAM, 2 vCPU. That is the
-number every other phase has to fit inside, and it is the number this script
-prints. It is deliberately a separate script rather than a comment, because a
-number in a comment is an assertion and a number from a script is evidence.
+This script answers "does the whole platform fit on ONE node", which is a stress
+test rather than a deployment claim — the deployed shape is 4 x t3.small with all
+four schedulable (see platform/nodes.tf). The default unit is 4 GiB RAM / 2 vCPU
+(see --node-ram-gib/--node-cpu); that size is no longer launchable in this
+account (t3.medium is not FreeTierEligible here) and is kept only because
+--accept-over-commit is a PERCENTAGE of it, so the default 250% bound stays at
+the same absolute ceiling of 9352Mi / 5000m that it has always enforced.
+That is the number every other phase has to fit inside, and it is the number this
+script prints. It is deliberately a separate script rather than a comment, because
+a number in a comment is an assertion and a number from a script is evidence.
 
 Usage:
     scripts/resource-budget.py [--node-ram-gib 4] [--node-cpu 2] FILE_OR_DIR ...

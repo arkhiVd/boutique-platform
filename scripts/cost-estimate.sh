@@ -20,9 +20,12 @@ PRICED_ON="2026-10-08"
 # $0.05 per vCPU-hour on the surplus. Modelled so the sustained-CPU trap is visible.
 : "${P_CPU_SURCHARGE:=0.05}"; : "${BASELINE_FRACTION:=0.20}"
 
-# The shape, as "<count>x <type> + <count>x <type>". Defaults to the SPEC's
-# recommended shape: three k3s servers for etcd quorum plus one workload node.
-: "${SHAPE:=3xt3.small+1xt3.medium}"
+# The shape, as "<count>x <type> + <count>x <type>". Defaults to four equal
+# t3.small nodes: three k3s servers for etcd quorum plus one workload node.
+# Four, not "3 x t3.small + 1 x t3.medium" -- the apply measured that this
+# account rejects t3.medium (FreeTierEligible=false), and the equal shape is
+# cheaper. Override with SHAPE= to model something else.
+: "${SHAPE:=4xt3.small}"
 : "${NODE_GB:=16}"
 : "${HOURS_PER_MONTH:=730}"; : "${FREE_TIER_HOURS:=750}"; : "${FREE_TIER_EBS_GB:=30}"
 : "${ALB:=1}"; : "${LCU:=2}"; : "${SNAP_GB:=4}"; : "${DATA_OUT_GB:=60}"; : "${LOG_GB:=2}"
@@ -69,7 +72,7 @@ while IFS= read -r token; do
   [[ -n "$token" ]] || continue
   cnt="${token%%x*}"; typ="${token#*x}"
   [[ "$cnt" =~ ^[0-9]+$ && -n "$typ" && "$cnt" != "$typ" ]] || {
-    printf 'bad SHAPE token %q — use "3xt3.small+1xt3.medium"\n' "$token" >&2; exit 2; }
+    printf 'bad SHAPE token %q — use "4xt3.small" or "3xt3.small+1xt3.medium"\n' "$token" >&2; exit 2; }
 
   p="$(node_price "$typ")" || exit 2
   c="$(node_vcpu "$typ")"; r="$(node_ram "$typ")"

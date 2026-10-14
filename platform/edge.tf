@@ -1,5 +1,15 @@
 resource "aws_s3_bucket" "alb_logs" {
   bucket_prefix = "boutique-platform-alb-logs-"
+
+  # checkov:skip=CKV_AWS_145:Elastic Load Balancing does not support SSE-KMS for
+  # ALB access logs. AWS documents SSE-S3 as "the only server-side encryption
+  # option that's supported" and names an unsupported encryption option as a
+  # direct cause of `Access Denied for bucket`. Measured 2026-10-14: with
+  # aws:kms here, ModifyLoadBalancerAttributes refused the bucket, and with
+  # AES256 it wrote ELBAccessLogTestFile. KMS on this bucket is a
+  # configuration that cannot work, so skipping the check records the platform
+  # constraint instead of hiding it.
+
   tags = {
     Component = "edge"
   }
@@ -19,18 +29,55 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
   rule {
+    # SSE-S3 (AES256), NOT SSE-KMS. This is a hard platform constraint, not a
+    # preference: Elastic Load Balancing documents that for an ALB access-log
+    # bucket "the only server-side encryption option that's supported is Amazon
+    # S3-managed keys (SSE-S3)", and lists an unsupported encryption option as a
+    # direct cause of "Access Denied for bucket ... Please check S3bucket
+    # permission". Measured on 2026-10-14: with aws:kms on this bucket,
+    # ModifyLoadBalancerAttributes failed with exactly that error.
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.platform.arn
+      sse_algorithm = "AES256"
     }
   }
 }
 
-# CKV_AWS_18: the access-log bucket gets its own access log, into a disjoint
-# second bucket. A bucket cannot log to itself: the ELB write ACL check would
-# fail against the same bucket it is appending to.
+# ACLs must be ON for this bucket. The ELB log delivery service writes its test
+# object (and every log object) with `x-amz-acl: bucket-owner-full-control`,
+# and the default BucketOwnerEnforced ownership for new buckets rejects any
+# PutObject carrying an ACL header with AccessControlListNotSupported, which
+# ALB reports as the same generic "Access Denied for bucket". BucketOwnerPreferred
+# accepts the ACL while keeping the bucket owner as the object owner.
+resource "aws_s3_bucket_ownership_controls" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  # checkov:skip=CKV2_AWS_65:BucketOwnerEnforced (ACLs disabled) is rejected by
+  # the ELB log delivery service, which writes every object with
+  # `x-amz-acl: bucket-owner-full-control`; an ACL header on an
+  # ACL-disabled bucket fails AccessControlListNotSupported and ALB reports the
+  # failure as `Access Denied for bucket`. BucketOwnerPreferred is the lowest
+  # privilege ownership that accepts the write. Public ACLs stay blocked by
+  # aws_s3_bucket_public_access_block.alb_logs, so this is not a public-ACL
+  # exposure: it is owner-vs-enforced, and the owner is still this account.
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
 resource "aws_s3_bucket" "alb_logs_audit" {
   bucket_prefix = "boutique-platform-alb-logs-audit-"
+
+  # checkov:skip=CKV_AWS_145:Same constraint as aws_s3_bucket.alb_logs above —
+  # this bucket is the destination of S3 server access logging for the ALB log
+  # bucket, and the two are kept on identical encryption and ownership so
+  # neither can fail a delivery check the other passes. SSE-S3 on a log bucket
+  # is the documented scheme; a CMK here would be a second ~$1/mo key against
+  # a budget already spent on compute.
+
+  # CKV_AWS_18: the access-log bucket gets its own access log, into a disjoint
+  # second bucket. A bucket cannot log to itself: the ELB write ACL check would
+  # fail against the same bucket it is appending to.
   tags = {
     Component = "edge"
   }
@@ -47,10 +94,26 @@ resource "aws_s3_bucket_public_access_block" "alb_logs_audit" {
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_audit" {
   bucket = aws_s3_bucket.alb_logs_audit.id
   rule {
+    # SSE-S3, same reason as alb_logs above: this bucket is the destination of
+    # S3 server access logging, and S3's log delivery group writes with
+    # `bucket-owner-full-control`. Keep both log buckets on the same scheme so
+    # neither can fail a delivery permission check the other passes.
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.platform.arn
+      sse_algorithm = "AES256"
     }
+  }
+}
+
+resource "aws_s3_bucket_ownership_controls" "alb_logs_audit" {
+  bucket = aws_s3_bucket.alb_logs_audit.id
+
+  # checkov:skip=CKV2_AWS_65:The S3 log delivery group writes with
+  # `bucket-owner-full-control` too, so BucketOwnerEnforced would break server
+  # access logging for this bucket the same way it broke the ALB's. Public ACLs
+  # remain blocked by aws_s3_bucket_public_access_block.alb_logs_audit.
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
   }
 }
 
@@ -99,22 +162,56 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
 # bucket ARN and not to "*", or any account that knows the bucket name could
 # write to it.
 data "aws_iam_policy_document" "alb_logs" {
+  # Two principals, and both are needed. The service principal below is what
+  # current AWS documentation shows, but on the first real apply (2026-10-14)
+  # the ALB still refused it: `InvalidConfigurationRequest: Access Denied for
+  # bucket ... Please check S3bucket permission`, twice, with the policy already
+  # in place and already ordered ahead of the load balancer. The load balancer
+  # service, as older documentation specifies, is the ELB account for the region
+  # -- for us-east-1 that is 127311923021. Allowing both costs one statement and
+  # removes a guess about which principal this account's ALB actually signs as.
+  #
+  # Scope the GrantLogDelivery permission to the bucket ARN and not to "*", or
+  # any account that knows the bucket name could write to it.
   statement {
     sid    = "AllowELBLogDelivery"
     effect = "Allow"
     principals {
       type        = "Service"
-      identifiers = ["logdelivery.elb.amazonaws.com"]
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.alb_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
   }
+
   statement {
     sid    = "AllowELBAclCheck"
     effect = "Allow"
     principals {
       type        = "Service"
-      identifiers = ["logdelivery.elb.amazonaws.com"]
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.alb_logs.arn]
+  }
+
+  statement {
+    sid    = "AllowElasticLoadBalancingAccountLogDelivery"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::127311923021:root"]
+    }
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.alb_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+  }
+
+  statement {
+    sid    = "AllowElasticLoadBalancingAccountAclCheck"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::127311923021:root"]
     }
     actions   = ["s3:GetBucketAcl"]
     resources = [aws_s3_bucket.alb_logs.arn]
@@ -159,6 +256,21 @@ resource "aws_lb" "edge" {
   security_groups    = [aws_security_group.boutique_edge.id]
   subnets            = [for s in values(aws_subnet.boutique) : s.id]
 
+  # Ordering, not decoration. The `access_logs` block below only names the
+  # bucket, so Terraform has no reason to create the bucket's policy, its
+  # ownership rule or its encryption before the load balancer — and on the
+  # first apply (2026-10-14) it did not: the ALB tried to enable access logging
+  # against a bucket whose policy still refused the ELB log-delivery principal,
+  # and came back `InvalidConfigurationRequest: Access Denied for bucket`.
+  # Naming the policy was not enough — the same error returned after the policy
+  # was correct, because SSE-KMS and BucketOwnerEnforced each fail the same
+  # validation independently. All three are named here so a clean apply cannot
+  # race any of them.
+  depends_on = [
+    aws_s3_bucket_policy.alb_logs,
+    aws_s3_bucket_ownership_controls.alb_logs,
+    aws_s3_bucket_server_side_encryption_configuration.alb_logs,
+  ]
 
   # Access logs to S3 rather than CloudWatch: they are queried once a month at
   # most, and S3 storage is roughly a fifth of CloudWatch Logs ingestion.
@@ -327,7 +439,16 @@ locals {
 }
 
 resource "aws_acm_certificate" "self_signed" {
-  count = var.cert_mode == "self-signed" ? 1 : 0
+  # Created only when there is no certificate to import. The count used to key
+  # on `cert_mode` alone, which made `acm_certificate_arn` a dead variable: the
+  # documented flow is to run scripts/tls/generate-selfsigned.sh, import the
+  # cert with the AWS CLI so the private key never enters state, and hand the
+  # ARN back to Terraform — but that flow still created this resource with two
+  # empty strings, and ACM rejected it on the first apply (2026-10-14) with
+  # `Value at 'privateKey' failed to satisfy constraint: Member must have length
+  # greater than or equal to 1`. Keying on the ARN being absent makes the
+  # external import the default path and this resource the fallback.
+  count = var.cert_mode == "self-signed" && var.acm_certificate_arn == "" ? 1 : 0
 
   # The private key is supplied by the operator, never generated by Terraform:
   # a key in state is a key in the state file, and the state file is in S3.
@@ -560,8 +681,19 @@ resource "aws_wafv2_web_acl_association" "edge" {
 # KMS-encrypted, because the WAF sampled request log contains authority
 # headers and request bodies. The CMK is the one Phase 3 already creates for the
 # node volumes, so this adds no new key lifecycle.
+#
+# The name is `aws-waf-logs-...` and that prefix is mandatory, not a style
+# choice: AWS WAF requires the logging destination to start with `aws-waf-logs-`
+# ("Create your logging destination ... The name that you give the destination
+# must start with aws-waf-logs-", WAF API reference). The first apply used
+# `/aws/waf/boutique-platform-edge` and PutLoggingConfiguration rejected the
+# ARN as malformed -- `WAFInvalidParameterException: The ARN isn't valid` -- for
+# a perfectly well-formed ARN, because the validator was really checking the
+# name. Both ARN forms (`:log-group:name` and `:log-group:name:*`) were probed
+# against the live API on 2026-10-14 and both were rejected identically, which
+# is what ruled the format out and left the prefix.
 resource "aws_cloudwatch_log_group" "waf" {
-  name              = "/aws/waf/boutique-platform-edge"
+  name              = "aws-waf-logs-boutique-platform-edge"
   retention_in_days = var.log_retention_days
   kms_key_id        = aws_kms_key.platform.arn
   tags = {
@@ -590,7 +722,13 @@ resource "aws_cloudwatch_log_resource_policy" "waf" {
 }
 
 resource "aws_wafv2_web_acl_logging_configuration" "edge" {
-  log_destination_configs = [aws_cloudwatch_log_group.waf.arn]
+  # The `:*` suffix is required and is not documented in the attribute. WAF
+  # rejected the bare log group ARN on the first apply with
+  # `WAFInvalidParameterException: ... field: LOG_DESTINATION, parameter:
+  # arn:aws:logs:us-east-1:...:log-group:aws-waf-logs-boutique-platform-edge`,
+  # calling a perfectly well-formed ARN invalid. It wants the log group ARN
+  # followed by `:*`, addressing the streams inside the group.
+  log_destination_configs = ["${aws_cloudwatch_log_group.waf.arn}:*"]
   resource_arn            = aws_wafv2_web_acl.edge.arn
 
   # Request bodies and extra detail are redacted by default: an access log that

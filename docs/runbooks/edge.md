@@ -83,7 +83,7 @@ is a Phase 5 `cluster/traefik` problem, not an ALB one.
 ```bash
 # Which rule fired, for this request? The CloudWatch log holds the matched rule name.
 aws logs filter-log-events \
-  --log-group-name "/aws/waf/boutique-platform-edge" \
+  --log-group-name "aws-waf-logs-boutique-platform-edge" \
   --filter-pattern '{ $.terminatingRuleId != "none" }' \
   --start-time "$(( ($(date +%s) - 3600) * 1000 ))"
 
