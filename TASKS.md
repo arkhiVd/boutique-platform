@@ -23,6 +23,7 @@ blockers table rather than marked done.
 | 9 | `observability/kube-prometheus-stack/` on chart `92.1.1`; golden-signal recording rules; alerts; 4 dashboards; ServiceMonitors | `helm lint --strict` 0 failed; `promtool check rules` 9 rules |
 | 10 | Loki `SingleBinary` with **enforced** 168h retention; Fluent Bit parsers for all six real log formats and a Loki output with exactly 3 labels | `promtool check rules` 4 rules; `scripts/check-fluentbit-config.py` runs the render through `fluent-bit --dry-run` in the pinned image |
 | 12 | SLOs 99.9% / 99% with multiwindow multi-burn-rate (14.4x / 6x / 1x); `docs/slo.md`; burn-rate fixtures | `promtool test rules` → **SUCCESS**: the 14.4x page fires, the 6x and 1x do not, and a 1-in-20-for-10-min blip does not page |
+| 11 | `observability/tempo/` (single binary on gp3, chart `grafana/tempo` **1.24.4 / app 2.9.0**, metrics-generator on service-graphs only), collector `spanmetrics` connector fed by a second pre-sampling `traces/spanmetrics` pipeline, `traces_spanmetrics_*` recording rules + `TracesSpanmetricsMissing`, `traces` Grafana dashboard, `docs/runbooks/traces.md`, remote-write receiver on Prometheus and the `tempo` datasource | `helm lint --strict` 0 failed; `helm template` render → `kubeconform -strict -kubernetes-version 1.36.3` **6/6 valid** (incl. PrometheusRule/ServiceMonitor via the CRD catalog); `promtool check rules` **5 rules** in `observability/rules/spanmetrics.yaml` + 3 in `tempo/alerts.yaml`; `conftest test <rendered tempo>` **108/108**; `otelcol-contrib v0.160.0 validate` **rc=0** on the extracted collector config; `scripts/check-dashboards.py` parses `traces.yaml`; budget recomputed **210.4% CPU / 125.3% RAM** (was 196.7% / 108.2%) |
 
 ## Blockers
 
@@ -34,7 +35,7 @@ blockers table rather than marked done.
 | Phase 1/2 apply | Aravind's approval — the state bucket does not exist yet, and the Phase 2 apply is an IAM change (Risky class) |
 | Phase 5 ALB + Web ACL | SPEC Q3 — the ALB decision |
 | Phase 6 drain test (`zero failed requests`) | A schedulable node to drain to. **Root cause now identified and fixed: the workload-node taint.** See U1 |
-| Phase 6 collector `debug` → Tempo | Phase 11 (Tempo does not exist yet) |
+| Phase 6 collector `debug` → Tempo | **Resolved on this branch (Phase 11):** the collector's `traces` pipeline now ends at `otlp/tempo` (debug exporter removed), so traces land in Tempo instead of being logged. What still needs the live cluster: one checkout trace actually readable through `/api/traces/<id>` — see `docs/runbooks/traces.md` and U13 |
 | adservice / shippingservice tracing | `docs/adr/0004-adservice-tracing-gap.md` — a pinned OTel Java agent, and where its temp dir lives under `readOnlyRootFilesystem: true` |
 | k3s Traefik histogram buckets | Phase 5 — Traefik's defaults (0.1/0.3/1.2/5.0) make the p95 latency SLI resolve to one of four values |
 | External probe target | Phase 5 Terraform output |
@@ -54,7 +55,7 @@ blockers table rather than marked done.
 
 | # | Unknown | Measured value | What it blocks |
 |---|---|---|---|
-| U1 | **Node budget: 3600m CPU / 4048Mi of requests against one workload node's 1830m / 3741Mi schedulable = 196.7% CPU, 108.2% RAM.** 2820m of it is `boutique`. | `docs/resource-budget.md` | nothing any more — resolved by making all four nodes schedulable (4 × 1830m = 7320m, ~9042Mi). Recorded here because it is the reason Phase 3 must **not** taint the k3s servers. |
+| U1 | **Node budget: 3850m CPU / 4688Mi of requests against one workload node's 1830m / 3741Mi schedulable = 210.4% CPU, 125.3% RAM.** 2820m of it is `boutique`; Phase 11 added 250m/512Mi (Tempo) and took the collector from 128Mi to 192Mi per replica (was 3600m / 4048Mi = 196.7% / 108.2% before it). | `docs/resource-budget.md` | nothing any more — resolved by making all four nodes schedulable (4 × 1830m = 7320m, ~9042Mi). Recorded here because it is the reason Phase 3 must **not** taint the k3s servers. |
 | U2 | **A t3 instance is burstable at a 20% baseline ≈ 400m sustained**, not 2000m. Requests are not the binding limit — sustained CPU is. | `docs/resource-budget.md` | modelled in `scripts/cost-estimate.sh` as a CPU-credit surcharge guard. Light demo traffic should stay under baseline; sustained load is the risk. |
 | U3 | Shippingservice / adservice tracing | both `initTracing()` bodies are upstream TODOs (issue #422) | Phase 11 trace completeness |
 | U4 | cartservice instrumentation | none upstream, not a stub, never built | the checkout trace has a hole |
@@ -66,6 +67,7 @@ blockers table rather than marked done.
 | U10 | **An ephemeral variable cannot have a default.** Every `terraform plan`/`apply` in `platform/` must be handed `TF_VAR_k3s_token`, including CI. | verified: `terraform plan` stops with "No value for required variable" | recorded as the operational cost of the write-only token design; CI now passes a fixed non-secret string that never reaches AWS |
 | U11 | **Two nodes may land in `us-east-1c`.** The worker is placed in `local.azs[2]` so every AZ holds at least one node; the SPEC's one-per-AZ contract is about the control plane. | SPEC scheduling model | if a reviewer wants a strict spread, the worker moves to `local.azs[1]` for $0 |
 | U12 | **The etcd snapshot timer writes from the leader only, and retention is S3 lifecycle rather than k3s.** `--etcd-s3-retention` is a *server* flag that the on-demand CLI path does not set. | k3s docs, `k3s etcd-snapshot` reference | 30-day expiry is enforced by the bucket rule; a k3s-native retention would need the flags on the server process instead |
+| U13 | **Phase 11's traces layer is proven from sources, renders and the pinned binaries, not from a cluster.** Every metric/label name in the rules and dashboard was checked against grafana/tempo@v2.9.0 and otelcol-contrib v0.160.0 source, and every manifest passed its gate, but no span has actually traversed collector → Tempo → Grafana. Two specific claims are unverified by construction: that Tempo's `readOnlyRootFilesystem` has no unwritten runtime path in a real pod (the runbook has the `/tmp` footgun named), and that the remote-write URL `kube-prometheus-stack-prometheus.observability.svc:9090/api/v1/write` — derived from the repo's `release: kube-prometheus-stack` selector convention, not observed — matches the release name actually installed. | the validation outputs in this phase's PROGRESS section | the Phase 13 evidence pack: a checkout trace read via `curl :3200/api/traces/<id>`, a rendered service graph, and `TracesSpanmetricsMissing` staying silent for 15m |
 
 ## Completed
 
@@ -107,6 +109,19 @@ blockers table rather than marked done.
   (160 passed, 0 failed, 4 skipped with reasons), tflint, shellcheck, kubeconform (9 valid),
   conftest (198 passed), gitleaks, and `scripts/check.sh` at 103 PASS / 0 FAIL / 0 MISSING.
   **Nothing has been applied.** Every cluster-dependent exit criterion is in the blockers table.
+- 2026-10-14 Phase 11 on `feat/traces` — the traces layer. `observability/tempo/` (single
+  binary on a 10Gi gp3 claim, chart `grafana/tempo` 1.24.4 / app 2.9.0, metrics-generator on
+  `service-graphs` only — spanmetrics belongs to the collector, never both — remote-write into
+  Prometheus), the collector's `spanmetrics` connector fed by a second `traces/spanmetrics`
+  pipeline that deliberately bypasses `tail_sampling` so the error ratio is not biased, the
+  `span:*` recording rules and `TracesSpanmetricsMissing`, the `traces` dashboard (ConfigMap
+  form), Prometheus's remote-write receiver plus the `tempo` datasource, and
+  `docs/runbooks/traces.md`. Validated by `helm lint --strict` (0 failed), the render through
+  `kubeconform -strict` (6/6), `promtool check rules` (5 + 3 rules), `conftest` on the render
+  (108/108 — the CPU-limit rule caught the first Tempo values, fixed rather than waived),
+  `otelcol-contrib v0.160.0 validate` rc=0 (it rejected the pre-0.130 `address` key; the config
+  now uses `readers`), the dashboard parser, and `scripts/check.sh` at 0 FAIL. Nothing applied;
+  the live end-to-end claims are recorded as U13 rather than marked done.
 
 ## Residual risk for Phase 3 and 4, recorded rather than hidden
 

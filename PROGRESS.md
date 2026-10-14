@@ -1,6 +1,6 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-09** · rendered browser view: `docs/progress.html`
+**Last updated: 2026-10-14** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
 ---
@@ -32,8 +32,10 @@ credit becomes 71%.
 
 **The headline number, stated plainly because it is the one that matters:**
 the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds the arithmetic —
-**3600m / 4048Mi of requests against 1830m / 3741Mi schedulable = 196.7% CPU and 108.2% RAM**, of
-which **2820m is the `boutique` namespace's own request**, not the observability stack. The fix is
+**3850m / 4688Mi of requests against 1830m / 3741Mi schedulable = 210.4% CPU and 125.3% RAM**, of
+which **2820m is the `boutique` namespace's own request**, not the observability stack (Phase 11
+added Tempo at 250m/512Mi and the collector's 128Mi → 192Mi per replica; before it the numbers
+were 3600m / 4048Mi = 196.7% / 108.2%). The fix is
 architectural: **all four nodes are schedulable**, the k3s servers carry no control-plane taint,
 because with a hard 8-vCPU quota there is no separate worker fleet to pair a control plane with
 (kubeadm control-plane nodes are schedulable by default; EKS taints them). That gives
@@ -95,7 +97,7 @@ Critic: `pending` · `pass` · `gap named`
 ### Wave E — Observability
 - `[~]` **Phase 9 — Prometheus / Grafana / Alertmanager + golden signals** · built and validated; cluster-side proof pending
 - `[~]` **Phase 10 — Loki + Fluent Bit logs with bounded cardinality** · built and validated; cluster-side proof pending
-- `[!]` **Phase 11 — OTel Collector gateway + Tempo** · the collector ships (2 replicas, real processors); Tempo does not
+- `[~]` **Phase 11 — OTel Collector gateway + Tempo** · built and validated on `feat/traces`: the collector ships (2 replicas, real processors, `otlp/tempo` + spanmetrics) **and Tempo now exists** (single binary, gp3, service-graphs metrics generator); cluster-side proof pending (TASKS U13)
 - `[~]` **Phase 12 — SLOs, error budget, multiwindow multi-burn-rate alerts** · built and validated
 
 ### Wave F — Operational clarity
@@ -374,3 +376,136 @@ coverage, above).
   recorded.
 - `docs/runbooks/edge.md` written: unhealthy targets, WAF false positive, cert expiry, and the
   plaintext backstop — each with the real command and the rollback path.
+
+---
+
+## Phase 11 — the traces layer (2026-10-14)
+
+**Branch:** `feat/traces`. Validation by real command, not by assertion. Nothing applied: no
+`helm install`, no `kubectl apply`, no cluster exists. The ROADMAP's five Phase 11 exit criteria
+all need one — a trace read back by ID, a rendered service graph, `promtool query instant` of
+`traces_spanmetrics_*`, a waterfall screenshot, adservice spans — so **none of them is claimed
+here**. What this phase proves is the other half of the ROADMAP's own validation list, the
+automated half: `otelcol-contrib validate --config`, `helm template`, and every gate in
+`scripts/check.sh`. The manual half is TASKS U13 and Phase 13.
+
+### What landed
+
+- **`observability/tempo/`** — a wrapper chart pinning `grafana/tempo` **1.24.4 / app 2.9.0**
+  (verified the latest with `helm search repo grafana/tempo --versions`; the chart carries
+  `deprecated: true`, which is documented in `Chart.yaml` and is not a blocker: the app is 2.9.0
+  and the values are this platform's, not the chart's defaults). Single binary on a 10Gi gp3
+  claim, `metricsGenerator.processors: [service-graphs]` and **never `span-metrics`** — one
+  producer per metric family, because two writers on the same family violates the single-writer
+  rule and the collector already owns spanmetrics. Remote-write into
+  `kube-prometheus-stack-prometheus.observability.svc:9090/api/v1/write`, 24h retention,
+  memberlist ring at RF 1, pod + container securityContext, `automountServiceAccountToken: false`,
+  and a `serviceMonitor` with the `release` label the operator selects on.
+- **Three Tempo alerts** — `TempoRequestErrors` (5xx by route), `TempoRequestLatency` (p99 vs the
+  query-frontend's own 5s SLO), `TempoDiskNearFull` (the local-store variant of the Phase 9 disk
+  alert). `TracesSpanmetricsMissing` is defined **once**, in
+  `observability/rules/spanmetrics.yaml`; `tempo/alerts.yaml` carries a comment pointing at it
+  rather than a second copy that could drift.
+- **The collector's spanmetrics half** — a second `traces/spanmetrics` pipeline off the same OTLP
+  receiver with **no `tail_sampling` in it**, feeding the `spanmetrics` connector
+  (`histogram.unit: s`, buckets `[0.05s … 10s]` matching Traefik's ladder, explicit dimensions
+  `http.method`/`http.route`, `exclude_dimensions: [collector.instance.id]`, cardinality limit
+  5000) → `metrics/spanmetrics` → `prometheus` exporter on `0.0.0.0:9464`. The main `traces`
+  pipeline keeps `[memory_limiter, tail_sampling, batch]` and now ends at `otlp/tempo` (the debug
+  exporter is gone, which also closes the Phase 6 blocker "collector `debug` → Tempo").
+- **Rules** — `span:request_rate:ratio`, `span:error_ratio:ratio`, `span:latency_p95:seconds`,
+  `boutique:edge_to_span_ratio` (all `label_replace` `service_name` → `job` so they join the edge
+  metrics, server spans only, `STATUS_CODE_ERROR` — the label value the connector actually emits).
+  The placeholder spanmetrics group that shipped with the golden-signals file was removed and its
+  header bullet now points at `spanmetrics.yaml`.
+- **Dashboard, datasource, scrape** — `observability/dashboards/traces.yaml` (a ConfigMap carrying
+  `traces.json` under `grafana_dashboard: "1"` — see the deviations note), a `tempo` datasource in
+  kps with `serviceMap.datasourceUid: prometheus`, `enableRemoteWriteReceiver: true` on the
+  Prometheus CRD, and a ServiceMonitor scraping both collector endpoints (`telemetry` :8888 self
+  metrics at 30s, `metrics` :9464 spanmetrics at 15s).
+- **`docs/runbooks/traces.md`** — three scenarios (trace missing / spanmetrics silent / Tempo disk
+  full), each walked hop by hop through the pipeline with the exact `curl`, `promtool query` and
+  `kubectl logs` commands and an interpretation table, plus a "what this runbook has NOT proven"
+  section.
+
+### Evidence
+
+```
+helm lint --strict observability/tempo
+                                            1 chart(s) linted, 0 chart(s) failed
+helm template tempo observability/tempo -n observability | kubeconform -strict
+  -kubernetes-version 1.36.3 (+ the CRDs-catalog schema location)
+                                            Summary: 6 resources found - Valid: 6, Invalid: 0, Errors: 0
+                                              (StatefulSet, ConfigMap, Service, ServiceAccount,
+                                               ServiceMonitor, PrometheusRule)
+promtool check rules (observability/rules/*.yaml, tempo/alerts.yaml, loki/alerts.yaml)
+                                            spanmetrics 5 · tempo 3 · golden-signals 6 ·
+                                            boutique-alerts 9 · slo-recording 19 · loki 4 — all SUCCESS
+conftest test <rendered tempo> -p policy/    108 tests, 108 passed, 0 warnings, 0 failures
+                                             (the first run FAILED 1: CPU request 250m vs limit 1 —
+                                              fixed in values.yaml, not by touching the policy)
+otelcol-contrib 0.160.0 validate --config <the extracted ConfigMap key>
+                                            rc=0
+                                             (first run rejected service.telemetry.metrics.address —
+                                              removed in 0.160 — config now uses telemetry.metrics.readers)
+python3 scripts/check-dashboards.py observability/dashboards/traces.yaml
+                                            ok: 1 dashboard JSON document(s) parse
+python3 scripts/resource-budget.py ...       3850m / 4688Mi = 210.4% CPU / 125.3% RAM of schedulable,
+                                             accepted bound 250% → RESULT: FITS
+gitleaks detect --no-git                    no leaks found
+scripts/check.sh                            PASS: 118  FAIL: 0  MISSING: 0
+                                             (every section: whitespace, terraform, gitleaks,
+                                              kubeconform over the raw manifests AND over the
+                                              rendered traefik + tempo charts, conftest both modes,
+                                              helm lint/template, the fluent-bit dry-run, promtool
+                                              on all six rule files, the five dashboards' JSON,
+                                              the node-capacity budget, shellcheck/bash -n,
+                                              actionlint, the python checks)
+```
+
+### Decisions worth recording, because each was a real fork
+
+- **Pre-sampling fan-out.** Feeding spanmetrics from the sampled pipeline would have made the
+  error ratio a lie (100% of errors counted, 10% of successes) and the rate a tenth of the truth.
+  The cost is a second pipeline's memory_limiter/batch, at 192Mi per replica.
+- **Single producer per metric family**, enforced by splitting the two producers between Tempo
+  (`service-graphs` only) and the collector (`spanmetrics` only).
+- **The dashboard is a `.yaml`, not a `.json`.** The repo convention's `.json` files cannot carry
+  the `grafana_dashboard: "1"` label the sidecar selects on, and a bare `.json` is invisible to
+  `scripts/check-dashboards.py`. The JSON lives inside the ConfigMap and the parser reads it from
+  there.
+- **Loki's `derivedFields` stays `[]`.** Pointing Tempo traces at Loki needs a
+  traceID→log pattern this platform's Loki (3.x) query syntax has to be verified against, not
+  guessed; the comment says exactly what would be added and why it is not there yet.
+- **Policy satisfied, never waived.** Tempo's first values had CPU `250m/1` — `conftest` rejected
+  it (Guaranteed QoS), and the values were changed to `250m/250m`. `policy/resources.rego` is
+  byte-identical to before this phase.
+- **`scripts/check.sh` now kubeconforms the rendered Tempo chart**, the same treatment traefik
+  already got: the chart's sources are Go template text and its `ServiceMonitor`/
+  `PrometheusRule` are CRDs, so the render is the only place they can be schema-checked.
+
+### Cost, moved by one line
+
+`scripts/cost-estimate.sh`'s CPU-credit model reads `MEASURED_REQUEST_MILLI`, which was 3600 and
+is now 3850 (measured, from the same render). The committed cost is unchanged — instances are
+priced by shape, not by requests — but the modelled worst case moved:
+
+```
+  platform requests      3850m  (admission guarantee only)
+  worst case sustained   3850m  = requests fully used -> $82.12/mo surcharge risk
+  !! total incl. worst case $179.87/month  $254.42 over 43 days - OVER the $200 credit
+```
+
+The worst case was already over the credit ($170.74 / $241.51); Phase 11 widens that gap by
+$12.91. Expected sustained (1280m, 80% of the t3 baseline under demo traffic) is unchanged at
+$0.00 surcharge.
+
+### Not proven by this phase
+
+| claim | status |
+|---|---|
+| A real trace crossing collector → Tempo → Grafana | **not proven** — no cluster; TASKS U13, runbook scenario 1 |
+| `readOnlyRootFilesystem` on the Tempo pod at runtime | **not proven** — the emptyDir covers `/tmp` only while `metricsGenerator.enabled` is true, and the values file names that footgun |
+| The remote-write URL's release name (`kube-prometheus-stack-prometheus`) | **reasoned, not observed** — derived from every ServiceMonitor/Rule in the repo carrying `release: kube-prometheus-stack` plus the operator's default `{release: <release name>}` selector, which `kube-prometheus-stack/values.yaml` states explicitly. Nothing scrapes and nothing remote-writes until a cluster proves the pairing. |
+| The `jaeger-metrics` ServiceMonitor endpoint | **known-inert** — `tempoQuery` sidecar is off, the port is not on the Service, the operator skips it; reasoned in `observability/tempo/values.yaml` |
+| The Tempo chart's `deprecated: true` flag | **documented, not resolved** — pinning is the mitigation; the replacement chart (`tempo-vulture`/`tempo` split upstream) is a separate decision |
