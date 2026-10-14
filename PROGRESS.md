@@ -7,35 +7,43 @@
 
 ## ▶ Where we are
 
-**Phase 3 and 4 are built and planned; nothing is applied.** On `feat/cluster`, the `platform/`
-stack now carries the cluster itself — 4 EC2 instances behind 2 launch templates, one KMS CMK,
-the k3s join token written write-only into SSM, and cloud-init that installs k3s v1.36.5+k3s1
-using nothing but an IMDS token, an instance role, and an AZ to elect a leader. Phase 4 adds the
-etcd snapshot bucket and its systemd timer, the RBAC, the PDB/NetworkPolicy/ResourceQuota/
-LimitRange baseline, and a restore drill that refuses to touch the live cluster. The apply is still
-Aravind's gate, and the state bucket the platform stack stores state in does not exist until that
-one-time bootstrap apply runs.
+**Everything below the approval gates is built, merged to `main`, and nothing is applied.** The
+plan numbers in the "What the three plans say" block were re-run on 2026-10-14 against this
+commit, not carried forward from an earlier one.
 
-**Phases 7 and 8 are built on `feat/cicd`, unmerged and undeployed.** Jenkins as a wrapper chart,
-its RBAC, a daily backup job, a namespace-scoped policy profile, a shared library and a root
-Jenkinsfile whose twelve gates are the same commands `scripts/check.sh` runs. Everything that can
-be proven without a cluster has been; the controller has never booted. The section at the bottom
-of this file has the evidence table, and `TASKS.md`'s blockers table has the five rows that keep
-it honest.
+What is merged and at what stage:
 
-**What the three plans say, exactly:**
+| phase | state | what it means |
+|---|---|---|
+| 0 guardrails | merged, green | SPEC / ROADMAP / TASKS / ADRs / `scripts/check.sh` |
+| 1–2 network, IAM, VPC | merged, plan clean | state bucket, VPC, subnets, security groups — the one-time `bootstrap` apply is Aravind's gate |
+| 3–4 cluster | merged, plan clean | 4 EC2 instances, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill |
+| 5 edge | merged, plan clean | ALB + TLS + count-mode Web ACL + Traefik DaemonSet host routing |
+| 6 metrics and logs | merged, green | kube-prometheus-stack, Loki, Fluent Bit, SLOs, golden signals |
+| 7–8 CI/CD | merged, green | Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile |
+| 11 traces | merged, green | Tempo, spanmetrics, recording rules, traces dashboard |
+
+**The gate on `main` reads 136 PASS / 0 FAIL / 0 MISSING** as of the last merge commit. Nothing
+has been applied: no `terraform apply`, no `kubectl apply`, no `helm install` has ever run
+against this account by an agent.
+
+**What the two stacks plan today, re-run on 2026-10-14 against this commit:**
 
 ```
 terraform -chdir=bootstrap plan      Plan: 14 to add, 0 to change, 0 to destroy.
-terraform -chdir=platform  plan      Plan: 42 to add, 0 to change, 0 to destroy.   (Phase 2)
-terraform -chdir=platform  plan      Plan: 58 to add, 0 to change, 0 to destroy.   (Phase 3+4)
+terraform -chdir=platform  plan      Plan: 89 to add, 0 to change, 0 to destroy.
 ```
 
-**Cost of Waves A-C so far: $0.00 applied.** The first billable thing in the repo is still Phase
-3's instances, because the first cost-bearing apply has not been run. Two new cost lines land with
-them that the SPEC's table does not yet carry: the CMK at $1.00/month and detailed monitoring at
-$0.30 per instance per month (**+$2.20/month, $3.13 over the 43-day window**) — 69% of the $200
-credit becomes 71%.
+The platform figure grew through the project and each step was a real plan, not an estimate:
+42 at Phase 2 (network), 58 at Phase 3+4 (cluster), 89 at Phase 5 (edge). Reproduce either with
+`terraform -chdir=<root> init -backend=false` and the `.terraform.tfvars.example` copied to the
+gitignored `terraform.tfvars` — the platform stack also needs `-var k3s_token=<hex>` because the
+join token is deliberately never stored in a file.
+
+**Nothing has cost anything so far: $0.00 applied.** The first billable thing in the repo is
+still Phase 3's instances. Two cost lines land with them that the SPEC's table does not yet
+carry: the CMK at $1.00/month and detailed monitoring at $0.30 per instance per month
+(**+$2.20/month, $3.13 over the 43-day window**) — 69% of the $200 credit becomes 71%.
 
 **The headline number, stated plainly because it is the one that matters:**
 the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds the arithmetic —
@@ -98,13 +106,13 @@ Critic: `pending` · `pass` · `gap named`
 - `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · manifest layer done; cluster-side proof blocked
 
 ### Wave D — CI/CD
-- `[!]` **Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)**
-- `[!]` **Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback**
+- `[~]` **Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)** · wrapper chart, namespace-scoped RBAC and daily backup built and merged; the controller has never booted (TASKS blockers)
+- `[~]` **Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback** · 9 shared-library steps plus the root Jenkinsfile, all twelve gates run locally in their pinned containers; no cluster has executed one (TASKS blockers)
 
 ### Wave E — Observability
 - `[~]` **Phase 9 — Prometheus / Grafana / Alertmanager + golden signals** · built and validated; cluster-side proof pending
 - `[~]` **Phase 10 — Loki + Fluent Bit logs with bounded cardinality** · built and validated; cluster-side proof pending
-- `[~]` **Phase 11 — OTel Collector gateway + Tempo** · built and validated on `feat/traces`: the collector ships (2 replicas, real processors, `otlp/tempo` + spanmetrics) **and Tempo now exists** (single binary, gp3, service-graphs metrics generator); cluster-side proof pending (TASKS U13)
+- `[~]` **Phase 11 — OTel Collector gateway + Tempo** · built on `feat/traces`, merged: the collector ships (2 replicas, real processors, `otlp/tempo` + spanmetrics) **and Tempo now exists** (single binary, gp3, service-graphs metrics generator); cluster-side proof pending (TASKS U13)
 - `[~]` **Phase 12 — SLOs, error budget, multiwindow multi-burn-rate alerts** · built and validated
 
 ### Wave F — Operational clarity
@@ -262,7 +270,7 @@ Teardown at Phase 14 returns the account to $0. `destroy.yml` exists before the 
 
 ## Phase 5 — what the edge build actually produced (2026-10-09)
 
-**Branch:** `feat/edge`. Validation by real command, not by assertion.
+**Branch:** `feat/edge`, merged to `main`. Validation by real command, not by assertion.
 
 ### Terraform — the AWS layer
 
@@ -386,7 +394,7 @@ coverage, above).
 
 ---
 
-## Phase 7 and 8 — the CI/CD layer (2026-10-14, `feat/cicd`, unmerged)
+## Phase 7 and 8 — the CI/CD layer (2026-10-14, built on `feat/cicd`, merged)
 
 Jenkins, in the cluster, as a Helm wrapper. Everything that does not need a cluster is proven;
 nothing that needs one has been run.
@@ -437,7 +445,7 @@ repository does not deploy. Five rows in `TASKS.md`'s blockers table carry them;
 
 ## Phase 11 — the traces layer (2026-10-14)
 
-**Branch:** `feat/traces`. Validation by real command, not by assertion. Nothing applied: no
+**Branch:** `feat/traces`, merged to `main`. Validation by real command, not by assertion. Nothing applied: no
 `helm install`, no `kubectl apply`, no cluster exists. The ROADMAP's five Phase 11 exit criteria
 all need one — a trace read back by ID, a rendered service graph, `promtool query instant` of
 `traces_spanmetrics_*`, a waterfall screenshot, adservice spans — so **none of them is claimed
