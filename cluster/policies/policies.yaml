@@ -121,19 +121,24 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: traefik
-  namespace: kube-system
+  # The namespace the Helm release installs into, NOT kube-system.
+  #
+  # A PodDisruptionBudget only ever selects pods in its own namespace, and
+  # until 2026-10-14 this lived in kube-system while the Traefik pods ran in
+  # traefik. The result was a PDB whose status reported `expectedPods: 0` --
+  # it protected nothing, and scripts/doctor.sh failed `disruption` on it,
+  # which is the check doing exactly its job. k3s's own addons are in
+  # kube-system and this one is not, so the label says so.
+  namespace: traefik
   labels:
     app.kubernetes.io/part-of: boutique-platform
-    boutique.io/policy: k3s-addon
+    boutique.io/policy: ingress
 spec:
-  # Targets Phase 5's Helm-installed Traefik, not k3s's bundled one (which this
-  # stack disables with --disable traefik). The Helm chart's own labels are
-  # app.kubernetes.io/name=traefik, so this selects the right pods.
-  #
-  # With 1 replica this blocks a drain on that node; that is the correct answer
-  # for a single-replica ingress and it is the reason Phase 5 sets replicas: 2
-  # across two AZs. Until then, doctor.sh reports `disruptionsAllowed: 0` here
-  # on purpose -- it is a visible reminder, not a defect to hide.
+  # Phase 5's Traefik is a DaemonSet, one pod per node, so the chart's own
+  # replica count does not apply: `minAvailable: 1` means a drain can take any
+  # single node and at least one ingress instance is still serving, while a
+  # drain of every node at once is refused. The selector is the chart's own
+  # `app.kubernetes.io/name=traefik`, which all four pods carry.
   selector:
     matchLabels:
       app.kubernetes.io/name: traefik
