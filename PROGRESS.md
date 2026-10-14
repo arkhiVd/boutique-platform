@@ -221,6 +221,130 @@ What this does **not** prove: no pod has ever run on these nodes. k3s itself, th
 chart are still un-deployed; the four checkov skips added here are named platform constraints, not
 waivers for a component nobody has exercised.
 
+### Waves D — 2026-10-14, the edge answered, and the address under it moved
+
+Traefik was installed and every ALB target read `Target.Timeout`. Six defects, every one of them
+found by measuring the live path rather than re-reading the plan, and every one fixed in source.
+
+**D1 — the NodePort security-group rules were written backwards.** Both rules sat on
+`boutique_edge` *sourced from* `boutique_node_internal`, which is a rule permitting the nodes to
+reach the ALB on 32080/32443: a path nothing uses. The ALB's own forwards and health checks
+originate from the edge group, and they were refused. An ingress rule belongs to the group that
+receives the packet. Measured after the fix, on the receiving group:
+
+```
+$ aws ec2 describe-security-group-rules --filters Name=group-id,Values=sg-010db8487b424e326
+  32080  32080  tcp  sg-0740958ab70774ffc     <- the ALB
+  32081  32081  tcp  sg-0740958ab70774ffc
+  32443  32443  tcp  sg-0740958ab70774ffc
+```
+
+**D2 — the same group's egress was 443 and DNS only.** Direction on the node is half of a
+handshake. `boutique_edge` allowed outbound 443 to the world and 53 to the resolver, and nothing
+to the nodes, so the ALB's health checks were dropped at the source no matter what the node
+answered. Three egress rules, one per port, rather than a `32080-32443` range that would become
+implicit permission for every future NodePort.
+
+**D3 — the health check asked a question the entrypoint cannot answer with 200.** It probed
+`GET http://<node>:32080/ping` expecting 200. Port 32080 is Traefik's `web` entrypoint, and that
+entrypoint answers *every* request with its own redirect:
+
+```
+$ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:32080/ping
+301
+$ curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:32443/ping
+404      # Traefik's ping lives on the `traefik` entrypoint, which the Service did not expose
+```
+
+Traefik's own `--ping` handler is on the `traefik` entrypoint (`:8080`), which nothing exposed.
+Rather than relaxing the matcher to `301` -- which would assert only "something is listening" --
+that entrypoint is now published as NodePort 32081 and both target groups health-check
+`http://<node>:32081/ping` for 200. The chart warns in as many words that this port should not be
+exposed on a production deployment, because it hosts `/dashboard/` and `/api`; `api.dashboard` is
+set to `false`, so the exposed entrypoint answers exactly one path. No document in this repo reads
+the Traefik dashboard -- the dashboards story is Grafana's.
+
+```
+$ kubectl get svc traefik -n traefik -o jsonpath='{range .spec.ports[*]}{.name}:node{.nodePort}{" "}{end}'
+traefik:node32081 web:node32080 websecure:node32443
+$ aws elbv2 describe-target-health --target-group-arn ...tf-https
+  i-04d2feb020ccb3d6a  healthy    i-081186d2cd5668fe2  healthy
+  i-08dbd7c33ed1deea5  healthy    i-015ea1031b2a671a7  healthy
+```
+
+Two smaller chart defects went with it: `frontendHost`/`grafanaHost`/`jenkinsHost` were read by
+`templates/routes.yaml` but never defined, rendering `Host(``)`; and Traefik was a DaemonSet
+asking for one RWO `local-path` PVC, which pinned three of four pods `Pending` with
+`didn't find available persistent volumes to bind`. `persistence.enabled: false` sends the chart
+back to `emptyDir` on `/data`, which is correct for a proxy that holds no state worth a volume.
+The Service was `<pending>` the whole time because it was still `LoadBalancer`.
+
+**D4 — a plan that wanted to replace all four nodes over a comment.** `launch_template.version`
+is Optional+Computed: config says `$Latest`, AWS returns the resolved number, so state holds
+`"6"`. Every plan after that showed `version = "6" -> "$Latest" # forces replacement`. An
+instance's launch-template version cannot be changed after launch, so the change can only ever
+take effect at boot; it is now ignored, and a bootstrap edit propagates the way
+`platform/README.md` already says it does -- an explicit `terraform apply -replace`.
+
+**D5 — the address the API was reachable on moved underneath it.** Applying the `user_data` fix
+in Wave C did not edit files on a running node; it stopped, modified and started all four:
+
+```
+$ aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=StopInstances
+  2026-10-14T17:36:57+05:30   StopInstances
+$ aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=StartInstances
+  2026-10-14T17:37:19+05:30   StartInstances
+```
+
+A public IPv4 released on stop is a different address after start, and k3s came back under the
+unit cloud-init had already written, so `--tls-san` still named the address that had just been
+released. The serving cert and `~/.kube/boutique-prod.yaml` went stale together, while the ALB --
+which targets private IPs, which never moved -- reported every target healthy. That asymmetry is
+the whole reason this was not caught by the health check: the platform's two views of "working"
+had diverged.
+
+Fixed twice over. Four Elastic IPs, attached to running instances, so the address stops rotating
+at all ($0.005/h only for an *unattached* address; these never are). And the kubeconfig rewrite
+now sets `tls-server-name: localhost`:
+
+```
+$ kubectl get nodes
+  boutique-agent-i-015ea1031b2a671a7      Ready    <none>
+  boutique-follower-i-04d2feb020ccb3d6a   Ready    control-plane,etcd
+  boutique-follower-i-081186d2cd5668fe2   Ready    control-plane,etcd
+  boutique-leader-i-08dbd7c33ed1deea5     Ready    control-plane,etcd
+```
+
+`k3s` always puts `DNS:localhost` in the dynamic serving cert, so verifying the name against
+`localhost` rather than against the transport address makes the file immune to address rotation
+without weakening anything: the cluster CA in the same file is what says "this is my cluster".
+
+**D6 — a PodDisruptionBudget in a namespace that does not exist to it.** The Traefik PDB lived in
+`kube-system` while the Helm release installs into `traefik`. A PDB only ever selects pods in its
+own namespace, so this one reported `expectedPods: 0` and protected nothing. `scripts/doctor.sh`
+failed `disruption` on it, which is the check earning its keep:
+
+```
+$ kubectl get pdb -A
+  kube-system/coredns                  1  N/A  0
+  kube-system/local-path-provisioner   1  N/A  0
+  kube-system/metrics-server           1  N/A  0
+  traefik/traefik                      1  N/A  3
+$ ./scripts/doctor.sh
+  PASS: 9   WARN: 1   FAIL: 0
+  VERDICT: PASS -- 9 checks green, 1 warning(s), cluster healthy
+$ ./scripts/check.sh
+  PASS: 136   FAIL: 0   MISSING: 0
+```
+
+The single warning is the three single-replica k3s addons with `disruptionsAllowed=0`, which
+`cluster/policies/policies.yaml` documents as the intended visible reminder rather than a defect
+to hide.
+
+Not proven yet: nothing has been served through the ALB to a browser. The IngressRoute matches
+`Host(`boutique.local`)` and the app behind it does not exist, so the edge currently answers 301
+on port 80 and 404 on 443, which is Traefik working with nothing to route to.
+
 ### Waves C — 2026-10-14, the cluster formed, and what stopped it
 
 The instance replacement in Wave A brought four nodes up, and none of them joined each other.
