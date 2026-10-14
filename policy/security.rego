@@ -66,6 +66,15 @@ pod_spec_of(doc) := doc.spec.template.spec if {
 	doc.spec.template.spec
 }
 
+# CronJob nests two levels deeper (spec.jobTemplate.spec.template.spec), and
+# `kind != "Pod"` above would otherwise miss it and silently skip every rule on
+# the pod it runs. Nothing in the repo was a CronJob before ci/backup/cronjob.yaml,
+# so this changes no existing result — it is what makes the nightly Jenkins
+# backup reachable by policy at all.
+pod_spec_of(doc) := doc.spec.jobTemplate.spec.template.spec if {
+	doc.kind == "CronJob"
+}
+
 workloads contains workload if {
 	some doc in documents
 	pod_spec_of(doc)
@@ -114,6 +123,10 @@ sc_value(pair, field) := object.get(
 # depend on the ServiceAccount being configured correctly.
 deny_service_account_token_mounted contains msg if {
 	some workload in workloads
+	# Gated: the ci namespace's Jenkins controller calls the Kubernetes API to
+	# build agent pods, so it is the one pod that must carry a token. See
+	# policy/ci.rego for the exception and the RBAC that scopes it.
+	profile_for(workload.namespace) == "restricted"
 	object.get(workload.spec, "automountServiceAccountToken", null) != false
 	msg := sprintf(
 		"[security] %s: pod spec sets automountServiceAccountToken to something other than false. Nothing in this namespace calls the Kubernetes API, so the projected token is a credential with no consumer. Upstream omits this flag on all 13 of its workloads.",
