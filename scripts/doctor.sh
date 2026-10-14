@@ -299,9 +299,19 @@ check_certs() {
   endpoint="$(kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)"
   case "$endpoint" in
     https://*)
+      # ${endpoint#https://} already carries a port when the kubeconfig does --
+      # it is `18.209.227.106:6443`. Appending another :6443 used to build
+      # `18.209.227.106:6443:6443`, which connect(2) rejects, so this check
+      # reported "unreachable" for an apiserver that answered on the first
+      # attempt (measured 2026-10-14). Add the port only when there is none.
       local hostport cert
       hostport="${endpoint#https://}"
-      cert="$(echo | timeout 10 openssl s_client -connect "${hostport%%/*}:6443" 2>/dev/null \
+      hostport="${hostport%%/*}"
+      case "$hostport" in
+        *:*) ;;
+        *) hostport="${hostport}:6443" ;;
+      esac
+      cert="$(echo | timeout 10 openssl s_client -connect "$hostport" 2>/dev/null \
               | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
       [ -n "$cert" ] || { echo "    apiserver serving certificate: unreachable at $hostport (expected from outside var.admin_cidr)"; return 77; }
       local sdays
@@ -325,21 +335,21 @@ check_node_marker() {
     --document-name AWS-RunShellScript \
     --comment "boutique-platform: doctor.sh node bootstrap log" \
     --parameters 'commands=["sudo tail -40 /var/log/boutique-bootstrap.log","sudo cat /var/lib/boutique-bootstrap-complete 2>/dev/null"]' \
-    --query 'Command.Id' --output text)" || return 1
+    --query 'Command.CommandId' --output text)" || return 1
   sleep 3
   local status
   for _ in $(seq 1 20); do
-    status="$(aws ssm get-invocation --instance-id "$NODE_LOG_INSTANCE" --command-id "$out" \
+    status="$(aws ssm get-command-invocation --instance-id "$NODE_LOG_INSTANCE" --command-id "$out" \
       --plugin-name aws:RunShellScript --query 'Status' --output text 2>/dev/null || echo Pending)"
     [ "$status" = "Success" ] && break
     [ "$status" = "Failed" ] && { echo "    SSM invocation failed"; return 1; }
     sleep 3
   done
   echo "    /var/log/boutique-bootstrap.log (last lines) on $NODE_LOG_INSTANCE:"
-  aws ssm get-invocation --instance-id "$NODE_LOG_INSTANCE" --command-id "$out" \
+  aws ssm get-command-invocation --instance-id "$NODE_LOG_INSTANCE" --command-id "$out" \
     --plugin-name aws:RunShellScript --query 'StandardOutputContent' --output text 2>/dev/null \
     | sed 's/^/      /'
-  grep -q 'bootstrap complete' <<<"$(aws ssm get-invocation --instance-id "$NODE_LOG_INSTANCE" \
+  grep -q 'bootstrap complete' <<<"$(aws ssm get-command-invocation --instance-id "$NODE_LOG_INSTANCE" \
     --command-id "$out" --plugin-name aws:RunShellScript --query 'StandardOutputContent' --output text 2>/dev/null)" \
     || { echo "    the node never wrote its completion marker"; rc=1; }
   return "$rc"

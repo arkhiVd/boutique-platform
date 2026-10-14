@@ -97,11 +97,11 @@ COMMAND_ID="$(aws ssm send-command --region "$AWS_REGION" \
   --document-name AWS-RunShellScript \
   --comment "boutique-platform: read k3s kubeconfig (bootstrap-cluster.sh)" \
   --parameters "commands=[\"sudo cat $K3S_KUBECONFIG_PATH\"]" \
-  --query 'Command.Id' --output text 2>&1)" \
+  --query 'Command.CommandId' --output text 2>&1)" \
   || die "aws ssm send-command failed: $COMMAND_ID"
 
 waited=0
-until STATUS="$(aws ssm get-invocation --region "$AWS_REGION" \
+until STATUS="$(aws ssm get-command-invocation --region "$AWS_REGION" \
         --instance-id "$TARGET_INSTANCE" --command-id "$COMMAND_ID" \
         --plugin-name aws:RunShellScript --query 'Status' --output text 2>/dev/null)"; do
   [ "$waited" -ge "$SSM_WAIT_SECONDS" ] && die "SSM invocation $COMMAND_ID did not finish within ${SSM_WAIT_SECONDS}s"
@@ -110,13 +110,13 @@ done
 
 if [ "$STATUS" != "Success" ]; then
   red "SSM invocation status: $STATUS"
-  aws ssm get-invocation --region "$AWS_REGION" --instance-id "$TARGET_INSTANCE" \
+  aws ssm get-command-invocation --region "$AWS_REGION" --instance-id "$TARGET_INSTANCE" \
     --command-id "$COMMAND_ID" --plugin-name aws:RunShellScript \
     --query '[Status, StandardErrorContent]' --output text 2>/dev/null || true
   die "the leader did not return a kubeconfig. Check that cloud-init finished: run scripts/doctor.sh --node-log $TARGET_INSTANCE"
 fi
 
-RAW_KUBECONFIG="$(aws ssm get-invocation --region "$AWS_REGION" \
+RAW_KUBECONFIG="$(aws ssm get-command-invocation --region "$AWS_REGION" \
   --instance-id "$TARGET_INSTANCE" --command-id "$COMMAND_ID" \
   --plugin-name aws:RunShellScript \
   --query 'StandardOutputContent' --output text 2>/dev/null)"
@@ -191,17 +191,17 @@ NODES_COMMAND_ID="$(aws ssm send-command --region "$AWS_REGION" \
   --document-name AWS-RunShellScript \
   --comment "boutique-platform: k3s kubectl get nodes (bootstrap-cluster.sh)" \
   --parameters 'commands=["k3s kubectl get nodes -o wide"]' \
-  --query 'Command.Id' --output text)" \
+  --query 'Command.CommandId' --output text)" \
   || die "could not ask the leader for its node list"
 waited=0
-until STATUS="$(aws ssm get-invocation --region "$AWS_REGION" \
+until STATUS="$(aws ssm get-command-invocation --region "$AWS_REGION" \
         --instance-id "$TARGET_INSTANCE" --command-id "$NODES_COMMAND_ID" \
         --plugin-name aws:RunShellScript --query 'Status' --output text 2>/dev/null)"; do
   [ "$waited" -ge "$SSM_WAIT_SECONDS" ] && die "the node list invocation did not finish within ${SSM_WAIT_SECONDS}s"
   sleep 3; waited=$((waited + 3))
 done
 [ "$STATUS" = "Success" ] || die "the leader returned status $STATUS for the node list"
-aws ssm get-invocation --region "$AWS_REGION" --instance-id "$TARGET_INSTANCE" \
+aws ssm get-command-invocation --region "$AWS_REGION" --instance-id "$TARGET_INSTANCE" \
   --command-id "$NODES_COMMAND_ID" --plugin-name aws:RunShellScript \
   --query 'StandardOutputContent' --output text 2>/dev/null | sed 's/^/    /'
 
