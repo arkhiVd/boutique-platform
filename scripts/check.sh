@@ -218,17 +218,36 @@ if need helm "helm"; then
     # `sourceCriterion` nested one level above where the schema allows it. Both
     # would have been rejected by the API server at apply time, so the gate has
     # to run on the rendered output, not the template.
-    if [[ -f "$d/Chart.yaml" ]] && grep -q 'name: traefik' "$d/Chart.yaml" 2>/dev/null; then
+    # Two charts are schema-validated on their RENDERED output, because for both
+    # the render is the only place their manifests are YAML at all — the chart
+    # sources are Go template text, excluded from the raw MANIFESTS pass above.
+    #
+    #   traefik — the CRD-heavy edge chart; this pass caught two real Traefik
+    #             CRD violations that `helm lint` and `helm template` both pass
+    #             (see the comment above).
+    #   tempo   — Phase 11's chart. Its render is the only source of a
+    #             StatefulSet + PVC, a ServiceMonitor and a PrometheusRule for
+    #             Tempo, and the CRD schema location below is what lets those
+    #             three be schema-checked rather than assumed valid. The manual
+    #             run on 2026-10-14 was 6/6 valid under -strict; this keeps it
+    #             that way on every subsequent run.
+    c_name="$(awk '/^name:/ {print $2; exit}' "$d/Chart.yaml" 2>/dev/null)"
+    if [[ "$c_name" == traefik || "$c_name" == tempo ]]; then
       # Capture the status explicitly; `$?` after an assignment is the status of
       # the assignment, not of the command inside it.
       render_err=""
       render_rc=0
-      render_err="$(helm template "$(basename "$d")" "$d" \
-        --namespace traefik \
-        --set frontendHost=boutique.example \
-        --set grafanaHost=grafana.example \
-        --set jenkinsHost=jenkins.example \
-        --set tlsSecretName=tls-example 2>&1)" || render_rc=$?
+      if [[ "$c_name" == traefik ]]; then
+        render_err="$(helm template "$(basename "$d")" "$d" \
+          --namespace traefik \
+          --set frontendHost=boutique.example \
+          --set grafanaHost=grafana.example \
+          --set jenkinsHost=jenkins.example \
+          --set tlsSecretName=tls-example 2>&1)" || render_rc=$?
+      else
+        render_err="$(helm template "$(basename "$d")" "$d" \
+          --namespace observability 2>&1)" || render_rc=$?
+      fi
       if [[ $render_rc -eq 0 && -n "$render_err" ]]; then
         printf '%s\n' "$render_err" > /tmp/kubeconform-render.yaml
         check "kubeconform (rendered $d)" -- \
@@ -308,7 +327,7 @@ cyan "== node capacity budget =="
 # rendered manifests, and prints the comparison.
 #
 # The OVER-COMMIT IS A RECORDED FINDING, NOT A CHECK FAILURE. docs/resource-budget.md
-# holds the arithmetic: 3600m / 4048Mi of requests against 1830m / 3741Mi
+# holds the arithmetic: 3850m / 4688Mi of requests against 1830m / 3741Mi
 # schedulable, of which 2820m is the `boutique` namespace that no observability
 # change can fix. Failing the gate on a number nobody is allowed to change trains
 # people to stop reading the gate — which is the exact failure mode
@@ -348,7 +367,7 @@ if need python3 python3 && [[ -d observability ]]; then
     # ignorable. The line is printed in yellow and the number above it is the
     # observability-only figure, so it cannot be mistaken for the total.
     warn "apps/boutique is not on this branch: the number below is an UNDER-COUNT — no boutique, no OTel collector"
-    warn "the real total is 3600m / 4048Mi = 196.7% CPU and 108.2% RAM of schedulable (see docs/resource-budget.md)"
+    warn "the real total is 3850m / 4688Mi = 210.4% CPU and 125.3% RAM of schedulable (see docs/resource-budget.md)"
   fi
 
   if [[ $ok_render -eq 1 ]]; then

@@ -331,14 +331,18 @@ spec:
 #
 #   namespace       measured requests   quota (requests.cpu / requests.memory)
 #   boutique        2820m / 2312Mi      3000m  / 3Gi     (app overlay)
-#   observability    680m / 1224Mi      1500m  / 3Gi     (this file)
+#   observability    930m / 1864Mi      1500m  / 3Gi     (this file)
 #   ci               100m /  512Mi      2000m  / 8Gi     (this file)
-#   OTel collector   200m /  256Mi      counted in `observability`
+#   OTel collector   200m /  384Mi      counted in `observability`
 #   ---------------------------------------------------------------------
-#   TOTAL MEASURED  3600m / 4048Mi      TOTAL CEILING 6500m / 14Gi
+#   TOTAL MEASURED  3850m / 4688Mi      TOTAL CEILING 6500m / 14Gi
+#
+# (the measured figures were 3600m / 4048Mi until Phase 11 added Tempo and the
+# collector's 128Mi -> 192Mi per replica; quotas are ceilings, not forecasts, so
+# the ceiling line did not move. See docs/resource-budget.md.)
 #
 # What that leaves: four schedulable nodes give 7320m / ~9042Mi of ALLOCATABLE,
-# so the measured platform sits at 49% CPU and 45% memory, and the quota ceiling
+# so the measured platform sits at 53% CPU and 52% memory, and the quota ceiling
 # at 89% / 155% -- deliberately over 100% on memory, because a ceiling nobody can
 # reach is decoration and a ceiling nobody can exceed is an outage. The gap
 # between measured and ceiling is head-room for an HPA scale-up, a canary set,

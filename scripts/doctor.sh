@@ -132,8 +132,8 @@ check_nodes() {
 
   # THE SPEC'S SCHEDULING MODEL. A server node with
   # node-role.kubernetes.io/control-plane:NoSchedule is the EKS pattern and it is
-  # the one thing that makes 3600m/4048Mi of requests unschedulable, because it
-  # collapses the cluster to one workload node (1830m/3741Mi = 196.7% CPU).
+  # the one thing that makes 3850m/4688Mi of requests unschedulable, because it
+  # collapses the cluster to one workload node (1830m/3741Mi = 210.4% CPU).
   # k3s adds no such taint; this asserts it rather than assuming it.
   tainted="$(jq '[.items[]
       | select([.spec.taints[]? | select(.key | startswith("node-role.kubernetes.io/"))] | length > 0)] | length' <<<"$json")"

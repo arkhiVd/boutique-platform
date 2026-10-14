@@ -200,8 +200,8 @@ for new nodes at that point. The nodes already in the cluster keep running.
 | 1 × `t3.medium` | worker | `us-east-1c` | the schedulable pool |
 
 **All four are schedulable and none of them is tainted.** The measured platform is
-3600m / 4048Mi of requests against one t3.medium's 1830m / 3741Mi schedulable
-(196.7% CPU, 108.2% RAM — `docs/resource-budget.md`), so a tainted control plane
+3850m / 4688Mi of requests against one t3.medium's 1830m / 3741Mi schedulable
+(210.4% CPU, 125.3% RAM — `docs/resource-budget.md`), so a tainted control plane
 puts `boutique` Pending forever. k3s labels its server nodes
 `node-role.kubernetes.io/control-plane=true` and taints nothing; EKS taints
 because it pairs its control plane with a separate worker fleet, and this account

@@ -139,14 +139,16 @@ managed-service pattern. Measuring the real workload destroyed that layout:
 | namespace | CPU requests | memory requests |
 |---|---|---|
 | `boutique` (13 workloads) | 2820m | 2312Mi |
-| `observability` (4 charts) | 680m | 1224Mi |
+| `observability` (5 charts) | 930m | 1864Mi |
 | `ci` (Jenkins + agents) | 100m | 512Mi |
-| OTel collector | 200m | 256Mi |
-| **total** | **3600m** | **4048Mi** |
+| OTel collector | 200m | 384Mi |
+| **total** | **3850m** | **4688Mi** |
 
-Against a single t3.medium's schedulable **1830m / 3741Mi**, that is **196.7% CPU and 108.2%
-RAM**. On the original layout, `boutique` would sit Pending forever and the Phase 6 drain test
-("drain one node, zero failed requests") would have nowhere to drain to.
+Against a single t3.medium's schedulable **1830m / 3741Mi**, that is **210.4% CPU and 125.3%
+RAM** (recomputed 2026-10-14 after Phase 11 added Tempo; before it the same table read
+3600m / 4048Mi = 196.7% / 108.2% — the arithmetic method is unchanged and is in
+`docs/resource-budget.md`). On the original layout, `boutique` would sit Pending forever and the
+Phase 6 drain test ("drain one node, zero failed requests") would have nowhere to drain to.
 
 Two things follow, and both are now the SPEC's requirement:
 

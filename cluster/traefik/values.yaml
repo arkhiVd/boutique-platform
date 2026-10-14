@@ -106,10 +106,11 @@ traefik:
             User-Agent: keep
 
   # --- resources ----------------------------------------------------------
-  # Sized against the measured platform budget. The full stack is 3600m of CPU
-  # requests over a four-node cluster with a 1600m sustained t3 baseline, and
-  # Traefik is on the path of every single request, so it is given a
-  # guaranteed-feeling request and a ceiling it will not reach in normal use.
+  # Sized against the measured platform budget. The full stack is 3850m of CPU
+  # requests (3600m before Phase 11) over a four-node cluster with a 1600m
+  # sustained t3 baseline, and Traefik is on the path of every single request,
+  # so it is given a guaranteed-feeling request and a ceiling it will not reach
+  # in normal use.
   resources:
     requests:
       cpu: "100m"
