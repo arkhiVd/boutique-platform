@@ -1,7 +1,44 @@
 # Traefik chart values. Every override states why, because a value that is not
 # explained gets reverted by someone who does not know what it broke.
 
+# The hostname every IngressRoute in templates/routes.yaml matches on. It has to
+# be one of the SANs on the imported edge certificate
+# (scripts/tls/generate-selfsigned.sh: boutique.local, localhost, *.ip.sslip.io)
+# or the router matches and the browser then rejects the certificate.
+#
+# `boutique.local`, an exact SAN rather than the wildcard, because the ALB's DNS
+# name changes whenever the load balancer is recreated and is not a SAN at all.
+# Reaching it is one line: `<alb-dns> boutique.local` in /etc/hosts.
+#
+# Left unset until 2026-10-14, which rendered `Host(``)` on every route and
+# meant the chart installed green while nothing routed.
+frontendHost: boutique.local
+
+# Same contract as frontendHost: templates/routes.yaml matches IngressRoutes on
+# these, and an unset value renders `Host(<empty>)`, which nothing ever matches.
+# Both are subdomains of boutique.local so the storefront, Grafana and Jenkins
+# are three distinct hosts on one listener.
+#
+# Known gap, recorded rather than discovered later: the imported edge
+# certificate (scripts/tls/generate-selfsigned.sh) lists boutique.local,
+# localhost and *.ip.sslip.io, so these two subdomains do not validate at the
+# ALB today -- the ALB serves its default certificate and the browser warns.
+# Fix before the Grafana and Jenkins stages by adding `*.boutique.local` to
+# HOSTS, regenerating, and re-importing to ACM; imported certificates are free.
+grafanaHost: grafana.boutique.local
+jenkinsHost: jenkins.boutique.local
+
 traefik:
+  # The dashboard is off, and that is what makes exposing the `traefik`
+  # entrypoint above acceptable. The upstream chart says in as many words that
+  # this port should not be exposed on a production deployment, because it
+  # hosts /dashboard/ and /api. With `api.dashboard=false` those are gone and
+  # the exposed entrypoint answers one thing: /ping, which is exactly what the
+  # ALB target groups ask for. Nothing in this repo reads the Traefik
+  # dashboard -- the dashboards story is Grafana's, in observability/.
+  api:
+    dashboard: false
+
   # --- deployment shape ---------------------------------------------------
   # A DaemonSet, not a Deployment: the chart expresses it as deployment.kind,
   # not a separate daemonset block (verified against the 39.0.1 values schema).
@@ -43,6 +80,25 @@ traefik:
       # cert-manager issued cert terminates here instead.
     metrics:
       port: 9100
+      protocol: TCP
+
+    # Traefik's own entrypoint, which is where --ping answers (the liveness
+    # probe hits :8080/ping inside the pod, so this is already the health
+    # endpoint of record). It is exposed for one reason: the ALB target groups
+    # health-check it.
+    #
+    # Measured 2026-10-14: health_check was `GET http://<node>:32080/ping`
+    # expecting 200, but :32080 is the `web` entrypoint, which answers every
+    # request with the entrypoint's 301 to https -- and the IngressRoute's own
+    # `/ping` rule sends anything that survives that to the frontend Service,
+    # not to Traefik. No configuration of :32080 returns 200, so every target
+    # was permanently unhealthy. Publishing this entrypoint gives the check the
+    # endpoint the runbook always meant it to probe.
+    traefik:
+      expose:
+        default: true
+      exposedPort: 8080
+      nodePort: 32081
       protocol: TCP
 
   # --- metrics ------------------------------------------------------------
@@ -154,10 +210,28 @@ traefik:
   # and in self-signed mode that resolver is never used.
   additionalArguments: []
 
+  # Off, and it has to be: this is a DaemonSet and a PVC is a single RWO
+  # volume. Measured 2026-10-14 on the first install -- three of four pods
+  # stayed Pending with
+  #   0/4 nodes: 1 node(s) didn't find available persistent volumes to bind,
+  #             3 node(s) didn't satisfy plugin(s) [NodeAffinity]
+  # because local-path binds one PV whose nodeAffinity pins it to a single node.
+  # The chart's fallback is an emptyDir on /data, which is what this deployment
+  # wants anyway: there is no ACME here (see additionalArguments above), so the
+  # only thing that would live in acme.json is a resolver this mode never uses.
   persistence:
-    enabled: true
+    enabled: false
     storageClass: local-path
     size: 1Gi
+
+  # NodePort, not the chart's LoadBalancer default. k3s's ServiceLB is disabled
+  # in platform/nodes.tf for the reason stated above, so a LoadBalancer Service
+  # would sit at `<pending>` forever -- a permanently unready object that reads
+  # like a failure to anyone running `kubectl get svc`. The ALB never uses this
+  # Service anyway: its target groups attach directly to the instance NodePorts
+  # (platform/edge.tf), and the ports below are the ones those attachments use.
+  service:
+    type: NodePort
 
 # --- the CRDs the ingress routes use ---------------------------------------
 # Traefik's CRDs are installed by the chart as dependencies; these extraObjects

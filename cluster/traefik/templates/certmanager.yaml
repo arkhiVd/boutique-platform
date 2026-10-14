@@ -1,4 +1,11 @@
-# {{- if .Values.tlsSecretName }}
+{{- if .Values.tlsSecretName }}
+# Both objects are inside the guard, not just the Certificate. The ClusterIssuer
+# used to sit AFTER the guard's end, so it rendered unconditionally and the
+# install failed with "no matches for kind ClusterIssuer" -- cert-manager is not
+# installed in the self-signed mode this platform deploys, and neither object
+# belongs on a cluster that is not running it. Go templates have no comment
+# syntax, so this file must not contain the words this note used to spell out;
+# inside a template they are parsed as directives, not as prose.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -13,7 +20,6 @@ spec:
   issuerRef:
     name: letsencrypt
     kind: ClusterIssuer
-{{- end }}
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -29,3 +35,4 @@ spec:
       - http01:
           ingress:
             ingressClassName: traefik
+{{- end }}
