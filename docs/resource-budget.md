@@ -105,30 +105,52 @@ would then catch as a page. That is a worse outcome than the over-commit.
 
 ## 4. The Jenkins number, and where it comes from
 
-`ci/` is Phase 7 and does not exist on this branch, so the controller's requests
-are not in any file this script can render. The estimate is therefore passed as
-`--extra ci:jenkins-controller:100m:512Mi`, and its provenance:
+`ci/` exists on this branch, but it is not one of the things `scripts/check.sh`
+renders (that loop walks the `observability/` charts and the `apps/boutique`
+kustomization), so the controller's requests are still handed to the gate as
+`--extra`. They are now **measured from this repository's own chart** rather
+than quoted from the chart default:
 
 ```bash
-helm template jk jenkins/jenkins --version 5.9.68 -n ci
-#   config-reload-init   cpu=None      mem=None
-#   init                 cpu=50m       mem=256Mi     (installing-plugins)
-#   jenkins              cpu=50m       mem=256Mi
-#   config-reload        cpu=None      mem=None
+helm template ci ci/jenkins -n ci        # the pod has four containers
+#   init                 cpu=50m   mem=256Mi   (installing-plugins)
+#   jenkins              cpu=50m   mem=256Mi
+#   config-reload        cpu=10m   mem=32Mi    (JCasC hot reload)
+#   config-reload-init   cpu=10m   mem=32Mi
 ```
 
-= **100m / 512 MiB of requests**, from the chart's own default
-`controller.resources` (requests 50m/256Mi, limits 2000m/4096Mi), rendered, not
-remembered. It is an **under**-count on purpose, in one direction only:
+= **120m / 576 MiB of requests** → `--extra ci:jenkins-controller:120m:576Mi`.
 
-- **What it omits:** the Jenkins Kubernetes plugin's **ephemeral agent pods**.
-  Two concurrent builds at 100m/512 MiB each is another 200m/512 MiB of
-  *requests*, on top of this. On a node already at 196.7% those pods would be
-  **Pending**, and the visible symptom is a build that never starts — which is
-  exactly what `JenkinsQueueBacklog` in
-  `observability/rules/boutique-alerts.yaml` exists to catch.
-- **What it omits on the other side:** the Phase 7 work can lower the controller
-  request the same way Grafana and Loki were cut here.
+Both numbers differ from the upstream default (100m / 512 MiB — `jenkins` and
+`init` carry requests there, the chart's two config-reload containers carry
+none) because `ci/jenkins/values.yaml` sets the controller's resources
+explicitly and adds the config-reload sidecar the JCasC reload path needs. It is
+an **under**-count, in three directions, and now with the arithmetic for each:
+
+- **Agent pods — the big one.** The Kubernetes plugin creates one pod per
+  build: **200m / 768 MiB of requests each** (jnlp 150m/512Mi + dind
+  50m/256Mi, `ci/jenkins/values.yaml`), at `containerCap: "8"` — so the
+  *ceiling* the namespace can ask for is **1600m / 6 GiB of requests**, more
+  than three times the controller itself. On a node already over schedulable
+  those pods go Pending and the build queues forever, which is exactly what
+  `JenkinsQueueBacklog` in `observability/rules/boutique-alerts.yaml` exists to
+  catch. The `ci-quota` in `cluster/policies/` is what turns that ceiling into
+  arithmetic instead of a surprise: 2000m / 8Gi requests, 4000m / 12Gi limits,
+  12 pods — controller + eight agents fit (1720m / 6720Mi of requests against
+  2000m / 8192Mi), and a ninth agent is refused at creation rather than
+  queueing.
+- **The backup CronJob** — one pod at **50m / 128 MiB** of requests, daily, for
+  as long as the backup takes (`ci/backup/cronjob.yaml`). It shares the quota
+  with everything above.
+- **Init containers run once** (`initializeOnce`, `--init` above) but are
+  counted on every run of this script, which is the conservative direction.
+
+The chart's *limits* are not what the budget uses: they are an accounting
+device. For the record, the rendered controller pod carries **1100m / 1664Mi**
+of limits (jenkins 750m/1024Mi, init 250m/512Mi, 50m/64Mi on each
+config-reload), and it is those limits — not these requests — that the
+`ci-quota`'s `limits.*` keys check.
+
 
 ## 5. What would actually close the gap, quantified
 

@@ -1,6 +1,6 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-09** · rendered browser view: `docs/progress.html`
+**Last updated: 2026-10-14** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
 ---
@@ -15,6 +15,13 @@ etcd snapshot bucket and its systemd timer, the RBAC, the PDB/NetworkPolicy/Reso
 LimitRange baseline, and a restore drill that refuses to touch the live cluster. The apply is still
 Aravind's gate, and the state bucket the platform stack stores state in does not exist until that
 one-time bootstrap apply runs.
+
+**Phases 7 and 8 are built on `feat/cicd`, unmerged and undeployed.** Jenkins as a wrapper chart,
+its RBAC, a daily backup job, a namespace-scoped policy profile, a shared library and a root
+Jenkinsfile whose twelve gates are the same commands `scripts/check.sh` runs. Everything that can
+be proven without a cluster has been; the controller has never booted. The section at the bottom
+of this file has the evidence table, and `TASKS.md`'s blockers table has the five rows that keep
+it honest.
 
 **What the three plans say, exactly:**
 
@@ -374,3 +381,54 @@ coverage, above).
   recorded.
 - `docs/runbooks/edge.md` written: unhealthy targets, WAF false positive, cert expiry, and the
   plaintext backstop — each with the real command and the rollback path.
+
+---
+
+## Phase 7 and 8 — the CI/CD layer (2026-10-14, `feat/cicd`, unmerged)
+
+Jenkins, in the cluster, as a Helm wrapper. Everything that does not need a cluster is proven;
+nothing that needs one has been run.
+
+### What landed
+
+- `ci/jenkins/` — a wrapper around `jenkins/jenkins` **5.9.68**: JCasC (matrix authorization in
+  four groups, a kubernetes cloud, eleven plugin pins with `installLatestPlugins: false`), an
+  agent pod template with a `dind` sidecar and `containerCap: "8"`, a 10Gi `local-path` PVC, the
+  `platform-ci-controller` priority class, and `installPlugins` pinned rather than floated. The
+  chart creates no RBAC and no ServiceAccount on purpose: `ci/rbac/` does, five files, and the
+  Role carries no `secrets` verb.
+- `ci/backup/cronjob.yaml` — 03:17 UTC, tar the PVC, `aws s3 cp`, prune at 14 days,
+  `automountServiceAccountToken: false` because it never talks to the API.
+- `policy/ci.rego` — the namespace-profile mechanism: `baseline` for `ci` and `observability`,
+  `restricted` everywhere else, so the one token mount Jenkins needs does not loosen `boutique`.
+- `pipelines/` — the shared library: `tools` (one pinned container per command), `buildAndTest`
+  (gates, then buildx), `scanAndSign`, `deployToStaging`, `smokeGate`, `canaryAndRollback`,
+  `promoteToProd`, plus three shell resources holding the logic that deserves shellcheck.
+- `Jenkinsfile` — twelve gates, then build → scan → deploy → smoke → canary (with automatic
+  rollback) → approval → promote. Parameters, not secrets; a stage with no input says so and
+  stops rather than reporting a release it did not perform.
+
+### What each claim rests on
+
+| claim | evidence |
+|---|---|
+| the chart is valid | `helm lint --strict` clean; `helm template ci ci/jenkins` renders `StatefulSet ci`, the two Services and the PVC |
+| the policy accepts `ci/` and still rejects the app | `conftest test ci/` **144 passed**; old-vs-new policy over apps+cluster+ci+observability **2430 tests, byte-identical output**, `--combine` identical, all 3 fixtures with identical exit codes |
+| the manifests are schema-valid | `kubeconform -strict` **6/6 valid** on the non-chart files; the literal `kubeconform … ci/` exits 1 on `Chart.yaml`/`values.yaml` with "missing 'kind' key", which is why `check.sh` filters exactly those, and the filter is documented there |
+| the pipeline's gates are real | all twelve green in their pinned containers on this machine, with the same `docker run` shape `vars/tools.groovy` uses — including the two that were red on the first attempt (the shellcheck image is `FROM scratch` and its entrypoint is already the binary; `helm repo add` has to run in the same container as `dependency build`) |
+| the pins exist | eleven plugin versions each return **HTTP 200** from `updates.jenkins.io/download/plugins`; every container tag checked against its registry's tag API |
+| nothing leaked in | `gitleaks` clean; the 19 non-comment `password|token|secret` hits in `ci/` and `pipelines/` are field names, Secret/key names, mount paths and `${...}` placeholders |
+| the whole gate still passes | `scripts/check.sh` **127 pass, 0 fail, 0 missing** — up from 112 by exactly fifteen lines: 6 kubeconform (`ci/rbac`, `ci/backup`), 3 conftest fixture rejections, 3 shellcheck and 3 `bash -n` for the new `pipelines/resources/*.sh` |
+
+The cost estimate is unchanged at **$97.74/month**: `scripts/cost-estimate.sh` and everything it
+reads were not touched by this phase. The Jenkins number that *does* change is the controller's
+120m / 576Mi of requests, now measured from our own chart instead of quoted from the upstream
+default, in `docs/resource-budget.md` §4.
+
+### What is unproven, and why
+
+The controller has never booted. JCasC has never applied. No agent pod has started, no
+`container('dind')` has reached a daemon, no image has been built, and the canary has never rolled
+anything back — each of those needs a cluster, and two of them also need an application this
+repository does not deploy. Five rows in `TASKS.md`'s blockers table carry them;
+`docs/runbooks/ci.md` carries the commands that will be run and what each failure will look like.
