@@ -128,6 +128,33 @@ log "role=$ROLE is_leader=$IS_LEADER"
 # into their own user_data, so a replaced leader does not invalidate the
 # followers' configuration: the parameter follows the new address.
 # ---------------------------------------------------------------------------
+# imds_public_ipv4: this instance's public address, via IMDSv2.
+#
+# Returns non-zero and prints nothing if IMDS is unreachable or the instance has
+# no public IPv4, so callers can treat an empty string as "no public SAN" rather
+# than failing the boot over a nicety.
+imds_public_ipv4() {
+  local token ip
+  token="$(curl -sf --connect-timeout 3 --max-time 5 \
+            -X PUT "http://169.254.169.254/latest/api/token" \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null)" \
+    || return 1
+  ip="$(curl -sf --connect-timeout 3 --max-time 5 \
+          -H "X-aws-ec2-metadata-token: $token" \
+          "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null)" \
+    || return 1
+  printf '%s' "$ip"
+}
+
+# The progress line inside this function goes to STDERR, deliberately. Both
+# call sites capture the function with `$(...)`: if the waiting message were on
+# stdout it would be concatenated onto the value and the caller would use a
+# string like `2026-10-14T05:19:33Z waiting for parameter ...` as if it were
+# the answer. Measured 2026-10-14: both followers built
+# `--server https://2026-10-14T05:19:33Z` from exactly that, and k3s failed
+# with `failed to validate token: Invalid server url` at 483 restarts. A
+# function whose stdout is captured must print only the value on stdout.
+
 ssm_wait() {
   local name="$1" deadline="$2" waited=0 value
   until value="$(aws ssm get-parameter --region "$AWS_REGION" --name "$name" \
@@ -135,11 +162,48 @@ ssm_wait() {
     if [ "$waited" -ge "$deadline" ]; then
       return 1
     fi
-    log "waiting for parameter $name (${waited}s of ${deadline}s elapsed)"
+    log "waiting for parameter $name (${waited}s of ${deadline}s elapsed)" >&2
     sleep 10
     waited=$((waited + 10))
   done
   printf '%s' "$value"
+}
+
+# leader_wait: the leader's address, and only an address that answers.
+#
+# ssm_wait returns as soon as a value is READABLE, which is the wrong test on a
+# replace: the parameter still holds the PREVIOUS leader's address until
+# Terraform rewrites it, and the two followers boot in parallel with the leader
+# they are about to join. Measured 2026-10-14 -- both followers read
+# 10.90.12.149 (the leader from the generation before) and died with
+# `Get "https://10.90.12.149:6443/cacerts": context deadline exceeded` while
+# the live leader was already at 10.90.0.50. A readable stale value is worse
+# than an absent one: an absent value keeps polling, a stale one stops it.
+#
+# So this re-reads the parameter on every attempt and accepts the value only
+# once https://<ip>:6443/cacerts answers. That covers both cases -- a stale
+# address is rejected and re-read (catching Terraform's write a few seconds
+# later), and a correct address whose apiserver has not started yet is waited
+# on rather than handed to k3s. -k because the serving cert is the cluster's
+# self-signed one and is not in this host's CA bundle at this point.
+leader_wait() {
+  local name="$1" deadline="$2" waited=0 ip
+  while :; do
+    ip="$(ssm_wait "$name" "$deadline")" \
+      || { log "SSM parameter $name never became readable" >&2; return 1; }
+    if curl -sk --connect-timeout 5 --max-time 8 \
+         "https://${ip}:6443/cacerts" -o /dev/null; then
+      printf '%s' "$ip"
+      return 0
+    fi
+    if [ "$waited" -ge "$deadline" ]; then
+      log "no leader answered /cacerts within ${deadline}s (last value: $ip)" >&2
+      return 1
+    fi
+    log "leader not answering at ${ip}:6443 (${waited}s of ${deadline}s elapsed); re-reading $name" >&2
+    sleep 10
+    waited=$((waited + 10))
+  done
 }
 
 log "reading $K3S_TOKEN_PARAMETER (SecureString, with-decryption)"
@@ -149,8 +213,8 @@ K3S_TOKEN="$(ssm_wait "$K3S_TOKEN_PARAMETER" "$K3S_SSM_WAIT_SECONDS")" \
 
 K3S_JOIN_URL=""
 if [ "$IS_LEADER" -eq 0 ]; then
-  LEADER_IP="$(ssm_wait "$K3S_LEADER_IP_PARAMETER" "$K3S_SSM_WAIT_SECONDS")" \
-    || die "SSM parameter $K3S_LEADER_IP_PARAMETER did not become readable within ${K3S_SSM_WAIT_SECONDS}s. Terraform writes it once the leader instance exists."
+  LEADER_IP="$(leader_wait "$K3S_LEADER_IP_PARAMETER" "$K3S_SSM_WAIT_SECONDS")" \
+    || die "No leader became reachable at $K3S_LEADER_IP_PARAMETER within ${K3S_SSM_WAIT_SECONDS}s. The parameter must eventually hold the new leader's address and that leader must answer /cacerts."
   log "leader private address = $LEADER_IP"
   K3S_JOIN_URL="https://${LEADER_IP}:6443"
 fi
@@ -188,12 +252,65 @@ log "node name = $NODE_NAME"
 # over TLS from get.k3s.io and is NOT digest-pinned. The artifact it installs is
 # pinned by version; the script itself is whatever that URL serves that day.
 # ---------------------------------------------------------------------------
-NODE_FLAGS="--node-name ${NODE_NAME} --node-label boutique.io/role=${ROLE} --node-label boutique.io/az=${MY_AZ} ${K3S_EXTRA_FLAGS}"
+# topology.kubernetes.io/zone is set here rather than left to a cloud provider.
+# k3s stamps every node with providerID `k3s://<hostname>`, so no AWS controller
+# ever resolves it to an availability zone and the standard label is simply
+# absent -- measured 2026-10-14: `kubectl get nodes -L topology.kubernetes.io/zone`
+# returned `<no-zone-label>` on all four. Every topologySpreadConstraints in
+# apps/boutique/base uses `topologyKey: topology.kubernetes.io/zone`, so without
+# it the AZ spread is a no-op and scripts/doctor.sh fails its spread check.
+# MY_AZ comes from IMDS placement/availability-zone, which is the same value the
+# scheduler would have derived.
+NODE_FLAGS="--node-name ${NODE_NAME} --node-label boutique.io/role=${ROLE} --node-label boutique.io/az=${MY_AZ} --node-label topology.kubernetes.io/zone=${MY_AZ} ${K3S_EXTRA_FLAGS}"
 JOIN_FLAG=""
 [ -n "$K3S_JOIN_URL" ] && JOIN_FLAG="--server ${K3S_JOIN_URL}"
 
+# `--cluster-init` on the designated leader and on nobody else. Without it k3s
+# falls back to kine (a SQLite file local to that one node), which is neither
+# HA nor etcd: the second server then refuses to join with
+# `failed to bootstrap cluster data: etcd disabled`, the SPEC's "three servers
+# form an etcd quorum" acceptance criterion is unmeetable, and
+# boutique-etcd-snapshot.sh snapshots a datastore that is not etcd.
+# Measured 2026-10-14 on the first boot: /var/lib/rancher/k3s/server held
+# kine.sock and db/state.db with no db/etcd directory at all.
+#
+# Exactly one node may pass it. The other two join through the leader with the
+# token and become etcd members on their own; passing --cluster-init on a node
+# that is joining would ask it to start a second, separate cluster.
+CLUSTER_INIT_FLAG=""
+if [ "$K3S_NODE_ROLE" = "server" ] && [ "$IS_LEADER" -eq 1 ]; then
+  CLUSTER_INIT_FLAG="--cluster-init"
+fi
+[ -n "$CLUSTER_INIT_FLAG" ] && log "this node bootstraps embedded etcd: $CLUSTER_INIT_FLAG"
+
+# `--tls-san` for the instance's PUBLIC address, read from IMDSv2 at boot.
+#
+# k3s puts only 10.43.0.1, the node IPs, 127.0.0.1 and ::1 into the apiserver
+# certificate. The operator reaches that apiserver on port 6443 through the
+# instance's public address (boutique-node-api opens 6443/tcp to var.admin_cidr
+# and nothing else, and there is no NAT/VPC route from the workstation), so
+# without this SAN every remote kubectl fails with:
+#   x509: certificate is valid for 10.43.0.1, 10.90.x.x, 127.0.0.1, ::1,
+#         not 100.61.37.125
+# -- measured 2026-10-14 on the first boot of this cluster.
+#
+# Read here rather than set from Terraform because the address is only assigned
+# at RunInstances time and is not in the plan. IMDSv2 only: the PUT token hop is
+# one hop, and http_put_response_hop_limit=1 in the launch template means this
+# shell can reach 169.254.169.254 and a pod on the node cannot.
+TLS_SAN_FLAG=""
 if [ "$K3S_NODE_ROLE" = "server" ]; then
-  K3S_EXEC_COMMAND="server ${NODE_FLAGS} ${JOIN_FLAG}"
+  PUBLIC_IP="$(imds_public_ipv4 || true)"
+  if [ -n "$PUBLIC_IP" ]; then
+    TLS_SAN_FLAG="--tls-san ${PUBLIC_IP}"
+    log "apiserver public SAN = $PUBLIC_IP"
+  else
+    log "WARN no public IPv4 in IMDS; remote kubectl will fail TLS verification against this node"
+  fi
+fi
+
+if [ "$K3S_NODE_ROLE" = "server" ]; then
+  K3S_EXEC_COMMAND="server ${NODE_FLAGS} ${CLUSTER_INIT_FLAG} ${TLS_SAN_FLAG} ${JOIN_FLAG}"
   K3S_UNIT=k3s.service
   K3S_ENV_FILE=/etc/systemd/system/k3s.service.env
 else

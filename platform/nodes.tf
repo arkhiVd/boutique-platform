@@ -95,6 +95,13 @@ locals {
   # apps/boutique/ is CPU-utilisation based and has no second metrics source.
   k3s_extra_flags = "--disable traefik --disable servicelb"
 
+  # The agent gets NONE of those flags. `--disable` and `--servicelb` are
+  # server-only options; passing them to `k3s agent` is rejected outright
+  # (`Incorrect Usage: flag provided but not defined: -disable`) and the agent
+  # crash-loops forever. Measured on 2026-10-14: the worker had 425 restarts
+  # because bootstrap_conf_worker reused k3s_extra_flags above.
+  k3s_extra_flags_worker = ""
+
   # A plain String, not a secret: the private address of the leader node, which
   # the followers read at boot to know what to join. Keeping it in SSM instead of
   # baking a join URL into each node's user_data is what makes a leader
@@ -140,7 +147,7 @@ locals {
     "K3S_VERSION='${local.k3s_version}'",
     "K3S_NODE_ROLE='worker'",
     "K3S_LEADER_AZ='${local.leader_az}'",
-    "K3S_EXTRA_FLAGS='${local.k3s_extra_flags}'",
+    "K3S_EXTRA_FLAGS='${local.k3s_extra_flags_worker}'",
     "K3S_TOKEN_PARAMETER='${local.k3s_token_parameter_name}'",
     "K3S_LEADER_IP_PARAMETER='${local.k3s_leader_ip_parameter_name}'",
     "K3S_SNAPSHOT_BUCKET='${local.etcd_snapshot_bucket_name}'",
@@ -399,10 +406,13 @@ data "aws_ssm_parameter" "amazon_linux_2023" {
 # acceptance criterion for it -- `aws ec2 describe-instances` showing
 # `KeyName: null` -- is true precisely because this attribute is absent.
 #
-# A user_data change updates the template in place and creates a new default
-# version; it does NOT replace a running instance, because EC2 reads the template
-# at RunInstances time. Editing the bootstrap script is therefore a documented
-# `terraform apply -replace` decision (platform/README.md), not a surprise.
+# A user_data change updates the template in place as a NEW VERSION that is not
+# promoted to default, and it does NOT replace a running instance, because EC2
+# reads the template at RunInstances time. Editing the bootstrap script is
+# therefore a documented `terraform apply -replace` decision (platform/README.md),
+# not a surprise -- and the instances below pin `version = "$Latest"` so that
+# replace actually boots the edit. Measured 2026-10-14: server template
+# LatestVersionNumber=3 / DefaultVersionNumber=1.
 # ---------------------------------------------------------------------------
 resource "aws_launch_template" "k3s_server" {
   name_prefix   = "boutique-k3s-server-"
@@ -588,8 +598,15 @@ resource "aws_instance" "k3s_server" {
   subnet_id     = aws_subnet.boutique[each.value].id
 
   launch_template {
-    id      = aws_launch_template.k3s_server.id
-    version = "$Default"
+    id = aws_launch_template.k3s_server.id
+    # $Latest, not $Default. Measured 2026-10-14: the server template had
+    # LatestVersionNumber=3 with DefaultVersionNumber=1, because
+    # CreateLaunchTemplateVersion never promotes the new version to default.
+    # EC2 resolves $Default at RunInstances time, so a -replace'd node launched
+    # the ORIGINAL user_data (464 lines, no --cluster-init) even though the
+    # template held the fixed one (v3). $Latest is the version that actually
+    # contains the edit being bootstrapped.
+    version = "$Latest"
   }
   iam_instance_profile = aws_iam_instance_profile.boutique_node.name
 
@@ -677,8 +694,10 @@ resource "aws_instance" "k3s_worker" {
   subnet_id     = aws_subnet.boutique[local.worker_az].id
 
   launch_template {
-    id      = aws_launch_template.k3s_worker.id
-    version = "$Default"
+    id = aws_launch_template.k3s_worker.id
+    # $Latest: see the note on the server block -- $Default stayed at version 1
+    # across four template revisions and silently served stale bootstrap code.
+    version = "$Latest"
   }
   iam_instance_profile = aws_iam_instance_profile.boutique_node.name
 

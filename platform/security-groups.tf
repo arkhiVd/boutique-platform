@@ -182,6 +182,30 @@ resource "aws_security_group_rule" "node_internal_ingress_kube_api" {
 # 10250), so there is no rule to write and no port to accidentally re-open.
 # Phase 3's k3s install keeps it that way; nothing in this repo enables it.
 
+# Everything to the peers, and nothing else outside the allow-list below.
+#
+# The ingress rules above are enumerated on purpose; egress to the peers is not,
+# because enumerating it is what stopped the cluster from forming at all. The
+# three node security groups ship egress of DNS (53) and HTTPS (443) only, so
+# the follower could reach SSM and GitHub but not the leader's apiserver: k3s
+# failed with `Get "https://10.90.12.149:6443/cacerts": context deadline
+# exceeded`, 483 restarts deep, while the matching INGRESS rule for 6443 was
+# present and correct. A handshake needs both halves. Measured 2026-10-14.
+#
+# Scoped to this group rather than 10.90.0.0/16 so "node to node" stays exactly
+# what the group's name says: the ALB, the subnets and any other instance are
+# unaffected, and the external egress allow-list below still governs everything
+# leaving the nodes.
+resource "aws_security_group_rule" "node_internal_egress_self" {
+  type                     = "egress"
+  description              = "node to node without a port allow-list: apiserver, etcd peer, flannel VXLAN, kubelet, and whatever the next phase adds"
+  from_port                = 0
+  to_port                  = 0
+  protocol                 = "-1"
+  source_security_group_id = aws_security_group.boutique_node_internal.id
+  security_group_id        = aws_security_group.boutique_node_internal.id
+}
+
 resource "aws_security_group_rule" "node_internal_egress_https" {
   type              = "egress"
   description       = "outbound TLS to package mirrors, ECR and S3"
