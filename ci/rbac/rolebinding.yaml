@@ -1,0 +1,26 @@
+# ===========================================================================
+# Binds the controller's ServiceAccount to its Role, namespace `ci`.
+#
+# A RoleBinding, not a ClusterRoleBinding, because the Role is namespaced and
+# the controller has no business outside `ci`: it schedules agent pods where
+# they run (the Kubernetes plugin's agent namespace is set to `ci` in
+# ci/jenkins/values.yaml) and watches the ConfigMaps of its own JCasC.
+# ===========================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins
+  namespace: ci
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/component: jenkins-controller
+    boutique.io/rbac-tier: platform
+subjects:
+  - kind: ServiceAccount
+    name: jenkins
+    namespace: ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins

@@ -1,0 +1,167 @@
+# ===========================================================================
+# ci backup, Phase 7 -- nightly tar of jenkins-home to S3.
+#
+# WHAT THIS BACKS UP
+# ---------------------------------------------------------------------------
+# The controller's PVC (the chart renders it as a standalone PersistentVolume
+# Claim named `ci`, 10Gi on local-path). Everything Jenkins needs to come back:
+# job history, the plugin set, and the local build database. JCasC configuration
+# is NOT in this archive because it is not in the PVC either -- it is rendered
+# from ci/jenkins/values.yaml on every install, which is what makes the
+# controller disposable and the archive a recovery aid rather than a dependency.
+#
+# WHY AN AFFINITY, NOT A SCHEDULER TRICK
+# ---------------------------------------------------------------------------
+# local-path is ReadWriteOnce and all four nodes are schedulable with no
+# control-plane taint, so nothing stops this pod from landing on a node that is
+# not the controller's -- where the volume is already attached to another node
+# and the mount hangs. `requiredDuringSchedulingIgnoredDuringExecution` on the
+# controller's own labels is the only statement of that constraint that the
+# scheduler will honour.
+#
+# WHAT IS NOT PROVEN
+# ---------------------------------------------------------------------------
+# The bucket does not exist: creating it is Terraform, which this phase does not
+# apply (see TASKS.md). Until it does, this CronJob creates a pod that fails on
+# its first `aws s3 cp` with NoSuchBucket, and the Secret it reads
+# (`jenkins-backup-credentials`) must exist or the pod never starts at all.
+# That is the correct failure order -- credentials first, storage second, and
+# nothing that silently no-ops.
+# ===========================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jenkins-backup
+  namespace: ci
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/component: jenkins-backup
+    boutique.io/rbac-tier: platform
+spec:
+  # 03:17 UTC, not 03:00: the schedule shares a node with a controller whose JVM
+  # is already the largest single resident on it, and a fixed minute away from
+  # the hour is also away from whatever else the platform runs on the hour.
+  schedule: "17 3 * * *"
+  timeZone: "Etc/UTC"
+  # One at a time: two overlapping tars of the same volume is how a backup job
+  # competes with a Jenkins restart for the same disk.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: boutique-platform
+            app.kubernetes.io/name: jenkins
+            app.kubernetes.io/component: jenkins-backup
+        spec:
+          restartPolicy: Never
+          # The SA exists only so the pod has a name that is not `default`
+          # (policy/security.rego rule 10). With the flag below there is no
+          # token in it: this job reads a PVC and talks to S3, and never to the
+          # Kubernetes API.
+          serviceAccountName: jenkins-agent
+          automountServiceAccountToken: false
+          # Same node as the controller, or the RWO volume cannot mount.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/component: jenkins-controller
+                      app.kubernetes.io/instance: ci
+                  topologyKey: kubernetes.io/hostname
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: backup
+              image: amazon/aws-cli:2.38.0
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ec"]
+              # One shell, one archive, one upload, one prune. The whole script
+              # is here rather than in a ConfigMap because a backup that depends
+              # on a second object being present is a backup that fails for a
+              # reason unrelated to the data.
+              #
+              # Pruning compares `aws s3 ls`'s first column (YYYY-MM-DD) against
+              # a cutoff date as a STRING in awk: both sides are non-numeric, so
+              # awk compares lexicographically, and ISO dates sort correctly
+              # that way. Keeping the last 14 days of a nightly run is 14
+              # archives of at most 10Gi -- a 140Gi ceiling on a bucket whose
+              # lifecycle policy is TASKS.md's to write.
+              args:
+                - |
+                  STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  ARCHIVE="/tmp/jenkins-home-${STAMP}.tar.gz"
+                  tar -C /var/jenkins_home -czf "${ARCHIVE}" .
+                  aws --no-cli-pager s3 cp "${ARCHIVE}" "s3://${S3_BUCKET}/jenkins-home/${STAMP}.tar.gz"
+                  rm -f "${ARCHIVE}"
+                  CUTOFF="$(date -u -d "-${KEEP_DAYS} days" +%Y-%m-%d)"
+                  aws --no-cli-pager s3 ls "s3://${S3_BUCKET}/jenkins-home/" \
+                    | awk -v cutoff="${CUTOFF}" '$1 < cutoff { print $4 }' \
+                    | while IFS= read -r KEY; do
+                        [ -n "${KEY}" ] || continue
+                        aws --no-cli-pager s3 rm "s3://${S3_BUCKET}/${KEY}"
+                      done
+              env:
+                # Not a secret: the bucket name. Its existence is TASKS.md's
+                # finding -- see the header.
+                - name: S3_BUCKET
+                  value: "boutique-platform-jenkins-backup"
+                - name: KEEP_DAYS
+                  value: "14"
+                - name: AWS_DEFAULT_REGION
+                  value: "eu-west-1"
+                # Fail-closed: a missing Secret key means the pod never starts
+                # (FailedMount), which is visible, rather than an upload that
+                # fails at 03:17 with an auth error nobody reads until restore
+                # day.
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: jenkins-backup-credentials
+                      key: aws-access-key-id
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: jenkins-backup-credentials
+                      key: aws-secret-access-key
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "256Mi"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                # Read-only: a backup job has no reason to be able to write the
+                # volume it is backing up, and a bug that did would corrupt the
+                # very thing the archive is meant to restore.
+                - name: jenkins-home
+                  mountPath: /var/jenkins_home
+                  readOnly: true
+                # tar and the AWS CLI both need a writable scratch directory
+                # with readOnlyRootFilesystem on.
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: jenkins-home
+              persistentVolumeClaim:
+                claimName: ci
+            - name: tmp
+              emptyDir: {}

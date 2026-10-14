@@ -1,0 +1,46 @@
+# ===========================================================================
+# What a build is allowed to change: the existing `platform-developer`
+# ClusterRole, bound into `boutique` for the agent ServiceAccount.
+#
+# WHY THE EXISTING ROLE
+# ---------------------------------------------------------------------------
+# cluster/rbac/rbac.yaml already defines what a human PR author may do to the
+# application -- deployments, services, pods, configmaps, and `secrets` get only
+# by resource name, with a comment per rule. Defining a second "CI can deploy"
+# role would mean two definitions of the same permission drifting apart, and the
+# second one is the one nobody re-reads. One Role, two subjects: the GitHub team
+# and the pipeline.
+#
+# WHY A ROLEBINDING IN `boutique` AND NOT THE CLUSTERROLEBINDING
+# ---------------------------------------------------------------------------
+# The same ClusterRole is also bound cluster-wide to the `platform:developers`
+# group, which is what makes `kubectl create namespace pr-123` work for a
+# preview environment. Binding the agent at cluster scope would hand every build
+# that right plus every other namespace. The deploy target that exists today is
+# `boutique`, so `boutique` is what this grants, and the ephemeral `pr-<n>`
+# namespace story is recorded in TASKS.md as undecided rather than pre-granted.
+#
+# APPLY ORDER
+# ---------------------------------------------------------------------------
+# Applies to a namespace that Helm never touches: `kubectl apply -f ci/rbac/`
+# before the first pipeline run, not before `helm install`. A pipeline that runs
+# first fails with a 403 from the API server, which is the correct failure --
+# it means the grant was never reviewed.
+# ===========================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-agent-developer
+  namespace: boutique
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/component: jenkins-agent
+    boutique.io/rbac-tier: platform
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-agent
+    namespace: ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-developer
