@@ -16,7 +16,7 @@ Reproducing that here would mean a sidecar per pod, an `istiod`, Envoy proxies, 
 
 The account's node budget is the constraint:
 
-- Total RAM available on the recommended shape (3 × t3.small + 1 × t3.medium) is **10 GiB**
+- Total RAM available on the recommended shape (now 4 × t3.small; originally 3 × t3.small + 1 × t3.medium) is **8 GiB**
   against **~9.5 GiB** of workload requests — already tight before a sidecar is added.
 - Total vCPU is 8.0, which is **the entire quota**.
 

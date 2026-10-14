@@ -1,4 +1,4 @@
-# Node capacity budget — does the platform fit on ONE t3.medium
+# Node capacity budget — does the platform fit on ONE node
 
 **Status: computed 2026-10-09, from the actual renders; recomputed 2026-10-14
 when Phase 11 added the traces layer.** This document records
@@ -32,7 +32,7 @@ explained at the bottom.
 
 | | |
 |---|---|
-| Workload node | **1 × t3.medium** = 4 GiB RAM, 2 vCPU (SPEC.md) |
+| Reference unit | **1 × 4 GiB / 2 vCPU node** — the t3.medium size. Not deployed: this account rejects t3.medium, and the deployed shape is 4 × t3.small. Kept because `--accept-over-commit` is a percentage of it, so the bound stays where it has always been. |
 | Raw schedulable | 4096 MiB / 2000m |
 | kubelet reservations | 355 MiB / 170m (system-reserved + eviction threshold) |
 | **Actually schedulable** | **3741 MiB / 1830m** |
@@ -84,7 +84,7 @@ of the above exists. The Phase 6 work recorded the same finding in
 
 ### The T3 burstable trap, which is worse than the requests number
 
-A t3.medium is **burstable with a 20% baseline** — roughly **400m of sustained
+A t3 is **burstable with a 20% baseline** — roughly **400m of sustained
 CPU**, not 2000m. Everything above the baseline is paid for out of CPU credits
 that do not regenerate while the box is running hot. A node whose requests sum to
 210.4% of 2000m is not just over-committed; it is asking a box that can

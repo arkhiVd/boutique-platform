@@ -209,7 +209,7 @@ undo` plus the traffic weights restored) before anyone is asked for anything.
 The controller is 120m/576Mi of requests. The cost is in the agents: 200m/768Mi
 each, up to eight, i.e. 1600m/6Gi of requests that only exist while a build
 runs — and `idleMinutes: 5` is what bounds how long they linger. The arithmetic
-against the `ci` quota and the t3.medium is `docs/resource-budget.md` §4.
+against the `ci` quota and the node budget is `docs/resource-budget.md` §4.
 
 ## What is unproven
 

@@ -7,54 +7,64 @@
 
 ## ▶ Where we are
 
-**Everything below the approval gates is built, merged to `main`, and nothing is applied.** The
-plan numbers in the "What the three plans say" block were re-run on 2026-10-14 against this
+**Everything below the approval gates is built, merged to `main` — and since 2026-10-14, applied.**
+Both stacks are live in `us-east-1`. The numbers below were re-run on 2026-10-14 against this
 commit, not carried forward from an earlier one.
 
-What is merged and at what stage:
+What is applied and at what stage:
 
 | phase | state | what it means |
 |---|---|---|
 | 0 guardrails | merged, green | SPEC / ROADMAP / TASKS / ADRs / `scripts/check.sh` |
-| 1–2 network, IAM, VPC | merged, plan clean | state bucket, VPC, subnets, security groups — the one-time `bootstrap` apply is Aravind's gate |
-| 3–4 cluster | merged, plan clean | 4 EC2 instances, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill |
-| 5 edge | merged, plan clean | ALB + TLS + count-mode Web ACL + Traefik DaemonSet host routing |
-| 6 metrics and logs | merged, green | kube-prometheus-stack, Loki, Fluent Bit, SLOs, golden signals |
-| 7–8 CI/CD | merged, green | Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile |
-| 11 traces | merged, green | Tempo, spanmetrics, recording rules, traces dashboard |
+| 1–2 network, IAM, VPC | **applied** | state bucket, VPC, subnets, security groups; bootstrap's 14 resources are live |
+| 3–4 cluster | **applied** | 4 × t3.small running, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill |
+| 5 edge | **applied** | ALB active and logging to S3, count-mode Web ACL logging to CloudWatch, Traefik targets attached |
+| 6 metrics and logs | merged, green, not deployed | kube-prometheus-stack, Loki, Fluent Bit, SLOs, golden signals |
+| 7–8 CI/CD | merged, green, not deployed | Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile |
+| 11 traces | merged, green, not deployed | Tempo, spanmetrics, recording rules, traces dashboard |
 
-**The gate on `main` reads 136 PASS / 0 FAIL / 0 MISSING** as of the last merge commit. Nothing
-has been applied: no `terraform apply`, no `kubectl apply`, no `helm install` has ever run
-against this account by an agent.
-
-**What the two stacks plan today, re-run on 2026-10-14 against this commit:**
+**The gate reads 136 PASS / 0 FAIL / 0 MISSING** as of commit `98d9542`.
 
 ```
-terraform -chdir=bootstrap plan      Plan: 14 to add, 0 to change, 0 to destroy.
-terraform -chdir=platform  plan      Plan: 89 to add, 0 to change, 0 to destroy.
+terraform -chdir=bootstrap plan      0 resource changes (one output normalises "30" -> "30.0")
+terraform -chdir=platform  plan      No changes. Your infrastructure matches the configuration.
 ```
 
-The platform figure grew through the project and each step was a real plan, not an estimate:
-42 at Phase 2 (network), 58 at Phase 3+4 (cluster), 89 at Phase 5 (edge). Reproduce either with
-`terraform -chdir=<root> init -backend=false` and the `.terraform.tfvars.example` copied to the
-gitignored `terraform.tfvars` — the platform stack also needs `-var k3s_token=<hex>` because the
-join token is deliberately never stored in a file.
+Both stacks reach a clean plan; the bootstrap line is an output-only refresh against AWS's
+`limit_amount` formatting, not a resource diff.
 
-**Nothing has cost anything so far: $0.00 applied.** The first billable thing in the repo is
-still Phase 3's instances. Two cost lines land with them that the SPEC's table does not yet
-carry: the CMK at $1.00/month and detailed monitoring at $0.30 per instance per month
-(**+$2.20/month, $3.13 over the 43-day window**) — 69% of the $200 credit becomes 71%.
+**Billing started on 2026-10-14.** The first apply's cost line, recomputed for the shape that
+actually launched:
+
+```
+committed total   $82.56/month   $116.78 over 43 days (guarded)   -> 58% of the $200 credit
+incl. worst case  $164.69/month  $232.94 over 43 days             -> still over the credit
+```
+
+Two cost lines land with the instances that the SPEC's table does not yet carry: the CMK at
+$1.00/month and detailed monitoring at $0.30 per instance per month (**+$2.20/month, $3.13 over
+the 43-day window**).
+
+**The node shape changed under the apply, and the reason is measured, not aesthetic.** The
+spec's 3 × t3.small + 1 × t3.medium cannot launch in this account: `RunInstances` rejects
+t3.medium with `InvalidParameterCombination: The specified instance type is not eligible for
+Free Tier`, and `describe-instance-types --filters free-tier-eligible=true` confirms t3.medium
+and `t2.*` are ineligible while t3.small, t4g.small, `c7i-flex.large` and `m7i-flex.large` are.
+The deployed shape is **four equal t3.small**, which is both launchable and **$15.18/month
+cheaper** than the blocked one.
 
 **The headline number, stated plainly because it is the one that matters:**
-the platform **does not fit** on one t3.medium. `docs/resource-budget.md` holds the arithmetic —
+the platform **does not fit** on one node. `docs/resource-budget.md` holds the arithmetic —
 **3850m / 4688Mi of requests against 1830m / 3741Mi schedulable = 210.4% CPU and 125.3% RAM**, of
 which **2820m is the `boutique` namespace's own request**, not the observability stack (Phase 11
 added Tempo at 250m/512Mi and the collector's 128Mi → 192Mi per replica; before it the numbers
 were 3600m / 4048Mi = 196.7% / 108.2%). The fix is
 architectural: **all four nodes are schedulable**, the k3s servers carry no control-plane taint,
 because with a hard 8-vCPU quota there is no separate worker fleet to pair a control plane with
-(kubeadm control-plane nodes are schedulable by default; EKS taints them). That gives
-**7320m / ~9042Mi**, roughly 50% headroom on both axes.
+(kubeadm control-plane nodes are schedulable by default; EKS taints them). On the deployed
+shape that is **7320m / ~6960Mi schedulable — 53% CPU and 67% RAM**, roughly half the cluster
+free on both axes. The single-node arithmetic stays in the repo deliberately: it is the
+regression bound the gate enforces, not a description of what is deployed.
 
 Measured on the rendered output, not on the source: 13 PodDisruptionBudgets, 13
 topologySpreadConstraints, 13 `seccompProfile: RuntimeDefault`, 13 `runAsNonRoot: true`,
@@ -68,7 +78,7 @@ per-document mode and **54** in combined mode. The control fails; the rewrite pa
 
 | # | Decision | Why it blocks | Cost impact |
 |---|---|---|---|
-| 0 | **Node shape (resolved).** 3 × t3.small servers + 1 × t3.medium, all four schedulable. | Phase 3 | $0 — the shape already fits the 8.0 vCPU quota |
+| 0 | **Node shape (re-resolved by the apply).** Decided as 3 × t3.small servers + 1 × t3.medium; deployed as **4 × t3.small**, all four schedulable, because the account rejects t3.medium at the API. | Phase 3 | $0 — 8 vCPU exactly at quota, and $15.18/mo cheaper than the shape that could not launch |
 | 2 | **ALB or node-IP entry.** The ALB gives the two-layer edge, WAF and access logs; it costs ~$28/mo. | Phase 5 | ~$40 of the window |
 | 3 | **TLS path.** No Route 53 zone and no ACM cert exist, so the default is a self-signed imported cert unless we use `<lb>.ip.sslip.io` + HTTP-01. | Phase 5 | $0 either way |
 
@@ -91,7 +101,7 @@ Critic: `pending` · `pass` · `gap named`
 
 ### Wave B — Cluster
 - `[~]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · built on this branch; blocked on the first cost-bearing apply
-  - Launch templates per node role, 3 servers (one per AZ) + 1 t3.medium, **all four schedulable, none tainted**
+  - Launch templates per node role, 3 servers (one per AZ) + 1 worker, **all four schedulable, none tainted**; the four are `t3.small` (see the apply findings below)
   - Root volumes encrypted gp3 under a CMK this stack owns; **no `key_name`, no port 22, SSM only**
   - The join token is an **ephemeral variable written into a write-only `value_wo` SecureString**: 0 hits in the plan text, the plan JSON and the saved plan file, and the provider nulls the value on read
   - Cloud-init elects the leader by AZ, reads the token and the leader address from SSM with the instance role, hardens the k3s unit, and installs the etcd snapshot timer on the leader
@@ -135,10 +145,13 @@ Critic: `pending` · `pass` · `gap named`
 
 - Account `348032171026` / `us-east-1`, default VPC `vpc-0cf47bfcd22729c1a`
 - Quota: **8.0 vCPU** running on-demand standard instances → 4 × t3-class total
-- `t2.micro` **not** free-tier eligible; `t3.micro` = 1.0 GiB, `t3.small` = 2.0 GiB, `t3.medium` = 4.0 GiB
+- Free-tier eligibility is enforced **by the API, not by the console** (`RunInstances` fails with
+  `InvalidParameterCombination`). Eligible in `us-east-1`: **t3.small**, t4g.small, t3.micro,
+  t4g.micro, t8i.micro, t8i.small, c7i-flex.large, m7i-flex.large. **Not** eligible: **t3.medium**
+  (4.0 GiB), `t2.*`. Sizes: t3.micro 1.0 GiB, t3.small 2.0 GiB, t3.medium 4.0 GiB (unusable)
 - NLB blocked account-wide (`network-load-balancer-capacity-units = 0`); **ALB works**
 - Route 53 zones: 0. ACM certs: 0. NAT gateways: 0. EKS clusters: 0.
-- Cost since account creation: **$0.00 every month**
+- Cost since account creation: **$0.00 until 2026-10-14**, when the first apply started billing
 - Online Boutique `v0.10.7` HEAD released 2026-09-18
 - Verified absent from upstream `v0.10.7` (so ours must add them): PodDisruptionBudget, HPA,
   topology spread, anti-affinity, priority classes, ResourceQuota/LimitRange, deployment
@@ -147,6 +160,66 @@ Critic: `pending` · `pass` · `gap named`
 - Verified absent and **not** to be built: `adServiceFailure`, `recommendationCacheFailure`
   (checked across v0.1.4–v0.10.7), `ml-pipeline/`, Cloud CDN, Argo CD / Config Sync descriptors
 - k3s stable channel resolves to **v1.36.5+k3s1** (`curl -s https://update.k3s.io/v1-release/channels/stable`)
+
+### The first apply — 2026-10-14, live account, three runs to green
+
+The apply is the test harness, and it found four things the plan could not. Each was fixed,
+re-applied, and re-verified rather than reasoned about.
+
+```
+$ terraform -chdir=platform apply   run 1 (partial)
+  aws_instance.k3s_server[us-east-1a]   created   i-0d1515227f91d7ac5
+  aws_instance.k3s_worker               FAILED    InvalidParameterCombination:
+                                                  The specified instance type is not eligible for Free Tier
+  aws_lb.edge                           FAILED    InvalidConfigurationRequest:
+                                                  Access Denied for bucket
+  aws_wafv2_web_acl_logging_configuration.edge  FAILED  WAFInvalidParameterException: ARN isn't valid
+```
+
+**Finding 1 — the account enforces free-tier instance types at the API.** Not a console filter:
+
+```
+$ aws ec2 run-instances --instance-type t3.medium ...
+  InvalidParameterCombination: The specified instance type is not eligible for Free Tier.
+$ aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true \
+      --query 'sort_by(InstanceTypes,&InstanceType)[].InstanceType' --output text
+  t8i.micro  c7i-flex.large  t4g.small  t3.micro  t4g.micro  t3.small  m7i-flex.large  t8i.small
+```
+
+**Finding 2 — ALB access logs support SSE-S3 only.** The bucket was SSE-KMS. AWS documents that
+"the only server-side encryption option that's supported is Amazon S3-managed keys (SSE-S3)" and
+lists an unsupported encryption option as a direct cause of `Access Denied for bucket`.
+
+**Finding 3 — ALB access logs need ACLs enabled.** The same bucket defaulted to
+`BucketOwnerEnforced`, which rejects the `x-amz-acl: bucket-owner-full-control` header the ELB
+log delivery service writes with. Both log buckets are `BucketOwnerPreferred` now, public ACLs
+still blocked by the existing public access block.
+
+**Finding 4 — a WAF log group name must start with `aws-waf-logs-`.** The error ("ARN isn't
+valid") does not say so; the CloudWatch Logs `create-log-group` call does, and the KMS key needed
+a scoped `CloudWatchLogsEncryptsTheWafLogGroup` statement before that call would succeed.
+
+All four are in commit `98d9542` with the measurements in the message. Verification, not a report:
+
+```
+$ aws s3 ls s3://boutique-platform-alb-logs-.../AWSLogs/348032171026/
+2026-10-14 11:14:55         97 ELBAccessLogTestFile          <- ELB wrote its own test object
+
+$ aws wafv2 get-logging-configuration --resource-arn ...:webacl/boutique-platform-edge/...
+  LogDestinationConfigs: [ ...log-group:aws-waf-logs-boutique-platform-edge:*]
+
+$ aws ec2 describe-instances --filters Name=instance-state-name,Values=running
+  i-00c9e8290e8bb8e53  t3.small     i-0ece0618a4e58171d  t3.small
+  i-0d1515227f91d7ac5  t3.small     i-07293ba5b41972420  t3.small
+
+$ terraform -chdir=platform plan   ->  No changes. Your infrastructure matches the configuration.
+$ ./scripts/check.sh              ->  PASS: 136   FAIL: 0   MISSING: 0
+$ checkov -d ./platform           ->  Passed 224, Failed 0, Skipped 8
+```
+
+What this does **not** prove: no pod has ever run on these nodes. k3s itself, the app, and every
+chart are still un-deployed; the four checkov skips added here are named platform constraints, not
+waivers for a component nobody has exercised.
 
 ### Waves B — 2026-10-09, from the plan, the scanners and two stubbed runs
 
@@ -254,15 +327,20 @@ Also verified from the account, not from memory:
 
 | Component | Monthly | Notes |
 |---|---|---|
-| 3 × t3.small servers | $29.95 | 1440 billable h, pooled free hours applied |
-| 1 × t3.medium worker | $30.37 | 730 h, 0 free-tier hours |
+| 4 × t3.small nodes | $45.14 | 2920 billable h, pooled free hours applied — the shape that actually launches |
 | 4 × 16 GiB gp3 | $2.72 | 30 GiB free, CMK instead of the managed key |
 | ALB + ~2 LCU | $28.11 | decision 2 |
 | logs / snapshots / ECR | ≈$6.60 | retained logs have a lifecycle |
-| **Subtotal (the SPEC table)** | **≈$97.74/mo** | **≈$138.26 over the 43 days left (69% of the $200 credit)** |
+| **Subtotal (the SPEC table)** | **≈$82.56/mo** | **≈$116.78 over the 43 days left (58% of the $200 credit)** |
 | 1 × KMS CMK | $1.00 | **a line the SPEC table does not carry** — one key for EBS and the token |
 | detailed monitoring | $1.20 | $0.30 × 4 nodes, **also new** — the t3 sustained-CPU risk is otherwise unobservable |
-| **Total as built** | **≈$99.94/mo** | **≈$141.39 over the window (71% of the $200 credit)** |
+| **Total as built** | **≈$84.76/mo** | **≈$119.83 over the window (60% of the $200 credit)** |
+| …if CPU saturates its 20% baseline | +$82.12 | **worst case ≈$166.88/mo ≈$235.95 over the window — over the $200 credit** |
+
+The shape change from `3 × t3.small + 1 × t3.medium` (the figure every earlier revision of this
+table carried) moved the committed line from **$97.74/mo to $82.56/mo**, because t3.medium could
+not have launched anyway. The worst case is still over the credit; `scripts/cost-estimate.sh`
+prints that warning on every run rather than burying it here.
 
 Teardown at Phase 14 returns the account to $0. `destroy.yml` exists before the ALB exists.
 

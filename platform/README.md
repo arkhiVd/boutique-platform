@@ -197,10 +197,10 @@ for new nodes at that point. The nodes already in the cluster keep running.
 | Node | Type | AZ | Role |
 |---|---|---|---|
 | 3 × `t3.small` | server | `us-east-1a/b/c`, one each | etcd quorum of 3 |
-| 1 × `t3.medium` | worker | `us-east-1c` | the schedulable pool |
+| 1 × `t3.small` | worker | `us-east-1c` | the schedulable pool — `t3.medium` is rejected by this account (`FreeTierEligible=false`), so all four nodes are equal |
 
 **All four are schedulable and none of them is tainted.** The measured platform is
-3850m / 4688Mi of requests against one t3.medium's 1830m / 3741Mi schedulable
+3850m / 4688Mi of requests against a single node's 1830m / 1741Mi schedulable
 (210.4% CPU, 125.3% RAM — `docs/resource-budget.md`), so a tainted control plane
 puts `boutique` Pending forever. k3s labels its server nodes
 `node-role.kubernetes.io/control-plane=true` and taints nothing; EKS taints

@@ -111,7 +111,7 @@ k3s install via cloud-init with `--disable traefik` or kept — decided in the p
 `INSTALL_K3S_EXEC` config, node labels/taints, `scripts/bootstrap-cluster.sh`,
 `scripts/doctor.sh`.
 
-**Dependencies and risks:** **the first cost-bearing apply** (~$90/month for 3 × t3.medium).
+**Dependencies and risks:** **the first cost-bearing apply** ($82.56/month for 4 × t3.small — the shape the account will actually launch).
 The sharp edge is the k3s token and the kubeconfig, which must never land in state or in the
 repo. Cloud-init is the only way to keep the token out of the Terraform state.
 

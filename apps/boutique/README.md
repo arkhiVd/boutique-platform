@@ -95,7 +95,7 @@ and is kept. Evidence is in `observability/opentelemetrycollector.yaml`.
 - **The `OTEL_TRACES_SAMPLER*` variables are inert** for the six instrumented images; they
   hard-code `AlwaysSample()`. The real sampling decision is the collector's `tail_sampling`. Set
   so a successor image picks them up.
-- **The CPU request total (2820m) exceeds one t3.medium's 2000m.** `quota.yaml` carries the
+- **The CPU request total (2820m) exceeds one 2-vCPU node's 1830m.** `quota.yaml` carries the
   arithmetic and the three options. Ties to SPEC.md unresolved question 1.
 - **`SHOPPING_ASSISTANT_SERVICE_ADDR` points at a service that this deployment does not ship.**
   It is an opt-in Kustomize component upstream and needs AlloyDB. Kept for fidelity; the

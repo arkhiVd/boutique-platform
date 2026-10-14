@@ -50,7 +50,7 @@ blockers table rather than marked done.
 
 | # | Was | Now | Consequence |
 |---|---|---|---|
-| Q1 | node shape | **3 × t3.small servers + 1 × t3.medium workload node**, and **all four nodes schedulable** | the only shape that fits; see U1 |
+| Q1 | node shape | **4 × t3.small (3 servers + 1 worker), all four nodes schedulable** | decided as `3 × t3.small + 1 × t3.medium`; the apply measured that t3.medium is not free-tier eligible in this account, so the shape became four equal nodes — see U1 and PROGRESS.md |
 | Q2 | TLS path | `<host>.ip.sslip.io` + cert-manager HTTP-01 | no Route 53 zone exists; gives a real public CA chain |
 | Q3 | ALB | ALB + WAF, then full teardown at Phase 14 | two-layer edge, $28/mo of the budget |
 | Q4 | Jenkins placement | in-cluster, on the schedulable pool | a separate node would be the 5th instance and the 9th vCPU — impossible |

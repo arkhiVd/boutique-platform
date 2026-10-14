@@ -89,7 +89,7 @@ kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 supposed to prove is not currently true.** Written out plainly:
 
 - `apps/boutique/` schedules every workload onto nodes that carry the `boutique` namespace
-  toleration. In the SPEC's recommended shape there is exactly **one** such node (a t3.medium).
+  toleration. In the SPEC's recommended shape there is no such node at all — every one of the four `t3.small` nodes is schedulable, which is precisely why the Phase 6 drain test has somewhere to drain to.
   Draining it leaves nowhere for any pod to go, so every pod in the namespace stops and the app is
   down for the duration of the drain.
 - The PDBs change *what a drain can take*, not *where it goes*. `maxUnavailable: 1` on a

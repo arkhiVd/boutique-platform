@@ -103,7 +103,7 @@ Gathered before any design decision, from the account itself (`348032171026`, `u
                  │   k3s server b (t3.small) ─┼─► etcd quorum of 3, one per AZ (HA)   │
                  │   k3s server c (t3.small) ─┘                                        │
                  │                                                                   │
-                 │   k3s agent   (t3.medium)                                          │
+                 │   k3s agent   (t3.small)                                          │
                  │                                                                   │
                  │   ALL FOUR NODES ARE SCHEDULABLE — see "Scheduling model" below   │
                  │        │  Traefik (in-cluster L7, Host-based routing)             │
@@ -144,7 +144,8 @@ managed-service pattern. Measuring the real workload destroyed that layout:
 | OTel collector | 200m | 384Mi |
 | **total** | **3850m** | **4688Mi** |
 
-Against a single t3.medium's schedulable **1830m / 3741Mi**, that is **210.4% CPU and 125.3%
+Against a single 4 GiB node's schedulable **1830m / 3741Mi** — the gate's reference unit, not
+the deployed shape — that is **210.4% CPU and 125.3%
 RAM** (recomputed 2026-10-14 after Phase 11 added Tempo; before it the same table read
 3600m / 4048Mi = 196.7% / 108.2% — the arithmetic method is unchanged and is in
 `docs/resource-budget.md`). On the original layout, `boutique` would sit Pending forever and the
@@ -219,13 +220,16 @@ Budget: the remaining Free-plan window (43 days) must stay inside the $200 credi
 
 | Design line | Monthly | Remaining window (≈1.42 mo) |
 |---|---|---|
-| 3 × `t3.small` k3s servers (1440 billable h × $0.0208) | $29.95 | $42.64 |
-| 1 × `t3.medium` workload node (730 h × $0.0416) | $30.37 | $43.23 |
+| 4 × `t3.small` nodes, 3 servers + 1 worker (2920 h × $0.0208, 750 pooled free) | $45.14 | $64.25 |
 | 4 × 16 GiB `gp3` (64 − 30 free) | $2.72 | $3.88 |
 | ALB + ~2 LCU | $28.11 | $40.00 |
 | Logs / snapshots / egress | $6.60 | $9.40 |
-| **Total** | **≈$97.74** | **≈$138** (69% of the $200 credit) |
-| Without the ALB | ≈$69.63 | ≈$99 (50%) |
+| **Total** | **≈$82.56** | **≈$117** (58% of the $200 credit) |
+| Without the ALB | ≈$54.45 | ≈$77 (39%) |
+
+Recomputed 2026-10-14 for the shape that actually launched. The original table read
+`3 × t3.small + 1 × t3.medium` = $97.74; that shape cannot launch here (see decision 1), and
+four equal `t3.small` is $15.18/month cheaper as well as legal.
 
 Two hard requirements follow, both enforced by CI:
 1. A `destroy.yml` must be able to take the whole platform down to $0, and its dry-run must be
@@ -302,7 +306,7 @@ These need a decision before the phase that depends on them. They are recorded, 
 
 | # | Decision | Why it blocks | Cost impact |
 |---|---|---|---|
-| 1 | **Node shape.** The workload requests sum to ~9.5 GiB; 3 × t3.small gives 6 GiB, 3 × t3.medium gives 12 GiB but 0 free-tier hours. The recommended shape (`scripts/cost-estimate.sh`) is **3 × t3.small as k3s servers + 1 × t3.medium as the workload node** = 10 GiB, 8 vCPU (exactly at quota), ~$138 for the window. | Phase 3 provisions nodes | $54 (3×small, no ALB, does not fit) → $180 (3×medium + ALB, 90% of credit) |
+| 1 | **Node shape.** The workload requests sum to ~9.5 GiB; 3 × t3.small gives 6 GiB, 3 × t3.medium gives 12 GiB but 0 free-tier hours. The recommended shape (`scripts/cost-estimate.sh`) was **3 × t3.small as k3s servers + 1 × t3.medium as the workload node** = 10 GiB, 8 vCPU (exactly at quota), ~$138 for the window. **Measured outcome 2026-10-14: t3.medium cannot launch in this account — `RunInstances` rejects it with `InvalidParameterCombination: The specified instance type is not eligible for Free Tier`. The deployed shape is 4 × t3.small** = 8 GiB, 8 vCPU (exactly at quota), $117 for the window. | Phase 3 provisions nodes | $54 (3×small, no ALB, does not fit) → $180 (3×medium + ALB, 90% of credit) |
 | 2 | **TLS path.** With no Route 53 zone and no ACM cert, options are (a) ALB DNS + a self-signed imported cert, (b) `<hash>.ip.sslip.io` + cert-manager HTTP-01 over a wildcard-DNS name, (c) no TLS and HTTP only. (b) gives a real public CA chain and is the recommended default. | Phase 5 | $0 either way |
 | 3 | **ALB or no ALB.** Dropping the ALB saves ~$28/mo and leaves a node-IP entry with no WAF and no access logs. Keeps the platform further inside budget but loses the two-layer edge story. | Phase 5 | ~$40 of the window |
 | 4 | **Jenkins placement.** In-cluster is the production pattern (dynamic agents, ephemeral, no SSH) and is the default; it rides on the medium workload node. A separate node is impossible — it would be the 5th instance and the 9th vCPU, both over quota. | Phase 7 | none (resolves itself) |
