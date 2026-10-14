@@ -1,0 +1,148 @@
+# Tempo alert rules
+# -----------------------------------------------------------------------------
+# A bare Prometheus rule file; observability/tempo/templates/prometheusrules.yaml
+# wraps it into a PrometheusRule at render time, adding the release label the
+# Prometheus Operator's selector requires.
+#
+# Metric names are verified from grafana/tempo@v2.9.0 source, not from memory:
+#
+#   tempo_request_duration_seconds   histogram {method, route, status_code, ws}
+#     -- the vendored dskit server metrics, namespace "tempo":
+#        vendor/github.com/grafana/dskit/server/metrics.go, RequestDuration:
+#        NewHistogramVec({Name: "request_duration_seconds"},
+#        []string{"method", "route", "status_code", "ws"})
+#        with cfg.MetricsNamespace = "tempo" (cmd/tempo/app/modules.go)
+#
+#   kubelet_volume_stats_{used,capacity}_bytes {persistentvolumeclaim}
+#     -- kubelet's own /metrics, scraped by kube-prometheus-stack's kubelet
+#        job. The claim is the StatefulSet's volumeClaimTemplate `storage`,
+#        which becomes PVC storage-tempo-0 for a release named `tempo`.
+#
+# TracesSpanmetricsMissing is deliberately NOT in this file. It alerts on the
+# spanmetrics CONNECTOR's series (`traces_spanmetrics_calls_total`), which is
+# the OTel Collector's output, not Tempo's — it lives with the rest of the
+# spanmetrics rules in observability/rules/spanmetrics.yaml. One definition,
+# one alert in Alertmanager, and the file that owns the metric owns the alert.
+
+groups:
+  - name: tempo.alerts
+    interval: 30s
+
+    rules:
+      ## -------------------------------------------------------------------
+      ## TempoRequestErrors — the write AND read path, because both surface
+      ## here.
+      ##
+      ## A 5xx on the distributor route (`/distributor.Holder/Push` over gRPC
+      ## is not in this histogram — this is the HTTP surface: /api/traces,
+      ## /api/search, /ready) means either "traces are being refused" or
+      ## "traces are stored but not readable". Both are tickets on this
+      ## platform: neither is a user-visible application outage, and neither has
+      ## an action beyond "read docs/runbooks/traces.md".
+      ##
+      ## Ratio, not raw count: 2 failures of 2 and 2 of 40,000 are both "2",
+      ## and a raw counter pages on both.
+      ## -------------------------------------------------------------------
+      - alert: TempoRequestErrors
+        annotations:
+          summary: "Tempo is returning 5xx on {{ $labels.route }}"
+          description: >-
+            {{ $value | humanizePercentage }} of requests to Tempo route
+            {{ $labels.route }} returned 5xx over the last 10 minutes. On the
+            query routes (/api/traces, /api/search) this means traces are
+            stored but not readable — usually a compactor or querier problem,
+            and the first stop is docs/runbooks/traces.md ("a trace that stops
+            appearing"). A failure on /ready means the ingester ring is not
+            healthy and nothing is being accepted at all.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks/traces.md
+        expr: |
+          sum by (route) (
+            rate(tempo_request_duration_seconds_count{status_code=~"5.."}[10m])
+          )
+          /
+          sum by (route) (
+            rate(tempo_request_duration_seconds_count[10m])
+          )
+          > 0.05
+        for: 10m
+        labels:
+          severity: ticket
+          platform.boutique/component: traces
+          scope: platform
+
+      ## -------------------------------------------------------------------
+      ## TempoRequestLatency — the read path is what an engineer waits on.
+      ##
+      ## p99 across every route, 2s threshold. The runbook promises a 30-second
+      ## answer to "find the trace for this checkout"; a query frontend whose
+      ## p99 is 2s makes a multi-query investigation miss that window. 2s is
+      ## also comfortably above the query_frontend.search.duration_slo of 5s in
+      ## observability/tempo/values.yaml — this alert is about the tail, not
+      ## about a search that is already over its own SLO.
+      ##
+      ## `ws` (websocket flag) is aggregated away by `sum by (route, le)`: it is
+      ## a scrape-identity label here, not a dimension anyone routes on.
+      ## -------------------------------------------------------------------
+      - alert: TempoRequestLatency
+        annotations:
+          summary: "Tempo query latency is {{ $value }}s on route {{ $labels.route }}"
+          description: >-
+            p99 request latency for Tempo route {{ $labels.route }} is
+            {{ $value }} seconds over the last 15 minutes. The trace-read path
+            is what an on-call engineer waits on; docs/runbooks/traces.md
+            promises a 30-second answer to "find the failing checkout", and a
+            queued query frontend makes that promise false. Check the querier's
+            max_concurrent_queries (2, matching the node's vCPU) and whether a
+            dashboard is holding a wide TraceQL search open.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks/traces.md
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (route, le) (
+              rate(tempo_request_duration_seconds_bucket[15m])
+            )
+          ) > 2
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: traces
+          scope: platform
+
+      ## -------------------------------------------------------------------
+      ## TempoDiskNearFull — the alert that makes the runbook's third scenario
+      ## ("Tempo's disk filling up") an event and not a surprise.
+      ##
+      ## Local storage on a 10Gi gp3 claim means a full disk is not a
+      ## performance problem, it is a write-refusal: the distributor starts
+      ## failing pushes and every trace in flight is lost. 85% is one hour of
+      ## investigation room at the measured ingest rate; retention (24h,
+      ## enforced by the compactor) is the lever, and raising it is a values
+      ## change, not an emergency.
+      ##
+      ## `storage-tempo-` matches the StatefulSet's volumeClaimTemplate name
+      ## `storage` + the pod ordinal, for any release name.
+      ## -------------------------------------------------------------------
+      - alert: TempoDiskNearFull
+        annotations:
+          summary: "Tempo's trace volume is {{ $value | humanizePercentage }} full"
+          description: >-
+            The PVC behind Tempo's local trace store is
+            {{ $value | humanizePercentage }} full. Tempo's backend is
+            filesystem, so when this reaches 100% the distributor refuses
+            writes and the trace path stops entirely — the symptom is an empty
+            service map, not an error on a dashboard. The levers, in order:
+            lower compaction.block_retention (currently 24h in
+            observability/tempo/values.yaml), then expand the PVC.
+            docs/runbooks/traces.md ("Tempo's disk filling up") has the
+            commands.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks/traces.md
+        expr: |
+          kubelet_volume_stats_used_bytes{persistentvolumeclaim=~"storage-tempo-.*"}
+          /
+          kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"storage-tempo-.*"}
+          > 0.85
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: traces
+          platform.boutique/signal: capacity
