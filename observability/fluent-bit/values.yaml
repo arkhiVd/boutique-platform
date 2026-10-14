@@ -467,11 +467,46 @@ fluent-bit:
   ## Mount the parser ConfigMap as its own volume. The chart's own config ConfigMap
   #  is mounted at /fluent-bit/etc/conf and holds fluent-bit.conf plus the chart's
   #  default custom_parsers.conf; the Boutique parsers go beside it, not inside it.
+  ## THE HOST'S /var/log, AND WHY THE INPUT IS BROKEN WITHOUT IT
+  ## ---------------------------------------------------------------------------
+  ## This is the value that makes the pipeline work at all, and it is the one
+  ## thing `daemonSetVolumes` cannot be left to a default for: this chart ships
+  ## no host log volume of any kind. Verified by rendering the chart with
+  ## `daemonSetVolumes` unset -- the DaemonSet carries only the `config` ConfigMap
+  ## -- so an unset list gives you a Fluent Bit that is Running, healthy, and
+  ## tailing a directory that does not exist inside its own container.
+  ##
+  ## Measured 2026-10-14: Loki's own counters said
+  ##   loki_distributor_bytes_received_total 0
+  ##   loki_ingester_chunks_created_total     0
+  ## and `/loki/api/v1/labels` returned no streams, on a DaemonSet that was 4/4
+  ## Running with a configured output
+  ## (`output:loki:loki.0 configured, hostname=loki.observability.svc...:3100`,
+  ## `worker #0 started`). Nothing was wrong except that the input read
+  ## /var/log/containers/*.log from the CONTAINER's empty filesystem.
+  ##
+  ## `daemonSetVolumes` REPLACES the chart's list rather than extending it, which
+  ## is the other half of how this got lost: adding the parsers ConfigMap below
+  ## also silently dropped nothing else, because there was nothing else to drop.
+  ##
+  ## The WHOLE of /var/log is mounted, not /var/log/containers, because the files
+  ## in /var/log/containers are SYMLINKS into /var/log/pods/<uid>/<container>/:
+  ## mounting only the containers directory leaves every one of them dangling
+  ## inside the pod, which is the failure mode where Fluent Bit starts, finds no
+  ## files, and reports success. readOnly because writing to the node's log
+  ## directory from a collector is never the intent.
   daemonSetVolumes:
+    - name: varlog
+      hostPath:
+        path: /var/log
+        type: Directory
     - name: boutique-parsers
       configMap:
         name: fluent-bit-boutique-parsers
   daemonSetVolumeMounts:
+    - name: varlog
+      mountPath: /var/log
+      readOnly: true
     - name: boutique-parsers
       mountPath: /fluent-bit/etc/parsers
       readOnly: true

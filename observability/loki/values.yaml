@@ -181,13 +181,42 @@ loki:
     ## The compactor is what makes retention_period real
     ## -----------------------------------------------------------------------
     compactor:
-      enabled: true
-      ## 10 minutes. At the measured log volume a compaction cycle takes seconds;
-      ## 10m leaves margin and stops the compactor from competing with the ingest
-      ## path for CPU on a 2 vCPU box.
-      interval: 10m
+      ## THERE IS NO `enabled:` KEY, AND THE ABSENCE IS THE POINT. The chart
+      ## passes this whole block through verbatim into Loki's own
+      ## `compactor` section (values.yaml line 325-328 of the vendored chart):
+      ## `{{- with .Values.loki.compactor }} compactor: {{ ... }} {{- end }}`.
+      ## What it lands in is the Go type `compactor.Config`, which has no
+      ## `enabled` field at all -- the presence of the section is what turns the
+      ## compactor on. This block originally said `enabled: true` and `interval:
+      ## 10m`, and Loki refused to start with:
+      #
+      #   failed parsing config: /etc/loki/config/config.yaml: yaml: unmarshal
+      #   errors:
+      #     line 20: field enabled not found in type compactor.Config
+      #     line 21: field interval not found in type compactor.Config
+      #
+      # which is a pod that is 1/2 Running and Error with 6 restarts, and a
+      # reason that names a YAML line rather than a value. The interval key is
+      # `compaction_interval`, which is the other half of the same mistake.
+      compaction_interval: 10m
       ## Retention deletion runs in the compactor and needs the delay flag, which
       ## is what "the chunk is only deleted once nothing is reading it" means.
+      ##
+      ## `delete_request_store: filesystem` is not a preference, it is a
+      ## precondition. `retention_enabled: true` without a configured store is a
+      ## startup failure, and the message is specific:
+      #
+      #   CONFIG ERROR: invalid compactor config:
+      #     compactor.delete-request-store should be configured when retention
+      #     is enabled
+      #
+      # It is `filesystem` because that is the chunk store chosen above and the
+      # two have to agree: the compactor issues deletes through the same storage
+      # backend it compacts from. (What this store is for: the /loki/api/v1/delete
+      # requests a stream deletion, and the retention flag is what makes those
+      # requests an actual deletion rather than a recorded intention. Without a
+      # store, the compactor has nowhere to learn that anything was asked.)
+      delete_request_store: filesystem
       retention_enabled: true
       retention_delete_delay: 2h
       retention_delete_worker_count: 50

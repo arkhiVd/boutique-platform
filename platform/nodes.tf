@@ -461,12 +461,30 @@ resource "aws_launch_template" "k3s_server" {
 
   metadata_options {
     http_endpoint = "enabled"
-    # IMDSv2 only, not "optional". With http_tokens = "required", a token-less
-    # request never gets an answer; and hop limit 1 means a pod cannot reach the
-    # metadata endpoint at all, because a container's network namespace is one hop
-    # further out than the instance itself.
+    # IMDSv2 only, not "optional": with http_tokens = "required", a token-less
+    # request never gets an answer.
+    #
+    # Hop limit 2, not 1, and the reason is the EBS CSI driver. A container's
+    # network namespace is one hop further out than the instance, so a response
+    # with TTL 1 expires before it reaches the pod. The driver reads the node
+    # instance profile for credentials and IMDS for region and availability
+    # zone, so with hop limit 1 it fails at startup with three errors that look
+    # unrelated and are one fault:
+    #
+    #   "Retrieving IMDS metadata failed" err="... context deadline exceeded"
+    #   "Retrieving Kubernetes metadata failed" err="could not retrieve region
+    #    from topology label"
+    #   "Failed to initialize metadata when it is required" err="all specified
+    #    --metadata-sources '[imds kubernetes]' are unavailable"
+    #
+    # Measured on all four nodes on 2026-10-14, after the first install of
+    # cluster/ebs-csi left every node plugin in CrashLoopBackOff. Hop limit 2 is
+    # the same setting EKS uses by default, and it is not a downgrade: IMDSv2
+    # is still required, so an off-instance caller still cannot mint a token,
+    # and hop limit 2 still does not make the endpoint reachable from outside
+    # the instance. What it buys is that a pod on the node can.
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
     instance_metadata_tags      = "disabled"
   }
 
@@ -544,9 +562,14 @@ resource "aws_launch_template" "k3s_worker" {
   }
 
   metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 2 for the same reason the launch template says so at length:
+    # hop 1 is IMDSv2-only AND pod-invisible, which stops the EBS CSI driver
+    # from reaching the instance profile it authenticates with. Repeated here
+    # rather than inherited because RunInstances reads this block, not the
+    # template's, when both are present.
+    http_put_response_hop_limit = 2
     instance_metadata_tags      = "disabled"
   }
 
@@ -621,16 +644,21 @@ resource "aws_instance" "k3s_server" {
   #   monitoring          1-minute metrics: the SPEC's U2 t3-credit risk is
   #                       sustained CPU, and this is how it is observed
   #   ebs_optimized       the t3 default, asserted
-  #   metadata_options    IMDSv2 only, hop limit 1, no instance metadata tags
+  #   metadata_options    IMDSv2 only, hop limit 2, no instance metadata tags
   # `monitoring` is a bool here, not a block -- the launch template's nested form
   # does not match the resource's, which is one of the small sharp edges of
   # putting configuration in both places.
   monitoring = true
 
   metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 2 for the same reason the launch template says so at length:
+    # hop 1 is IMDSv2-only AND pod-invisible, which stops the EBS CSI driver
+    # from reaching the instance profile it authenticates with. Repeated here
+    # rather than inherited because RunInstances reads this block, not the
+    # template's, when both are present.
+    http_put_response_hop_limit = 2
     instance_metadata_tags      = "disabled"
   }
 
@@ -719,16 +747,21 @@ resource "aws_instance" "k3s_worker" {
   #   monitoring          1-minute metrics: the SPEC's U2 t3-credit risk is
   #                       sustained CPU, and this is how it is observed
   #   ebs_optimized       the t3 default, asserted
-  #   metadata_options    IMDSv2 only, hop limit 1, no instance metadata tags
+  #   metadata_options    IMDSv2 only, hop limit 2, no instance metadata tags
   # `monitoring` is a bool here, not a block -- the launch template's nested form
   # does not match the resource's, which is one of the small sharp edges of
   # putting configuration in both places.
   monitoring = true
 
   metadata_options {
-    http_endpoint               = "enabled"
-    http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+    # Hop limit 2 for the same reason the launch template says so at length:
+    # hop 1 is IMDSv2-only AND pod-invisible, which stops the EBS CSI driver
+    # from reaching the instance profile it authenticates with. Repeated here
+    # rather than inherited because RunInstances reads this block, not the
+    # template's, when both are present.
+    http_put_response_hop_limit = 2
     instance_metadata_tags      = "disabled"
   }
 

@@ -71,7 +71,7 @@ groups:
         for: 10m
         labels:
           severity: ticket
-          platform.boutique/component: logs
+          platform_boutique_component: logs
           scope: platform
 
       ## -------------------------------------------------------------------
@@ -107,7 +107,7 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: logs
+          platform_boutique_component: logs
           scope: platform
 
       ## -------------------------------------------------------------------
@@ -150,8 +150,8 @@ groups:
         for: 10m
         labels:
           severity: ticket
-          platform.boutique/component: logs
-          platform.boutique/signal: cardinality
+          platform_boutique_component: logs
+          platform_boutique_signal: cardinality
 
       ## -------------------------------------------------------------------
       ## The companion to the bound above: how many streams actually exist.
@@ -176,5 +176,5 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: logs
-          platform.boutique/signal: cardinality
+          platform_boutique_component: logs
+          platform_boutique_signal: cardinality

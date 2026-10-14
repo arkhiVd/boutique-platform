@@ -4,15 +4,36 @@ metadata:
   name: observability
   labels:
     # Declared here because apps/boutique/observability/opentelemetrycollector.yaml
-    # deploys into it and an unanchored manifest is a broken manifest. The
-    # contents of this namespace are Phase 11's (kube-prometheus-stack, Loki,
-    # Tempo); this declaration only puts the namespace and its Pod Security
-    # Admission baseline in place so the collector's posture is enforced from
-    # the first apply rather than retrofitted.
-    pod-security.kubernetes.io/enforce: restricted
+    # deploys into it and an unanchored manifest is a broken manifest.
+    #
+    # `privileged`, not `restricted`, and not by accident.
+    #
+    # This namespace holds the collector AND everything kube-prometheus-stack,
+    # Loki and Tempo put here. kube-state-metrics, the operator and the
+    # collector all satisfy `restricted`; node-exporter cannot, and no
+    # securityContext edit changes that, because what it needs is not a
+    # permission but a vantage point: it reads /proc, /sys and the host's root
+    # to report on the node, so it sets hostNetwork, hostPID, hostPort 9100 and
+    # three hostPath volumes. Grafana's own `init-chown-data` also fails
+    # `restricted` for running as uid 0 with CHOWN and DAC_OVERRIDE, and that
+    # one IS fixable -- but fixing it buys nothing while node-exporter is
+    # here. Measured 2026-10-14, straight from the API server:
+    #
+    #   pods "kube-prometheus-stack-prometheus-node-exporter-..." is forbidden:
+    #   violates PodSecurity "restricted:latest": host namespaces
+    #   (hostNetwork=true, hostPID=true), hostPort ..., restricted volume types
+    #   (volumes "proc", "sys", "root" use restricted volume type "hostPath")
+    #
+    # `baseline` does not help: it forbids host namespaces, hostPort and
+    # hostPath on exactly the same grounds. The label is therefore the honest
+    # one, and the blast radius is a namespace no user workload is ever
+    # scheduled into. The OTel collector in this namespace still ships the
+    # restricted-satisfying securityContext of its own manifest, so the
+    # posture is enforced where it can be and named where it cannot.
+    pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest
-    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/audit-version: latest
-    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn: privileged
     pod-security.kubernetes.io/warn-version: latest
     kubernetes.io/metadata.name: observability

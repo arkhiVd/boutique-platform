@@ -190,5 +190,5 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: traces
+          platform_boutique_component: traces
           scope: platform

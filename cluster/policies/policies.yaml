@@ -224,8 +224,73 @@ spec:
   hard:
     requests.cpu: "1500m"
     requests.memory: "3Gi"
-    limits.cpu: "3000m"
-    limits.memory: "6Gi"
+    # THE CHURN RULE, AND IT IS NOT OPTIONAL. A ResourceQuota is an admission
+    # gate evaluated per-pod, so these numbers have to cover the steady state
+    # PLUS one full recreation of the largest component, not the steady state
+    # alone. When a pod is deleted the quota controller does not debit its
+    # resources until the pod is gone, so the replacement pod is admitted while
+    # the old one is still counted. A quota sized to steady state therefore
+    # blocks every replace operation in the namespace -- rolling update, crash
+    # restart, eviction, all of them -- and fails in a place that looks like a
+    # chart bug:
+    #
+    #   Create Pod prometheus-... in StatefulSet prometheus-... failed error:
+    #   pods "prometheus-kube-prometheus-stack-prometheus-0" is forbidden:
+    #   exceeded quota: observability-quota, requested: limits.cpu=1050m,
+    #   used: limits.cpu=2400m, limited: limits.cpu=3
+    #
+    # Measured 2026-10-14 on this cluster, before Loki, Fluent Bit and Tempo are
+    # installed:
+    #
+    #   limits.cpu    used 2400m    limits.memory used 3136Mi
+    #   requests.cpu  used  660m    requests.memory used 1312Mi
+    #   pods          used   11
+    #
+    #   largest single pod (Prometheus, the churn test that failed):
+    #     limits.cpu 1050m    limits.memory 768Mi
+    #
+    # So 2400m + 1050m = 3450m is the smallest number under which a Prometheus
+    # pod can always be recreated. The first pass of this fix used that number
+    # rounded to 4000m and was still wrong, because the namespace kept growing
+    # under it: adding Tempo (250m / 1Gi) hit
+    #
+    #   pods "tempo-0" is forbidden: exceeded quota: observability-quota,
+    #   requested: limits.cpu=250m, limits.memory=1Gi,
+    #   used: limits.cpu=3800m, limits.memory=4416Mi
+    #
+    # So the numbers below are computed from the END STATE this stage is building
+    # to, measured 2026-10-14 with kube-prometheus-stack, Loki and Fluent Bit
+    # deployed and Tempo and blackbox about to land, not from today's snapshot.
+    # Same rule as above: steady state, plus the largest component for churn.
+    #
+    #   kube-prometheus-stack  2400m / 3136Mi   (16 containers, 11 pods)
+    #   loki-0                 1000m / 1024Mi   (2 containers on one pod)
+    #   fluent-bit x4           400m /  256Mi
+    #   opentelemetrycollector  200m /  768Mi
+    #   tempo                    250m / 1024Mi   planned
+    #   blackbox                  ~50m /  ~64Mi  planned
+    #   ------------------------------------------
+    #   steady state            4100m / 5504Mi
+    #   + largest pod (prometheus, 1050m / 800Mi) for churn
+    #   ------------------------------------------
+    #   5150m / 6304Mi  ->  5200m / 7Gi
+    #
+    # 5200m of CPU ceiling still sits below the ~6.8 cores four t3.smalls leave
+    # allocatable, so this is a gate and not an oversubscription.
+    #
+    # requests.* are NOT raised, and the difference is the point: a request is a
+    # reservation against a node's allocatable CPU, which is the real constraint
+    # SPEC records, and the stack's requests are 920m / 1696Mi against the 1500m
+    # / 3Gi already here. Only the burst ceiling moved, because it is the ceiling
+    # that gates admission on a re-create.
+    #
+    # RESTACK NOTE, so this is not stale in a month: Loki (single binary), Fluent
+    # Bit and Tempo are not deployed yet, and the comment above this block counts
+    # 30 pods for them. This quota has to be re-measured from
+    # `kubectl describe resourcequota observability-quota` after each of those
+    # lands, by the same rule (used + largest single pod), not by taste.
+    limits.cpu: "5200m"
+    limits.memory: "7Gi"
     # 30 pods: kube-prometheus-stack ~10 (prometheus, alertmanager, operator, 2
     # kube-state-metrics, node-exporter daemonset, 4 grafana-ish) + Loki 4 +
     # Fluent Bit 4 DaemonSet pods + OTel collector 2 + debug head-room.

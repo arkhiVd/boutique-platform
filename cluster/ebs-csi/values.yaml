@@ -1,0 +1,101 @@
+# EBS CSI driver values. Every override states why, because a value that is not
+# explained gets reverted by someone who does not know what it broke.
+#
+# Everything here is nested under `aws-ebs-csi-driver:` because this chart is a
+# wrapper with no templates of its own: a parent chart's top-level keys are the
+# parent's values, and the subchart only ever sees what sits under its own name.
+# Left unnested, `helm template` renders a perfectly healthy chart that is the
+# subchart's defaults -- which is how a StorageClass can be specified here and
+# silently not exist in the cluster.
+#
+# WHY THIS CHART EXISTS AT ALL
+#
+# SPEC (line 171) commits observability state -- Prometheus TSDB, Loki, Tempo
+# -- to `gp3` PVCs, and ROADMAP budgets 4 x 16 GiB of them at ~$2.72/mo. The
+# cluster that Phase 3 actually built had one StorageClass, k3s's node-local
+# `local-path`, and nothing that could provision an EBS volume. Measured
+# 2026-10-14, straight from the API server:
+#
+#   kubectl get storageclass
+#     local-path (default)   rancher.io/local-path   Delete   WaitForFirstConsumer
+#
+# which is why kube-prometheus-stack's first install stalled a PVC:
+#
+#   persistentvolumeclaim/kube-prometheus-stack-grafana   Pending
+#     storageclass.storage.k8s.io "gp3" not found
+#
+# The driver is deployed into kube-system, next to every other piece of cluster
+# plumbing, rather than into observability: it is not an observability concern,
+# it has no PrometheusRule, and keeping it out of the namespace whose Pod
+# Security label this repo had to relax means it never inherits that relaxation.
+#
+# WHY THERE IS NO IRSA ROLE HERE
+#
+# The upstream chart's normal answer to "how does the driver authenticate" is
+# IRSA: annotate the controller ServiceAccount with a role ARN and let the
+# pod's projected token be trusted by STS. That pattern needs an OIDC issuer
+# whose discovery document is reachable from the public internet. k3s mints
+# tokens for `https://kubernetes.default.svc`, which is not reachable from STS
+# and cannot be made so without putting an API server on the internet. So the
+# driver reads the node instance profile instead, and the five EbsCsi*
+# statements in platform/iam-nodes.tf are what that profile is now allowed to
+# do. The consequence is written there too: every node can create volumes in
+# this account, bounded by the region and encryption conditions.
+
+aws-ebs-csi-driver:
+  controller:
+    # One, not the chart's default. Four t3.smalls share 8 vCPU, and each
+    # controller pod carries the provisioner, attacher, resizer and snapshotter
+    # sidecars alongside the driver itself -- roughly a GiB of container before
+    # any work. Leader election is on by default, so one replica is a working
+    # controller rather than a single point of failure with no recovery path:
+    # a restart re-acquires the lease.
+    replicaCount: 1
+
+  node:
+    # The chart ships a second DaemonSet, ebs-csi-node-windows, on the assumption
+    # the cluster has Windows kubelets. This one has none -- every node in
+    # platform/ is an Amazon Linux k3s node -- and the Windows DaemonSet can only
+    # ever sit Pending, a permanent red line in `kubectl get pods -A` that says
+    # nothing true about the system's health.
+    enableWindows: false
+
+  # Snapshot support is left off rather than enabled-and-broken. The chart can
+  # render the snapshotter sidecar, but without the snapshot CRDs installed the
+  # sidecar only fails to register, and platform/iam-nodes.tf grants
+  # ec2:CreateSnapshot for a VolumeSnapshotClass this repo does not yet ship.
+  # Phase 4's etcd restore drill covers recovery; EBS snapshots are the next
+  # increment, not this one.
+
+  storageClasses:
+    # The name SPEC and every runbook already call this: `gp3`. Anything else
+    # would mean editing three documents to match a name this chart invented.
+    - name: gp3
+      # Not the default. k3s's local-path stays default on purpose: flipping the
+      # default changes what every future bare `volumeClaimTemplate` in this
+      # cluster gets, including Boutique's, and Boutique's working set is
+      # ephemeral by design. A PVC that wants durability opts in with
+      # `storageClassName: gp3` and pays for it.
+      volumeBindingMode: WaitForFirstConsumer
+      # Delete, not Retain: SPEC budgets these volumes as ephemeral observability
+      # state with a documented restore path (etcd snapshots, Phase 4), and a
+      # Retain class would leave every 16 GiB volume behind on every uninstall
+      # until someone deletes it by hand -- a silent line item.
+      reclaimPolicy: Delete
+      parameters:
+        # gp3, not gp2: same baseline performance, 20% cheaper, and it can be
+        # resized without an IOPS penalty. gp2's IOPS scale with size, which
+        # makes a deliberately small 16 GiB volume the worst case.
+        type: gp3
+        csi.storage.k8s.io/fstype: ext4
+        # The encryption is enforced twice on purpose. Here it asks the driver;
+        # in platform/iam-nodes.tf the EbsCsiCreateVolume statement carries a
+        # `ec2:Encrypted = true` condition, so an unencrypted CreateVolume is
+        # denied at the API rather than merely discouraged by this string.
+        encrypted: "true"
+        # No kmsKeyId, deliberately, and the reason is the same one platform/
+        # README.md gives for the backend bucket: the chart is a tracked file and
+        # an account-specific key ARN is a constant that belongs in Terraform's
+        # output, not in source. Omitted, the driver uses the account's default
+        # EBS key (aws/ebs), which is encrypted and which this account can rotate.
+        # Pinning the platform CMK here would need a literal ARN checked in.

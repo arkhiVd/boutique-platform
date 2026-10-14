@@ -191,6 +191,127 @@ data "aws_iam_policy_document" "boutique_node" {
     actions   = ["ssm:GetParameter"]
     resources = [local.k3s_token_parameter_arn]
   }
+
+  # The EBS CSI driver (cluster/ebs-csi) reads the node role's credentials
+  # because k3s mints no usable OIDC issuer: its service-account tokens are
+  # signed for https://kubernetes.default.svc, which no IAM trust policy can
+  # reach, so the IRSA pattern of a per-workload role does not apply here. The
+  # consequence is written out rather than worked around: every node in this
+  # cluster can create and attach volumes inside this account, in this region.
+  # That is the price of persistent storage on a cluster with no federation,
+  # and it is bounded below by the three conditions on the mutating statements.
+  #
+  # Describe* calls take no resource-level permission in the EC2 API -- verified
+  # against this account, where scoping them produces AccessDenied at runtime.
+  # They are therefore scoped by region alone, which still stops the driver from
+  # being talked into describing volumes in someone else's region.
+  statement {
+    sid    = "EbsCsiDescribe"
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeInstances",
+      "ec2:DescribeSnapshots",
+      "ec2:DescribeTags",
+      "ec2:DescribeVolumeStatus",
+      "ec2:DescribeVolumeTypes",
+      "ec2:DescribeVolumes",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:Region"
+      values   = [data.aws_region.current.region]
+    }
+  }
+
+  # CreateVolume is split out for one condition: a volume this driver creates
+  # is a volume SPEC says must be encrypted, and `ec2:Encrypted` is only
+  # populated for this action. Enforcing it here means the StorageClass's
+  # `encrypted: true` is a fact about the account rather than a setting someone
+  # can edit without consequence. Without it, an unencrypted CreateVolume
+  # succeeds and nothing anywhere objects.
+  statement {
+    sid       = "EbsCsiCreateVolume"
+    effect    = "Allow"
+    actions   = ["ec2:CreateVolume"]
+    resources = ["arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:volume/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:Region"
+      values   = [data.aws_region.current.region]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "ec2:Encrypted"
+      values   = ["true"]
+    }
+  }
+
+  # Everything else the driver does to a volume. AttachVolume names two
+  # resources, so the instance ARN is listed alongside the volume one rather
+  # than left to a wildcard; ModifyVolume is here because the chart enables
+  # volume resizing, which SPEC uses to grow a full Prometheus TSDB.
+  statement {
+    sid    = "EbsCsiVolumeLifecycle"
+    effect = "Allow"
+    actions = [
+      "ec2:AttachVolume",
+      "ec2:DeleteVolume",
+      "ec2:DetachVolume",
+      "ec2:ModifyVolume",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:volume/*",
+      "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:instance/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:Region"
+      values   = [data.aws_region.current.region]
+    }
+  }
+
+  # Snapshots, for the VolumeSnapshotClass the runbooks restore from. Left
+  # unencrypted-by-policy for now because a snapshot of a CMK-encrypted volume
+  # is itself encrypted, and CreateSnapshot's ec2:Encrypted condition would
+  # reject the driver's own default behaviour of inheriting the volume's key.
+  statement {
+    sid       = "EbsCsiSnapshotLifecycle"
+    effect    = "Allow"
+    actions   = ["ec2:CreateSnapshot", "ec2:DeleteSnapshot", "ec2:CopySnapshot"]
+    resources = ["arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:snapshot/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:Region"
+      values   = [data.aws_region.current.region]
+    }
+  }
+
+  # Tagging. CreateTags is scoped to volumes and snapshots in this region, and
+  # the ec2:CreateAction condition stops the driver from using tags to alter an
+  # action it was not granted -- the same trick that makes an untagged volume
+  # unattributable after the fact.
+  statement {
+    sid     = "EbsCsiTagging"
+    effect  = "Allow"
+    actions = ["ec2:CreateTags", "ec2:DeleteTags", "ec2:ListTagsForResource"]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:volume/*",
+      "arn:${data.aws_partition.current.partition}:ec2:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:snapshot/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:Region"
+      values   = [data.aws_region.current.region]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "boutique_node" {

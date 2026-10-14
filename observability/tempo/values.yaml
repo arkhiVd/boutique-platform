@@ -194,13 +194,44 @@ tempo:
     ##                                  reachable on gp3.
     ##   max_duration 24h caps a search at the retention window, so a query for
     ##   "everything since 2020" cannot turn into a full-store scan.
-    queryFrontend:
-      query:
-        concurrent_requests: 4
-      search:
-        max_duration: 24h
-        duration_slo: 5s
-        throughput_bytes_slo: 10000000
+    ## THESE KEYS USED TO LIVE UNDER `query_frontend`, AND MOVING THEM IS NOT
+    ## STYLE. Tempo restructured the search path in 2.x: `query_frontend.query.*`
+    ## and `query_frontend.search.*` became `querier.max_concurrent_queries` and
+    ## `querier.search.*`. The old shape is not a deprecation that warns, it is a
+    ## hard parse failure, and it fails in the least helpful way the config
+    ## parser can offer:
+    #
+    #   failed parsing config: failed to parse configFile /conf/tempo.yaml:
+    #   yaml: unmarshal errors:
+    #     line 38: field query not found in type frontend.Config
+    #
+    # Note which type that names: `frontend.Config` is what `query_frontend` maps
+    # to, so the error is about the block this file set, one level up from where
+    # the value actually belongs. `query_frontend` is deliberately left uncosted
+    # (`{}`, the chart default) rather than omitted, because the vendored chart
+    # renders `{{- with .Values.tempo.queryFrontend }}`, and an absent key would
+    # render nothing at all rather than an empty block.
+    ## `max_concurrent_queries` survived the 2.x restructure; the three search
+    ## knobs below did not, and they are not merely renamed in the way
+    ## `query_frontend.query.concurrent_requests` was. They are GONE, and the
+    ## parser names the exact type that rejects them:
+    #
+    #   failed parsing config: failed to parse configFile /conf/tempo.yaml:
+    #   yaml: unmarshal errors:
+    #     field duration_slo not found in type querier.SearchConfig
+    #     field max_duration not found in type querier.SearchConfig
+    #     field throughput_bytes_slo not found in type querier.SearchConfig
+    #
+    # Tempo 1.x sized the query-frontend's search path with those three; 2.x
+    # replaced that path, and `querier.SearchConfig` carries a different and
+    # smaller set of knobs. Carrying them forward because they look reasonable
+    # is what costs a CrashLoopBackOff on every boot. They are therefore dropped
+    ## rather than translated, and the reason is recorded here so the next person
+    ## does not re-add them: the knobs this file actually wants under 2.9 are
+    ## read from `/docs/runbooks/traces.md`, not guessed from a 1.x source.
+    querier:
+      max_concurrent_queries: 4
+    queryFrontend: {}
 
     ## -----------------------------------------------------------------------
     ## Metrics generator — service graphs ONLY (spanmetrics is the collector's)

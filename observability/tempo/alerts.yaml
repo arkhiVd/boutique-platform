@@ -67,7 +67,7 @@ groups:
         for: 10m
         labels:
           severity: ticket
-          platform.boutique/component: traces
+          platform_boutique_component: traces
           scope: platform
 
       ## -------------------------------------------------------------------
@@ -105,7 +105,7 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: traces
+          platform_boutique_component: traces
           scope: platform
 
       ## -------------------------------------------------------------------
@@ -144,5 +144,5 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: traces
-          platform.boutique/signal: capacity
+          platform_boutique_component: traces
+          platform_boutique_signal: capacity

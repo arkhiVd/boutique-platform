@@ -106,8 +106,8 @@ tests:
               severity: page
               burn_rate: "14.4"
               window: "5m/1h"
-              platform.boutique/slo: availability
-              platform.boutique/component: application
+              platform_boutique_slo: availability
+              platform_boutique_component: application
               job: frontend
             exp_annotations:
               summary: >-
@@ -185,8 +185,8 @@ tests:
               severity: page
               burn_rate: "14.4"
               window: "5m/1h"
-              platform.boutique/slo: latency
-              platform.boutique/component: application
+              platform_boutique_slo: latency
+              platform_boutique_component: application
               job: frontend
             exp_annotations:
               summary: >-

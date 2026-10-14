@@ -1,0 +1,14 @@
+apiVersion: v2
+name: ebs-csi
+description: >-
+  AWS EBS CSI driver and the gp3 StorageClass that SPEC commits observability
+  state to. Wraps the upstream chart so the two values that are ours -- the
+  storage class, and the refusal to pretend this cluster can use IRSA -- are
+  version-controlled next to every other decision.
+type: application
+version: 1.0.0
+appVersion: "1.67.0"
+dependencies:
+  - name: aws-ebs-csi-driver
+    version: "2.67.0"
+    repository: https://kubernetes-sigs.github.io/aws-ebs-csi-driver

@@ -60,8 +60,12 @@ kube-prometheus-stack:
     ## chart's own install fails. The Jobs already set runAsNonRoot, drop ALL and
     ## seccompProfile RuntimeDefault, but they also request >100Mi memory, so a
     ## `restricted` namespace with a tighter LimitRange would reject them.
-    ## `observability` is therefore labelled PSA `baseline`, not `restricted`, and
-    ## the reason is written here rather than discovered at install time.
+    ## `observability` is therefore labelled PSA `privileged`, not `restricted`,
+    ## and the reason is written in apps/boutique/observability/namespace.yaml
+    ## rather than discovered at install time: node-exporter needs hostNetwork,
+    ## hostPID, hostPort and three hostPath volumes, and `baseline` forbids all
+    ## four. Measured 2026-10-14: the DaemonSet sat at FailedCreate with
+    ## `violates PodSecurity "restricted:latest"`.
     admissionWebhooks:
       enabled: true
       ## A `Fail` policy is the point of the webhook: a `Ignore` policy would let an
@@ -435,27 +439,41 @@ kube-prometheus-stack:
     ##   kube-state-metrics 20m
     ##   node-exporter 20m  (per node; the DaemonSet runs on all four)
     ##
-    ## CPU IS THE BINDING CONSTRAINT ON THIS NODE, NOT MEMORY. The rendered
-    ## grand total is 3,565m of requests against the ~1,830m the kubelet leaves
-    ## schedulable on a t3.medium, and that is dominated by the `boutique`
-    ## namespace's own 2,820m (recorded by the Phase 6 work in
-    ## apps/boutique/quota.yaml as a known gap). Nothing in THIS chart closes
-    ## that gap, so the only defensible move here is to stop reserving CPU for
-    ## work that does not happen: Grafana spends CPU on query evaluation and
-    ## dashboard rendering, which is to say only while a human is looking at it.
-    ## Reserving 50m for that is 2.7% of the node's entire CPU for an idle UI.
+    ## CPU IS THE BINDING CONSTRAINT ON THE SCHEDULE; MEMORY TURNS OUT TO BE THE
+    ## BINDING CONSTRAINT ON THIS CONTAINER. The rest of the original reasoning
+    ## still holds: the rendered grand total is ~3,565m of requests against what
+    ## four t3.smalls leave schedulable, dominated by the `boutique` namespace's
+    ## own 2,820m (recorded in apps/boutique/quota.yaml as a known gap), and
+    ## nothing in THIS chart closes that gap. So the CPU cuts stay: Grafana spends
+    ## CPU on query evaluation and dashboard rendering, which is to say only
+    ## while a human is looking at it, and 25m of REQUEST is the right
+    ## reservation for that.
     ##
-    ## 25m is the request; the 300m LIMIT below is unchanged, so a dashboard
-    ## that genuinely needs 200m still gets it once something else is idle. A
-    ## request is a reservation, and this is the one component on the node whose
-    ## steady-state is genuinely near zero.
+    ## What this file got wrong was the memory limit, and it got it wrong in the
+    ## direction that is hardest to diagnose: 192Mi, justified by a comment that
+    ## said memory was not the binding constraint. Measured 2026-10-14, on
+    ## kube-prometheus-stack 92.1.1, this Grafana starts and sits at 254Mi WHILE
+    ## STILL BOOTING — it had not yet finished provisioning a single dashboard.
+    ## Every container in the pod was killed repeatedly:
+    ##
+    ##   grafana              restarts=3  last terminated exit 137  (OOMKilled)
+    ##   grafana-sc-dashboard restarts=5  last terminated OOMKilled
+    ##   grafana-sc-datasources restarts=5  last terminated OOMKilled
+    ##
+    ## and it presents as `0/3 Running` with
+    ## `kubectl get pods` showing a healthy-looking pod that never becomes
+    ## Ready, because a readiness probe that fails three times at a 1-second
+    ## timeout looks exactly like a slow start. 512Mi of LIMIT is 2.7x the
+    ## measured boot RSS, which is the smallest number that leaves headroom for
+    ## the startup spike rather than for steady state. The 300m CPU limit is
+    ## unchanged, so a dashboard that needs 200m still gets it when idle.
     resources:
       requests:
         cpu: 25m
-        memory: 96Mi
+        memory: 128Mi
       limits:
         cpu: 300m
-        memory: 192Mi
+        memory: 512Mi
     ## The dashboard ConfigMaps in observability/dashboards/ are provisioned by the
     ## sidecar below, so Grafana needs to keep them across a restart. 2Gi is
     ## generous for 4 dashboards plus the 20 kube-prometheus-stack default
@@ -488,13 +506,20 @@ kube-prometheus-stack:
         ## Prometheus and Loki datasources are provisioned from the chart's own
         ## ConfigMap; the Loki URL is the SingleBinary gateway Service.
         enabled: true
+      ## 256Mi, not the chart's 64Mi, for the same measured reason as the Grafana
+      ## container above: both sidecars were OOMKilled (exit 137, 5 restarts each)
+      ## at 64Mi on 2026-10-14. These watch ConfigMaps across ALL namespaces
+      ## (`searchNamespace: ALL`), so they hold an in-memory index of every
+      ## dashboard ConfigMap in the cluster — 4 from observability/dashboards/, 20
+      ## from this chart, and the rest of the platform's. 64Mi was enough for
+      ## that list when this was written and is not enough now.
       resources:
         requests:
           cpu: 25m
-          memory: 32Mi
+          memory: 64Mi
         limits:
           cpu: 100m
-          memory: 64Mi
+          memory: 256Mi
 
     ## The 20 kube-prometheus-stack default dashboards cost no extra memory — they
     ## are ConfigMaps the sidecar reads — and they are the fastest way to answer

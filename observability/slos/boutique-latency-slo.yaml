@@ -44,8 +44,8 @@ groups:
           severity: page
           burn_rate: "14.4"
           window: "5m/1h"
-          platform.boutique/slo: latency
-          platform.boutique/component: application
+          platform_boutique_slo: latency
+          platform_boutique_component: application
 
       ## --- 5% of the 30-day budget consumed in 6 hours -> PAGE ----------------
       - alert: BoutiqueLatencyErrorBudgetBurn
@@ -67,8 +67,8 @@ groups:
           severity: page
           burn_rate: "6"
           window: "30m/6h"
-          platform.boutique/slo: latency
-          platform.boutique/component: application
+          platform_boutique_slo: latency
+          platform_boutique_component: application
 
       ## --- 10% of the 30-day budget consumed in 3 days -> TICKET ---------------
       - alert: BoutiqueLatencyErrorBudgetBurn
@@ -91,5 +91,5 @@ groups:
           severity: ticket
           burn_rate: "1"
           window: "2h/3d"
-          platform.boutique/slo: latency
-          platform.boutique/component: application
+          platform_boutique_slo: latency
+          platform_boutique_component: application

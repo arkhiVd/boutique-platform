@@ -28,6 +28,38 @@
 # KubePodNotReady, KubeStatefulSetReplicasMismatch and KubeJobFailed, which are
 # worth keeping.
 
+# ALERT LABEL NAMES, AND THE ONE THAT IS NOT A KUBERNETES LABEL
+# -----------------------------------------------------------------------------
+# Alert labels below are Prometheus labels, and a Prometheus label name may only
+# match `[a-zA-Z_][a-zA-Z0-9_]*`. No slash, no dot. These labels used to be
+# written `platform.boutique/component`, copied from the Kubernetes labels the
+# rest of this repo puts on pods and ServiceMonitors, and that form is ILLEGAL
+# on a rule. Measured 2026-10-14, when kube-prometheus-stack's admission
+# webhook turned a failed install into a readable error:
+#
+#   admission webhook "prometheusrulevalidate.monitoring.coreos.com" denied
+#   the request: Rules are not valid
+#     group "boutique.platform.alerts", rule 1, "Watchdog":
+#       invalid label name: platform.boutique/component
+#
+# The underscore form below (`platform_boutique_component`) is the same intent
+# with a legal name. It is used in observability/rules/, observability/slos/,
+# observability/loki/alerts.yaml, observability/tempo/alerts.yaml and
+# observability/synthetic-tests/ — the five places that produce alert LABELS.
+#
+# The slash form is still correct and still used everywhere it means a
+# KUBERNETES label: pod labels in apps/boutique/base/, ServiceMonitor
+# metadata.labels, PrometheusRule metadata.labels, ConfigMap labels on the
+# dashboards, blackbox probe labels. Those are a different namespace of naming
+# and are not validated by this webhook. `grep -rn platform.boutique/ .` is
+# expected to return hits; what must not return hits is a slash inside a
+# rule's `labels:` block.
+#
+# `promtool check rules` does NOT catch this — all 41 rules passed it while
+# these were invalid. The webhook does. Which is the argument for keeping
+# `admissionWebhooks.failurePolicy: Fail` in
+# observability/kube-prometheus-stack/values.yaml rather than softening it.
+
 groups:
   - name: boutique.platform.alerts
     interval: 30s
@@ -51,7 +83,7 @@ groups:
         expr: vector(1)
         labels:
           severity: none
-          platform.boutique/component: observability
+          platform_boutique_component: observability
 
       ## -------------------------------------------------------------------
       ## Crash loops. THE THRESHOLD IS THE WHOLE POINT OF THIS RULE.
@@ -89,8 +121,8 @@ groups:
         for: 5m
         labels:
           severity: ticket
-          platform.boutique/component: workload
-          platform.boutique/signal: availability
+          platform_boutique_component: workload
+          platform_boutique_signal: availability
 
       ## -------------------------------------------------------------------
       ## Replica mismatch — a rollout that is stuck, or an HPA that cannot
@@ -116,8 +148,8 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: workload
-          platform.boutique/signal: availability
+          platform_boutique_component: workload
+          platform_boutique_signal: availability
 
       ## -------------------------------------------------------------------
       ## Traefik up. This is the single most valuable alert in the file: if
@@ -154,8 +186,8 @@ groups:
         for: 5m
         labels:
           severity: page
-          platform.boutique/component: edge
-          platform.boutique/signal: availability
+          platform_boutique_component: edge
+          platform_boutique_signal: availability
 
       ## -------------------------------------------------------------------
       ## Prometheus remote-write failures.
@@ -191,7 +223,7 @@ groups:
         for: 15m
         labels:
           severity: ticket
-          platform.boutique/component: observability
+          platform_boutique_component: observability
 
       ## -------------------------------------------------------------------
       ## Rule evaluation failures — the alert that catches a broken alert.
@@ -212,7 +244,7 @@ groups:
         for: 5m
         labels:
           severity: ticket
-          platform.boutique/component: observability
+          platform_boutique_component: observability
 
       ## -------------------------------------------------------------------
       ## Fluent Bit -> Loki delivery failures — the APP-scoped half.
@@ -273,7 +305,7 @@ groups:
         labels:
           severity: ticket
           scope: agent
-          platform.boutique/component: logs
+          platform_boutique_component: logs
 
       ## -------------------------------------------------------------------
       ## Jenkins build failure.
@@ -307,7 +339,7 @@ groups:
         for: 5m
         labels:
           severity: ticket
-          platform.boutique/component: ci
+          platform_boutique_component: ci
 
       ## -------------------------------------------------------------------
       ## Jenkins queue depth — the "agent stall" condition Phase 13's runbook
@@ -329,4 +361,4 @@ groups:
         for: 10m
         labels:
           severity: ticket
-          platform.boutique/component: ci
+          platform_boutique_component: ci
