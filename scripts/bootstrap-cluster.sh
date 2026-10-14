@@ -147,9 +147,26 @@ if [ -z "$LEADER_ADDRESS" ]; then
 fi
 
 step "Rewrite the apiserver address to $LEADER_ADDRESS"
+# tls-server-name: localhost, added alongside the address rewrite.
+#
+# The apiserver's serving cert is pinned to whatever addresses the nodes held
+# when k3s last started, and an address in that cert goes stale the moment the
+# instance's public IPv4 rotates -- which it does on every stop/start, and
+# `aws_instance` stops and starts on a user_data change (measured 2026-10-14:
+# CloudTrail StopInstances 12:06:57Z then StartInstances 12:07:19Z, and the
+# kubeconfig kept pointing at the address that had just been released while
+# the ALB, which targets private IPs, reported every target healthy).
+#
+# k3s always puts `DNS:localhost` in the dynamic serving cert, so verifying
+# against localhost rather than against the transport address makes this file
+# immune to that class of failure without weakening anything: the cluster CA
+# in the same file is what says "this is my cluster", and localhost only
+# satisfies the name check the TLS stack insists on. The address is then free
+# to be whatever routes there.
 KUBECONFIG="$(printf '%s\n' "$RAW_KUBECONFIG" | sed \
   -e "s|https://127.0.0.1:6443|https://${LEADER_ADDRESS}:6443|g" \
-  -e "s|https://localhost:6443|https://${LEADER_ADDRESS}:6443|g")"
+  -e "s|https://localhost:6443|https://${LEADER_ADDRESS}:6443|g" \
+  -e "/^[[:space:]]*server: https:\/\//a\    tls-server-name: localhost")"
 
 # ---------------------------------------------------------------------------
 # 5. Write it, somewhere it cannot be committed

@@ -662,7 +662,14 @@ resource "aws_instance" "k3s_server" {
     # ignore is defensive, and it is also what makes SPEC.md's "a second plan is
     # empty" criterion hold on the day someone installs the out-of-tree AWS cloud
     # controller manager for the Phase 5 ALB integration.
+    # Launch template version is immutable after launch, and AWS returns it
+    # resolved: state holds "6" while the config holds "$Latest", so without
+    # this the next plan ForceNew'd all four nodes over a difference that can
+    # only ever take effect at boot. The version a node boots from is decided
+    # by RunInstances; changing it afterwards is what platform/README.md's
+    # explicit `terraform apply -replace` is for.
     ignore_changes = [
+      launch_template,
       tags["node.kubernetes.io/instance-type"],
       tags["kubernetes.io/cluster/boutique-platform"],
       tags_all,
@@ -746,7 +753,14 @@ resource "aws_instance" "k3s_worker" {
   }
 
   lifecycle {
+    # Launch template version is immutable after launch, and AWS returns it
+    # resolved: state holds "6" while the config holds "$Latest", so without
+    # this the next plan ForceNew'd all four nodes over a difference that can
+    # only ever take effect at boot. The version a node boots from is decided
+    # by RunInstances; changing it afterwards is what platform/README.md's
+    # explicit `terraform apply -replace` is for.
     ignore_changes = [
+      launch_template,
       tags["node.kubernetes.io/instance-type"],
       tags["kubernetes.io/cluster/boutique-platform"],
       tags_all,
@@ -757,4 +771,53 @@ resource "aws_instance" "k3s_worker" {
     aws_ssm_parameter.k3s_token,
     aws_ssm_parameter.k3s_leader_ip,
   ]
+}
+
+# ---------------------------------------------------------------------------
+# Stable public addresses
+#
+# The public IPv4 handed out at launch is released the instant the instance
+# stops, and `aws_instance`'s user_data update path IS stop -> modify -> start
+# (CloudTrail, 2026-10-14: StopInstances 12:06:57Z, ModifyInstanceAttribute
+# 12:07:17Z, StartInstances 12:07:19Z). On restart k3s comes back under the
+# unit cloud-init wrote on first boot, so its `--tls-san` still names an
+# address that no longer exists. Measured consequence: the apiserver serving
+# cert and ~/.kube/boutique-prod.yaml both went stale and `kubectl` timed out
+# while the ALB -- which targets private IPs -- was reporting every target
+# healthy. An Elastic IP survives stop/start, so address, cert SAN and
+# kubeconfig stay true across every replacement.
+#
+# Cost is $0.005/h for each UNATTACHED address in this region. These are
+# attached to running instances for the life of the platform, so the running
+# cost is zero; the line item only appears if a node is stopped and left
+# stopped while holding its address.
+resource "aws_eip" "k3s_server" {
+  for_each = toset(local.azs)
+  domain   = "vpc"
+  instance = aws_instance.k3s_server[each.key].id
+
+  tags = {
+    Name               = "boutique-k3s-server-${each.key}"
+    "boutique.io/role" = "server"
+    "boutique.io/az"   = each.key
+  }
+
+  # An IGW must exist before a VPC-domain address can be allocated.
+  depends_on = [aws_internet_gateway.boutique]
+}
+
+# The worker never names itself in a cert or a kubeconfig, so its address only
+# has to stop rotating. Same resource for the same reason: uniformity across
+# the fleet is cheaper to reason about than a rule with one exception.
+resource "aws_eip" "k3s_worker" {
+  domain   = "vpc"
+  instance = aws_instance.k3s_worker.id
+
+  tags = {
+    Name               = "boutique-k3s-worker"
+    "boutique.io/role" = "worker"
+    "boutique.io/az"   = local.worker_az
+  }
+
+  depends_on = [aws_internet_gateway.boutique]
 }
