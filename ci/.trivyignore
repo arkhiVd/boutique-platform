@@ -1,0 +1,10 @@
+# Trivy config findings accepted for this gate, each with a reason.
+# Read as: the finding is real, the remediation is impossible without breaking
+# the component it describes.
+
+# KSV-0053 "Exec into Pods" on ci/rbac/role.yaml -- the Kubernetes plugin works
+# by execing the remoting launcher into each agent pod, which is what makes an
+# agent ephemeral instead of a long-lived VM. The alternative (no pods/exec) is
+# a Jenkins that cannot start an agent at all. conftest gates the rest of that
+# file, verb by verb, in policy/.
+KSV-0053

@@ -1,0 +1,640 @@
+# =============================================================================
+# ci/jenkins/values.yaml — Phase 7 (Jenkins controller) + the agent pod template
+# Phase 8 (pipeline library, credentials) configuration lives here too.
+#
+# WHY THE TOP LEVEL IS `jenkins:`
+# ---------------------------------------------------------------------------
+# This chart has exactly one dependency (Chart.yaml): the upstream `jenkins`
+# chart. Helm feeds a dependency its values through a top-level key named after
+# that dependency, so every upstream key is nested under `jenkins:` here. A key
+# placed at the top level of THIS file would be a value of a chart with no
+# templates of its own: helm would accept it, render would succeed, and nothing
+# would change. That failure is silent by construction, so the nesting is not
+# cosmetic.
+#
+# WHAT IS DELIBERATELY NOT SET HERE, and why
+# ---------------------------------------------------------------------------
+#   resources on the controller       docs/resource-budget.md §4 records the
+#                                     arithmetic; see the block below.
+#   ingress                           cluster/traefik/templates/routes.yaml owns
+#                                     the edge (Host(`jenkinsHost`) -> Service
+#                                     `ci:8080`). A second, chart-managed Ingress
+#                                     would be a second entry path that bypasses
+#                                     the WAF and the ALB's Web ACL.
+#   HTTPS in the controller           TLS terminates at Traefik (certResolver
+#                                     `edge`); a second terminator inside the pod
+#                                     means two certificate lifecycles for one
+#                                     hostname.
+#
+# EVERY NUMBER BELOW IS ARITHMETIC, not taste. The three ceilings it must fit
+# inside are real objects in cluster/policies/policies.yaml:
+#
+#   ResourceQuota ci-quota    requests.cpu 2000m / requests.memory 8Gi
+#                             limits.cpu   4000m / limits.memory  12Gi
+#                             pods 12
+#   LimitRange ci-limits      container max 2 CPU / 4Gi, Pod max 3 CPU / 6Gi
+#                             container min 10m / 16Mi
+#   1 x t3.medium             1830m / 3741Mi schedulable (docs/resource-budget.md)
+# =============================================================================
+
+jenkins:
+  # The Traefik IngressRoute in cluster/traefik/templates/routes.yaml targets
+  # Service `ci` in namespace `ci` on port 8080, and the ServiceMonitor in
+  # observability/servicemonitors/jenkins-exporter.yaml selects the controller
+  # Service by `app.kubernetes.io/component: jenkins-controller` (a chart
+  # constant, so it survives a release rename). Without this override the
+  # resources would be named `<release>-jenkins` and the route would 503.
+  fullnameOverride: "ci"
+
+  # ---------------------------------------------------------------------------
+  # Identity and RBAC
+  # ---------------------------------------------------------------------------
+  # The ServiceAccount, Role and RoleBinding are three files in ci/rbac/ rather
+  # than a subchart's generated Role, for one reason: the permissions of the
+  # identity that can create pods in this namespace belong in a file a reviewer
+  # can read top to bottom, not in a template that has to be diffed against
+  # upstream to see what changed. Setting `create: false` here makes this chart
+  # REFERENCE the name and ci/rbac/ OWN the objects.
+  serviceAccount:
+    create: false
+    name: jenkins
+    # The controller pod must keep its token: the Kubernetes plugin talks to the
+    # API server with it to create every agent pod. This is the one workload in
+    # the platform that needs a projected token, and it is why policy/ci.rego
+    # relaxes the token rule for namespace `ci` and nowhere else.
+    automountServiceAccountToken: true
+
+  rbac:
+    create: false
+    # Secrets are not readable by the Jenkins identity through the API at all —
+    # see ci/rbac/role.yaml. The two Secrets the controller uses are projected
+    # into the pod by the kubelet, which is not an API call this SA makes.
+    readSecrets: false
+
+  # ---------------------------------------------------------------------------
+  # Controller: sizing
+  # ---------------------------------------------------------------------------
+  controller:
+    componentName: jenkins-controller
+
+    # cluster/priority.yaml created `platform-ci-controller` (value 5000, above
+    # boutique-app, below the edge) for exactly this pod, and its header records
+    # a `kubectl patch` command to attach it. Setting it here means the patch is
+    # never needed — the value is in the manifest, so a `helm upgrade` cannot
+    # drop it and a node reboot cannot lose it.
+    priorityClassName: platform-ci-controller
+
+    # Nothing builds on the controller. A build on the controller shares the
+    # controller's JVM heap, its filesystem and its credentials, which is the
+    # blast radius this phase exists to remove. With 0 executors every build
+    # takes an ephemeral agent or does not run.
+    numExecutors: "0"
+
+    # ---------------------------------------------------------------------------
+    # Sizing — docs/resource-budget.md §4 and scripts/check.sh --extra
+    #
+    # The requests are the chart's own defaults (50m/256Mi per container), kept
+    # because §4's provenance block says so and because raising the request on a
+    # node at 196.7% CPU over-commit is the one change that costs real headroom.
+    # The LIMITS are ours and are much lower than the chart's 2000m/4096Mi: a
+    # 4Gi memory limit on a node with 3741Mi schedulable is a container that can
+    # evict the observability tier by being busy for a minute.
+    #
+    #   container          request        limit
+    #   jenkins            50m / 256Mi    750m / 1024Mi
+    #   init               50m / 256Mi    250m / 512Mi
+    #   config-reload-init 10m / 32Mi     50m / 64Mi
+    #   config-reload      10m / 32Mi     50m / 64Mi
+    #   ------------------------------------------------
+    #   controller pod    120m / 576Mi   1100m / 1664Mi
+    #
+    # 120m/576Mi is the number scripts/check.sh passes as
+    # `--extra ci:jenkins-controller:120m:576Mi` and the number
+    # docs/resource-budget.md §4 renders.
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "256Mi"
+      limits:
+        cpu: "750m"
+        memory: "1024Mi"
+
+    # The chart falls back to `controller.resources` when this is empty. It is
+    # set anyway because the init container's job (plugin install, JCasC copy) is
+    # network-bound and does not deserve the jenkins container's 1Gi ceiling, and
+    # because a pod's ResourceQuota consumption counts init containers too.
+    initContainerResources:
+      requests:
+        cpu: "50m"
+        memory: "256Mi"
+      limits:
+        cpu: "250m"
+        memory: "512Mi"
+
+    # ---------------------------------------------------------------------------
+    # Security context
+    #
+    # policy/security.rego reads `allowPrivilegeEscalation` and `capabilities`
+    # from the CONTAINER securityContext only — pod-level values do not satisfy
+    # those two rules, which is how Kubernetes itself merges them for these two
+    # fields. Everything is therefore stated on the container as well as the pod.
+    # ---------------------------------------------------------------------------
+    podSecurityContextOverride:
+      runAsUser: 1000
+      runAsGroup: 1000
+      fsGroup: 1000
+      fsGroupChangePolicy: OnRootMismatch
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+      capabilities:
+        drop:
+          - ALL
+
+    containerSecurityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      seccompProfile:
+        type: RuntimeDefault
+      capabilities:
+        drop:
+          - ALL
+
+    # The JCasC auto-reload sidecar (kiwigrid/k8s-sidecar) and its init
+    # counterpart. Both are real containers in the controller pod, so both need
+    # requests and limits (policy/security.rego rule 8) and a complete
+    # securityContext (rules 1-4). The chart ships them with `resources: {}` and
+    # a partial securityContext: readOnlyRootFilesystem and allowPrivilegeEscalation
+    # only. capabilities.drop cannot be supplied from the pod securityContext for
+    # rule 4, so it has to be stated here.
+    #
+    # auto-reload must stay ENABLED: with it off the chart emits no JCasC
+    # ConfigMaps at all (verified by rendering both ways), and a controller with
+    # no JCasC files boots on whatever config.xml is already in the volume.
+    sidecars:
+      configAutoReload:
+        enabled: true
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"
+        containerSecurityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop:
+              - ALL
+
+    # The chart's helm test (a bats pod that drives the login page) is off. It
+    # has no securityContext and no resources, and the values file exposes no
+    # knob for either, so it would be the one manifest in every render that
+    # policy/ci.rego rejects — a permanently red check that trains everyone to
+    # walk past red. `helm test` is not a gate in scripts/check.sh. Turning it
+    # back on means patching the chart's templates/tests/jenkins-test.yaml to
+    # carry a securityContext first.
+    testEnabled: false
+
+    # ---------------------------------------------------------------------------
+    # Probes
+    #
+    # The chart's default startup probe allows 12 failures x 10s = 120s. Jenkins
+    # on this node has to install 11 plugins into an empty volume on first boot
+    # while the node is already over-committed on CPU, so the first start is the
+    # slowest one it will ever have. 24 failures x 10s = 240s of startup budget,
+    # with liveness held off until startup succeeds (which is what a startupProbe
+    # buys: liveness cannot kill a pod that has not started yet).
+    # ---------------------------------------------------------------------------
+    probes:
+      startupProbe:
+        failureThreshold: 24
+        periodSeconds: 10
+        timeoutSeconds: 5
+        httpGet:
+          path: '{{ default "" .Values.controller.jenkinsUriPrefix }}/login'
+          port: http
+      livenessProbe:
+        initialDelaySeconds: 60
+        failureThreshold: 5
+        periodSeconds: 10
+        timeoutSeconds: 5
+        httpGet:
+          path: '{{ default "" .Values.controller.jenkinsUriPrefix }}/login'
+          port: http
+      readinessProbe:
+        initialDelaySeconds: 30
+        failureThreshold: 3
+        periodSeconds: 10
+        timeoutSeconds: 5
+        httpGet:
+          path: '{{ default "" .Values.controller.jenkinsUriPrefix }}/login'
+          port: http
+
+    # ---------------------------------------------------------------------------
+    # Plugins — every version pinned, verified 2026-10-13
+    #
+    # Two sources per plugin, both checked before pinning:
+    #   1. https://updates.jenkins.io/current/update-center.json  (current release)
+    #   2. https://updates.jenkins.io/download/plugins/<n>/<v>/<n>.hpi -> HTTP 200
+    #
+    # Nine of these are the minimal set Phase 7 asks for. matrix-auth and
+    # pipeline-groovy-lib are not optional:
+    #
+    #   matrix-auth         provides the `globalMatrix` JCasC symbol. The
+    #                       matrix-based authorization strategy bound to the
+    #                       `platform:*` groups in cluster/rbac/rbac.yaml cannot
+    #                       be expressed without it.
+    #   pipeline-groovy-lib provides `jenkins`-level `unclassified.globalLibraries`
+    #                       and the `libraryPath` DataBoundSetter on the retriever
+    #                       (SCMBasedRetriever.setLibraryPath), which is what
+    #                       points the shared library at `pipelines/` instead of
+    #                       the repository root.
+    #
+    # installLatestPlugins: false is what makes these pins authoritative. Left at
+    # the chart default of true, dependency versions resolve to "latest" at every
+    # controller start, and a pin in this file would be a comment rather than a
+    # version.
+    # ---------------------------------------------------------------------------
+    installLatestPlugins: false
+    installPlugins:
+      - kubernetes:4560.vc25b_83890c34
+      - workflow-aggregator:608.v67378e9d3db_1
+      - git:5.11.0
+      - github-branch-source:1986.v801e40614d00
+      - pipeline-stage-view:2.41
+      - credentials-binding:728.v902a_273b_8947
+      - timestamper:1.30
+      - prometheus:860.v532442b_44e9a_
+      - configuration-as-code:2136.veb_3a_554550b_f
+      - matrix-auth:3.3
+      - pipeline-groovy-lib:822.vc95f70dea_db_7
+
+    # With persistence enabled, install plugins once on first boot and never
+    # again: a controller that re-resolves plugins on every restart turns a pod
+    # eviction into an unplanned upgrade. Requires persistence.enabled: true,
+    # which is set below.
+    initializeOnce: true
+
+    # ---------------------------------------------------------------------------
+    # Credentials seeding
+    #
+    # `createSecret: true` is NOT "create the Secret". It is the switch that
+    # projects a Secret into the pod at /run/secrets/additional and sets the
+    # SECRETS variable JCasC reads. `secret.yaml` in the upstream chart is
+    # guarded by `and (not admin.existingSecret) (admin.createSecret)`, so with
+    # existingSecret set the chart projects OUR Secret and creates nothing.
+    #
+    # Neither Secret is in this repository. The exact out-of-band commands are in
+    # ci/jenkins/README.md, and both are required before the controller will even
+    # start: a missing key fails the projected volume mount, the pod stays in
+    # ContainerCreating, and Jenkins never comes up with a default password. That
+    # is the fail-closed behaviour this phase needs.
+    #
+    # Key names are the chart's own defaults (admin.userKey / admin.passwordKey).
+    # ---------------------------------------------------------------------------
+    admin:
+      createSecret: true
+      existingSecret: jenkins-admin
+
+    # Each entry is projected as `<name>-<keyName>`, so JCasC refers to them as
+    # ${jenkins-pipeline-credentials-github-username} below. The Secret NAME
+    # appears in this file; no value does.
+    additionalExistingSecrets:
+      - name: jenkins-pipeline-credentials
+        keyName: github-username
+      - name: jenkins-pipeline-credentials
+        keyName: github-password
+
+    # ---------------------------------------------------------------------------
+    # JCasC
+    #
+    # defaultConfig: true renders the chart's own defaults into
+    # jcasc-default-config.yaml: numExecutors, the kubernetes cloud, the security
+    # realm and the authorization strategy below. The chart skips the realm and
+    # strategy blocks if the substring "authorizationStrategy:" or
+    # "securityRealm:" appears anywhere in configScripts — so those two go in
+    # THEIR values (which is also where the chart documents them) and the rest
+    # goes in configScripts, whose documents are merged with the defaults by the
+    # Configuration as Code plugin.
+    #
+    # auto-reload must stay enabled (it is the chart default): with it off the
+    # chart emits no JCasC ConfigMaps at all, and a controller with no JCasC
+    # files boots with whatever config.xml happens to exist.
+    # ---------------------------------------------------------------------------
+    JCasC:
+      defaultConfig: true
+
+      # Local realm, no sign-up, no captcha: the only account is the one seeded
+      # from the `jenkins-admin` Secret. ${chart-admin-username} and
+      # ${chart-admin-password} are the file names the projection uses.
+      securityRealm: |-
+        local:
+          allowsSignup: false
+          enableCaptcha: false
+          users:
+            - id: "${chart-admin-username}"
+              name: "Jenkins Admin"
+              password: "${chart-admin-password}"
+
+      # Matrix auth bound to the four groups cluster/rbac/rbac.yaml already
+      # defines, so a person's Jenkins rights and their Kubernetes rights are
+      # stated by the same four names. Anonymous is absent from `entries`, which
+      # in matrix-auth means no permissions at all — the Traefik route comment
+      # explains why an unauthenticated Jenkins is a remote-code-execution
+      # surface.
+      #
+      # Permission strings are taken from the matrix-auth demo in the JCasC
+      # plugin's own repository (demos/matrix-auth/README.md), not invented:
+      # Overall/*, Job/*, Run/*, View/* are the documented forms.
+      authorizationStrategy: |-
+        globalMatrix:
+          entries:
+            - user:
+                name: "${chart-admin-username}"
+                permissions:
+                  - "Overall/Administer"
+            - group:
+                name: "platform:admins"
+                permissions:
+                  - "Overall/Administer"
+            - group:
+                name: "platform:developers"
+                permissions:
+                  - "Overall/Read"
+                  - "Job/Read"
+                  - "Job/Build"
+                  - "Job/Workspace"
+                  - "Job/Cancel"
+                  - "Run/Replay"
+                  - "Run/Update"
+                  - "View/Read"
+            - group:
+                name: "platform:on-call"
+                permissions:
+                  - "Overall/Read"
+                  - "Job/Read"
+                  - "Job/Build"
+                  - "Job/Cancel"
+                  - "Run/Update"
+            - group:
+                name: "platform:read-only"
+                permissions:
+                  - "Overall/Read"
+                  - "Job/Read"
+                  - "View/Read"
+
+      configScripts:
+        # The credentials store. Both values resolve from the projected Secret
+        # named in `additionalExistingSecrets` above; there is no literal
+        # username or password anywhere in this repository.
+        platform-credentials: |-
+          credentials:
+            system:
+              domain:
+                default:
+                  credentials:
+                    - usernamePassword:
+                        scope: GLOBAL
+                        id: "github-arkhiVd"
+                        username: "${jenkins-pipeline-credentials-github-username}"
+                        password: "${jenkins-pipeline-credentials-github-password}"
+                        description: "GitHub checkout for arkhiVd/boutique-platform. Seeded from Secret jenkins-pipeline-credentials (see ci/jenkins/README.md); never stored in git."
+
+        # The shared library, read from this same repository at pipelines/.
+        #
+        # `unclassified`, not `jenkins:` — globalLibraries is a global
+        # configuration object, and the JCasC demo for the plugin states it
+        # belongs under the unclassified root. `libraryPath` is the reason
+        # pipeline-groovy-lib is in installPlugins above.
+        #
+        # No credentialsId: SPEC.md's trust boundary 6 makes the repository
+        # public by default, and a public repository needs none. If it ever goes
+        # private, seed the credential (it already exists above) and add
+        # `credentialsId: "github-arkhiVd"` here — which also requires granting
+        # the Credentials/Use permission, deliberately not granted today.
+        shared-library: |-
+          unclassified:
+            globalLibraries:
+              libraries:
+                - name: "boutique-platform"
+                  defaultVersion: "main"
+                  implicit: false
+                  retriever:
+                    modernSCM:
+                      scm:
+                        git:
+                          remote: "https://github.com/arkhiVd/boutique-platform.git"
+                      libraryPath: "pipelines"
+
+        # Merged into the defaults' `jenkins:` document.
+        platform-settings: |-
+          jenkins:
+            systemMessage: "Managed by JCasC from ci/jenkins/values.yaml. UI edits are overwritten on the next reload."
+            # A queue that grows without anyone noticing is the failure this
+            # platform has an alert for (JenkinsQueueBacklog), and the queue
+            # metrics come from the prometheus plugin pinned above.
+            quietPeriod: 5
+
+    # ---------------------------------------------------------------------------
+    # Edge
+    # ---------------------------------------------------------------------------
+    ingress:
+      # false on purpose — see the file header. The route that exists is
+      # traefik.io/v1alpha1 IngressRoute `jenkins` in namespace `traefik`.
+      enabled: false
+
+    # JCasC's `unclassified.location.url`. Without an ingress the chart derives
+    # `http://ci:8080`, which is only correct inside the cluster. Override at
+    # install time with the real edge hostname:
+    #   --set jenkins.controller.jenkinsUrl="https://<jenkinsHost>"
+    jenkinsUrl:
+
+  # ---------------------------------------------------------------------------
+  # Agents — the whole point of Phase 7
+  # ---------------------------------------------------------------------------
+  agent:
+    enabled: true
+    componentName: jenkins-agent
+
+    # The ServiceAccount agent pods run as. The chart leaves this empty and
+    # renders `serviceAccount: "default"` into the agent pod template, which is
+    # both a policy violation (policy/security.rego rule 10) and an identity
+    # with no RoleBinding behind it -- the pipelines' kubectl calls would 403.
+    # The identity itself is created by ci/rbac/agent-serviceaccount.yaml, and
+    # what it may change by ci/rbac/agent-deploy-rolebinding.yaml.
+    serviceAccount: jenkins-agent
+
+    # A stable label for the Jenkinsfile to pin. The template's own first label
+    # is `<release>-jenkins-agent`, which changes with the release name; `docker`
+    # is added here and does not.
+    customJenkinsLabels:
+      - docker
+
+    # Pod template name (the name Jenkins shows in the node list).
+    podName: "agent"
+
+    # ---------------------------------------------------------------------------
+    # concurrency x sizing against ci-quota
+    #
+    #   container        request        limit
+    #   jnlp             150m / 512Mi   250m / 768Mi
+    #   dind              50m / 256Mi   100m / 512Mi
+    #   ------------------------------------------------
+    #   agent pod        200m / 768Mi   350m / 1280Mi
+    #
+    #   at containerCap 8, with the controller pod above:
+    #   requests.cpu   120m + 8 x 200m = 1720m   <= 2000m  quota  (280m spare)
+    #   requests.mem   576Mi + 8 x 768Mi = 6720Mi <= 8192Mi quota (1472Mi spare)
+    #   limits.cpu    1100m + 8 x 350m = 3900m   <= 4000m  quota  (100m spare)
+    #   limits.mem    1664Mi + 8 x 1280Mi = 11904Mi <= 12288Mi quota (384Mi spare)
+    #   pods          1 + 8 = 9                   <= 12     quota
+    #
+    # `limits.cpu` is the ceiling that binds, and it is why containerCap is 8
+    # rather than the chart's default 10: a ninth agent pod would be rejected by
+    # the ResourceQuota at creation, which surfaces as an agent that never
+    # schedules and a build that queues forever. Jenkins is told the number the
+    # quota actually allows.
+    #
+    # The 250m CPU limit is small for a build, and it is honest rather than
+    # optimistic: docs/resource-budget.md records that a t3.medium sustains
+    # ~400m, so eight concurrent agents at 250m is already 2000m of limits
+    # against 400m of sustained CPU. The limit is an accounting device that keeps
+    # the quota true; the node-shape question is SPEC's unresolved question 1,
+    # recorded in TASKS.md, not something this file can fix.
+    # ---------------------------------------------------------------------------
+    containerCap: "8"
+
+    # Reuse an idle agent for 5 minutes instead of tearing it down between
+    # serial stages. podRetention stays "Never" (the chart default): the Phase 7
+    # exit criterion is a `kubectl get pods -n ci` pair showing the agent pod
+    # gone after the build.
+    idleMinutes: 5
+    podRetention: "Never"
+
+    resources:
+      requests:
+        cpu: "150m"
+        memory: "512Mi"
+      limits:
+        cpu: "250m"
+        memory: "768Mi"
+
+    # The Kubernetes plugin's own switch for injecting a PSS-restricted
+    # securityContext into the jnlp container. Namespace `ci` carries no PSA
+    # label (see the note in ci/jenkins/README.md), so this is the mechanism
+    # that makes the agent pod satisfy `restricted` anyway.
+    restrictedPssSecurityContext: true
+
+    # ---------------------------------------------------------------------------
+    # Docker-in-Docker sidecar
+    #
+    # There is no Dockerfile anywhere in this repository and no image build to
+    # run yet, so this sidecar is what Phase 8's build stage will need and is
+    # recorded in TASKS.md as untested. It is the one privileged container this
+    # platform admits, and the trade is stated rather than hidden:
+    #
+    #   privileged: true is root on the node host with every capability, inside
+    #   a pod that runs arbitrary build steps. The alternative the roadmap names
+    #   (kaniko, which builds images in userspace) is not installed and would
+    #   need its own pin.
+    #
+    # `DOCKER_HOST` is a pod-wide env var (agent.envVars) so the jnlp container —
+    # which runs the build's shell steps — points at the same daemon. Empty
+    # DOCKER_TLS_CERTDIR is what makes dockerd listen on plain TCP: with TLS
+    # enabled the daemon listens on 2376 and the certificate would have to be
+    # distributed to every agent pod.
+    # ---------------------------------------------------------------------------
+    additionalContainers:
+      - sideContainerName: dind
+        image:
+          repository: docker
+          # Fully pinned: 27.5.1-dind, verified to exist in library/docker on
+          # 2026-10-14. A floating `27-dind` would change daemon behaviour on a
+          # rebuild nobody asked for.
+          tag: "27.5.1-dind"
+        command: dockerd-entrypoint.sh
+        args: ""
+        privileged: true
+        # dockerd needs root; the jnlp container does not get this value
+        # (runAsUser is read per-container from this entry, not from
+        # agent.runAsUser, which is deliberately left unset).
+        runAsUser: 0
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "256Mi"
+          limits:
+            cpu: "100m"
+            memory: "512Mi"
+
+    envVars:
+      - name: DOCKER_HOST
+        value: "tcp://127.0.0.1:2375"
+      # The value is written as a quoted empty string ON PURPOSE. The chart
+      # renders this as `value: {{ tpl .value $ }}` with no quotes of its own,
+      # so a plain "" in values.yaml renders as `value:` — YAML null, which the
+      # JCasC plugin rejects for an EnvVar. The extra quotes survive templating
+      # and render `value: ""`, an actual empty string, which is what
+      # dockerd-entrypoint.sh checks for before it enables TLS.
+      - name: DOCKER_TLS_CERTDIR
+        value: '""'
+
+  # ---------------------------------------------------------------------------
+  # Persistence
+  # ---------------------------------------------------------------------------
+  persistence:
+    enabled: true
+    # local-path, not gp3. ROADMAP Phase 7 asks for gp3 and SPEC.md commits
+    # observability state to gp3, but a repo-wide `grep -rn "kind: StorageClass"`
+    # returns nothing and no EBS CSI driver is installed anywhere in platform/ or
+    # bootstrap/: a claim with storageClassName: gp3 would stay Pending forever,
+    # and a controller whose jenkins-home never mounts is a controller that never
+    # starts. `local-path` is what cluster/traefik/values.yaml:158 already binds
+    # through and what cluster/policies/policies.yaml:96 calls "the default
+    # StorageClass. Every PVC in observability ... binds through it".
+    #
+    # The gap — gp3 + CSI driver missing while SPEC.md says otherwise — is
+    # recorded in TASKS.md as a Phase 7 finding rather than papered over here.
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+    # 10Gi: 8Gi of job history + plugins (11 plugins unpack to ~700Mi) + headroom.
+    # It is an RWO claim on local-path, so the controller pod and the backup
+    # CronJob cannot be on different nodes — see ci/backup/cronjob.yaml, which
+    # pins itself to the controller's node with pod affinity.
+    size: "10Gi"
+
+  # ---------------------------------------------------------------------------
+  # Disruption
+  # ---------------------------------------------------------------------------
+  podDisruptionBudget:
+    # Enabled, at maxUnavailable "0": a single controller that is restarted by a
+    # drain is a CI outage, and Jenkins has no active-active mode to lose.
+    #
+    # The cost is real and is documented in docs/runbooks/ci.md: `kubectl drain`
+    # on the node holding this pod now BLOCKS until the PDB is relaxed or the
+    # drain is run with --disable-eviction. That is the correct trade for a
+    # control plane component, and a drain that silently takes CI down is not.
+    enabled: true
+    apiVersion: "policy/v1"
+    maxUnavailable: "0"
+
+  # ---------------------------------------------------------------------------
+  # NetworkPolicy
+  # ---------------------------------------------------------------------------
+  networkPolicy:
+    # false, and the reason is that it cannot be verified from this branch: a
+    # NetworkPolicy that is wrong about egress to the Kubernetes API (the agent
+    # scheduler needs it) or to Traefik (the route needs it) produces a
+    # controller that starts and then cannot schedule, and there is no cluster
+    # here to prove the rule set correct. Recorded in TASKS.md.
+    enabled: false

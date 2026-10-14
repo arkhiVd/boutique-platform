@@ -263,6 +263,26 @@ if need conftest conftest && [[ -d policy ]]; then
     check "conftest test ${CONFTEST_TARGETS[*]} --combine" -- \
       conftest test "${CONFTEST_TARGETS[@]}" -p policy/ --ignore "$CONFTEST_IGNORE" --combine
   fi
+  # The deliberately-failing fixtures, run here rather than by hand, because a
+  # policy that only ever passes is indistinguishable from a policy that never
+  # fires. conftest exits 1 when a rule fires, so for these files exit 1 is the
+  # pass condition and exit 0 is the failure — the reverse of every other check
+  # in this script. check_show prints the rejections themselves: they are the
+  # receipts, and hiding them behind a green PASS is how a rule quietly stops
+  # rejecting anything and nobody notices.
+  if [[ -d policy/tests/should-fail ]]; then
+    while IFS= read -r f; do
+      # The inner script is single-quoted ON PURPOSE: $1 and $rc belong to the
+      # child bash, and expanding them here would be the bug. SC2016 exists to
+      # catch the accidental version of exactly that.
+      # shellcheck disable=SC2016
+      check_show "conftest rejects $f" -- bash -c '
+        out="$(conftest test "$1" -p policy/ 2>&1)"; rc=$?
+        printf "%s\n" "$out"
+        [[ $rc -eq 1 ]]
+      ' _ "$f"
+    done < <(find policy/tests/should-fail -name '*.yaml' | sort)
+  fi
 fi
 
 cyan "== helm =="
@@ -422,7 +442,7 @@ if need python3 python3 && [[ -d observability ]]; then
       python3 scripts/resource-budget.py --node-count 1 \
       --config-reloader 10m/16Mi \
       --accept-over-commit 250 \
-      --extra ci:jenkins-controller:100m:512Mi \
+      --extra ci:jenkins-controller:120m:576Mi \
       "$TMP_RENDER"/*.yaml
   else
 
@@ -435,8 +455,11 @@ if need shellcheck shellcheck; then
   # scripts/ AND platform/: the Phase 3 cloud-init bootstrap and the Phase 4 etcd
   # snapshot script render INTO the launch template's user_data, so a shellcheck
   # finding in them is a finding that will run on every node on every boot.
+  # pipelines/ too: the shared library keeps its shell in pipelines/resources/,
+  # where the smoke and canary gates live -- the two scripts whose failure is a
+  # release either shipping or not shipping.
   while IFS= read -r f; do check "shellcheck $f" -- shellcheck -x "$f"; done \
-    < <(find scripts platform -name '*.sh' -not -path '*/.terraform/*' | sort)
+    < <(find scripts platform pipelines -name '*.sh' -not -path '*/.terraform/*' | sort)
 fi
 while IFS= read -r f; do check "bash -n $f" -- bash -n "$f"; done < <(find . -name '*.sh' -not -path './.git/*' | sort)
 

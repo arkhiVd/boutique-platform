@@ -1,0 +1,24 @@
+apiVersion: v2
+name: jenkins
+description: >-
+  boutique-platform's Jenkins controller. A thin wrapper over the pinned
+  jenkins/jenkins chart: everything this platform needs (JCasC, agent pod
+  template, probes, plugins, persistence, sizing) lives in values.yaml, and
+  nothing is copied out of the upstream templates.
+type: application
+version: 0.1.0
+# The Jenkins core version the dependency reports. Kept in sync with the
+# dependency below; `helm search repo jenkins/jenkins --versions` on 2026-10-14
+# returned 5.9.68 / app 2.580.1 as the current release.
+appVersion: "2.580.1"
+dependencies:
+  - name: jenkins
+    # Pinned, never a range. Verified current on 2026-10-14 with
+    #   helm repo add jenkins https://charts.jenkins.io
+    #   helm search repo jenkins/jenkins --versions | head -5
+    # 5.9.68 was the first row; 5.9.67, 5.9.66, 5.9.65, 5.9.64 follow it.
+    version: "5.9.68"
+    repository: "https://charts.jenkins.io"
+    # `alias` is deliberately absent: the wrapper keeps the upstream chart's own
+    # name so that `.Values.controller.*` in values.yaml maps 1:1 onto the
+    # upstream schema a reviewer can diff against VALUES.md.

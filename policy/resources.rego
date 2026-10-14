@@ -54,6 +54,10 @@ cpu_limit_millicores(pair) := millicores(object.get(pair.container, ["resources"
 
 deny_cpu_limits_differ_from_requests contains msg if {
 	some pair in owned_containers
+	# Gated: Guaranteed QoS is what this rule buys, and in the infrastructure
+	# namespaces it is too expensive against their ResourceQuota. See
+	# policy/ci.rego for the arithmetic and for what still applies there.
+	profile_for(pair.owner.namespace) == "restricted"
 	requests := object.get(pair.container, ["resources", "requests"], {})
 	requests.cpu
 	cpu_limit_millicores(pair) != millicores(requests.cpu)

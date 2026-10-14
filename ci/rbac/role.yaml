@@ -1,0 +1,64 @@
+# ===========================================================================
+# The Jenkins controller's Role, namespace `ci`.
+#
+# This is the chart's `schedule-agents` Role and its `casc-reload` Role merged
+# into one object, with the reasoning written at each rule instead of living in
+# a Helm template. Verbs are kept at chart parity -- including `deletecollection`
+# -- because the alternative is a controller that works in every other install of
+# this chart and fails at agent cleanup here, on a failure path nobody exercises
+# until an agent pod wedges.
+#
+# What is NOT in here is as important as what is: no `secrets` rule (the chart's
+# own secrets role is behind `rbac.readSecrets`, which is for the
+# kubernetes-credentials-provider plugin, which is not installed -- credentials
+# are seeded from Kubernetes Secrets that the chart projects into the pod with
+# the file system, not with the API), no `deployments`/`services` (the controller
+# never deploys the application; the pipelines do that from an agent, through
+# ci/rbac/agent-deploy-rolebinding.yaml), and no verbs outside `ci`.
+# ===========================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins
+  namespace: ci
+  labels:
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/name: jenkins
+    app.kubernetes.io/component: jenkins-controller
+    boutique.io/rbac-tier: platform
+rules:
+  # Agent lifecycle. The Kubernetes plugin creates the pod, watches it until the
+  # agent connects, execs into it to run the remoting launcher and to read
+  # container output, and deletes it when the build ends -- which is the whole
+  # "no long-lived workers" property of this phase.
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # Agent logs are a separate subresource from pods, and `kubectl logs` on a
+  # wedged agent is the first diagnostic anyone runs.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Scheduling events. When an agent pod stays Pending, the reason is an Event
+  # (`Insufficient cpu`, `node(s) didn't match pod's node affinity`), and the
+  # controller is what surfaces it in the build log.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # The chart grants these for PVC-backed agent volumes (a PodTemplate that
+  # declares a PVC). This agent template does not declare one -- the workspace
+  # is an emptyDir -- so the verbs are unused today. They are kept rather than
+  # trimmed because the first person who adds a PVC agent volume should not have
+  # to discover a missing grant from a 403 in a build log, and because a claim
+  # the controller can only read is worse than one it can manage.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # The JCasC auto-reload sidecar (kiwigrid/k8s-sidecar) watches the ConfigMaps
+  # the chart renders for `configScripts` and copies them into
+  # /var/jenkins_home/casc_configs, then POSTs a reload to localhost. No API
+  # access, no JCasC reload: this is the rule that keeps configuration as code
+  # actually as code.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]

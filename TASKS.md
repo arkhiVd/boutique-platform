@@ -16,6 +16,7 @@ blockers table rather than marked done.
 |---|---|---|
 | 3 | `platform/nodes.tf` — KMS CMK + alias, 2 launch templates, 3 servers (one per AZ) + 1 worker, the join-token SSM parameter written write-only, the leader-address parameter, `platform/cluster-bootstrap.sh` (cloud-init) and `platform/etcd-snapshot.sh`; `scripts/bootstrap-cluster.sh` (SSM kubeconfig, never in git) and `scripts/doctor.sh` (11 checks, one verdict) | `terraform -chdir=platform plan`: **58 to add, 0 to change, 0 to destroy**; `checkov -d platform`: **160 passed, 0 failed, 4 skipped (all with reasons)**; `tflint` clean; `shellcheck -x` + `bash -n` clean on 4 new scripts; the rendered user_data passes `bash -n` on the node; `grep -c <token>` = **0** in the plan text, the plan JSON and the saved plan file; `scripts/check.sh`: **103 PASS / 0 FAIL / 0 MISSING** |
 | 4 | `platform/etcd-backup.tf` (snapshot bucket: CMK, public-access-block, versioning, TLS-deny policy, lifecycle expiry), `cluster/rbac/` (4 ClusterRoles + 4 bindings, all group-based), `cluster/policies/` (4 add-on PDBs, the `boutique` default-deny with the DNS carve-out, `observability` + `ci` quotas and LimitRanges with the arithmetic), `cluster/priority.yaml`, `scripts/etcd-restore-drill.sh` | `kubeconform -strict -kubernetes-version 1.36.3 cluster/policies/`: **9 valid / 0 invalid**; `conftest test cluster/policies/ -p policy/`: **198 passed, 0 failures**; the drill's two guard rails (no `TARGET=cluster-live` without `LIVE_ACK=yes`; no write under `/var/lib/rancher/k3s`) exercised against a stubbed environment |
+| 7 and 8 | **CI/CD, on `feat/cicd` (unmerged).** `ci/jenkins/` wrapper chart on `jenkins/jenkins` 5.9.68 — JCasC, eleven plugin pins, the kubernetes agent pod template with its `dind` sidecar, PVC, priority class; `ci/rbac/` (SA `jenkins`, Role, RoleBinding, SA `jenkins-agent`, and the `boutique` RoleBinding that lets an agent deploy an app); `ci/backup/cronjob.yaml`; `policy/ci.rego` (namespace profiles, so `ci` and `observability` run `baseline` and everything else stays `restricted`); `pipelines/` shared library (9 `vars/` steps + 3 shell resources); the root `Jenkinsfile` (12 gates, 6 stages); `ci/jenkins/README.md`, `docs/runbooks/ci.md` | `helm lint --strict` clean; `helm template ci ci/jenkins` → `StatefulSet ci` only — the ServiceAccount/Role/RoleBinding come from `ci/rbac/` and the CronJob from `ci/backup/` by design, so the rendered grep shows one kind and the source grep shows six files; `kubeconform -strict` **6/6 valid** on the non-chart files (the literal `kubeconform … ci/` exits 1 on `Chart.yaml`/`values.yaml` with "missing 'kind' key" — check.sh filters exactly those); `conftest test ci/` **144 passed**; policy A/B old-vs-new over apps+cluster+ci+observability **2430 tests, byte-identical output**, `--combine` identical, all 3 fixtures identical exit codes; `shellcheck -x` + `bash -n` clean; `actionlint` clean; `gitleaks` clean; **11 plugin pins HTTP 200** from `updates.jenkins.io/download/plugins`; all **12 Jenkinsfile gates green** in their pinned containers (same `docker run` shape as `vars/tools.groovy`); `scripts/check.sh` **127 PASS / 0 FAIL / 0 MISSING** |
 | 0 | SPEC / ROADMAP / AGENTS / TASKS, `scripts/check.sh`, `scripts/cost-estimate.sh`, ADRs 0001–0003, CI plan gate | `check.sh` 0 FAIL; gitleaks clean; actionlint clean |
 | 1 | `bootstrap/` — state bucket, split OIDC plan/apply roles, AWS Budget, SNS alerts | `terraform validate`, `plan: 14 to add, 0 to change, 0 to destroy`, `checkov 70 passed 0 failed 6 skipped` |
 | 2 | `platform/` — VPC `10.90.0.0/16`, 3 public subnets, 4 security groups, narrow node instance profile | `plan: 42 to add, 0 to change, 0 to destroy`, `checkov 103 passed 0 failed`, `tflint` clean |
@@ -38,6 +39,11 @@ blockers table rather than marked done.
 | adservice / shippingservice tracing | `docs/adr/0004-adservice-tracing-gap.md` — a pinned OTel Java agent, and where its temp dir lives under `readOnlyRootFilesystem: true` |
 | k3s Traefik histogram buckets | Phase 5 — Traefik's defaults (0.1/0.3/1.2/5.0) make the p95 latency SLI resolve to one of four values |
 | External probe target | Phase 5 Terraform output |
+| Phase 7 controller boot, JCasC apply, agent pods | a cluster — `kubectl apply` and `helm install` are not run by this phase, and nothing in it proves the controller starts |
+| Phase 7 backup end to end | the S3 snapshot bucket (Terraform, not applied) and Secret `jenkins-backup-credentials` |
+| Phase 8 image build, SBOM, sign, push | no `Dockerfile` in this repository, no `aws_ecr_repository` anywhere in Terraform, no cosign key |
+| Phase 8 ephemeral `pr-<n>` preview namespaces | a grant outside `boutique`; `deployToStaging(prNumber: …)` fails with that sentence rather than applying to a namespace that does not exist |
+| Phase 8 smoke gate, canary, promotion | a deployed application — this repository deploys none of its own, so each stage is wired and unexercised |
 
 ## Decisions taken in-session (SPEC unresolved questions, now resolved)
 
@@ -107,6 +113,19 @@ blockers table rather than marked done.
   (160 passed, 0 failed, 4 skipped with reasons), tflint, shellcheck, kubeconform (9 valid),
   conftest (198 passed), gitleaks, and `scripts/check.sh` at 103 PASS / 0 FAIL / 0 MISSING.
   **Nothing has been applied.** Every cluster-dependent exit criterion is in the blockers table.
+- 2026-10-14 Phases 7 and 8 on `feat/cicd` (unmerged). The Jenkins controller as a wrapper
+  chart (`ci/jenkins/`, 5.9.68 pinned, `installLatestPlugins: false` with eleven pins whose
+  versions each return HTTP 200 from the Jenkins update center), the identity it runs as
+  (`ci/rbac/`, five files, no `secrets` verb, agent deploy granted in `boutique` only), the daily
+  PVC→S3 backup (`ci/backup/cronjob.yaml`, fails loudly while the bucket does not exist), the
+  namespace profile in `policy/ci.rego` that lets `ci` keep a token mount without loosening
+  `boutique`, the shared library (`pipelines/`, 9 steps + 3 shell resources, every tool image
+  pinned), the root `Jenkinsfile` (12 gates that mirror `scripts/check.sh`, then
+  build/scan/deploy/smoke/canary-with-auto-rollback/promote), and the two documents an operator
+  needs (`ci/jenkins/README.md`, `docs/runbooks/ci.md`). Proven by the ten validations in the
+  table above, by the policy A/B (2430 tests, byte-identical old-vs-new), and by running all
+  twelve gates in their pinned containers on this machine. **Nothing is deployed, nothing is
+  merged, and every cluster-dependent claim is in the blockers table.**
 
 ## Residual risk for Phase 3 and 4, recorded rather than hidden
 
@@ -119,6 +138,16 @@ blockers table rather than marked done.
 | R5 | **Two cost lines the SPEC's table does not carry**: the CMK at $1.00/mo and detailed monitoring at $0.30 per instance per month ($1.20/mo for four instances) = **+$2.20/mo, $3.13 over the 43-day window**. `scripts/cost-estimate.sh` still prints the SPEC's shape and total; the delta is here, not silently absorbed. | the SPEC's cost table is the Phase 0 contract and was left alone |
 | R6 | **`terraform plan` after an apply is not proven empty.** The usual drift sources are handled: `ignore_changes` covers the tags a cloud controller would add plus `tags_all`, the launch template is not force-newed by a user_data edit, and `metadata_options`/monitoring/volumes are repeated identically on the instance where EC2 honours them. `user_data`'s base64 read-back encoding is the one thing that could produce a perpetual diff and it can only be settled by applying. | no apply |
 | R7 | **The k3s installer script is fetched over TLS and not digest-pinned.** The artefact it installs is pinned by `INSTALL_K3S_VERSION`. | recorded in `platform/README.md` |
+
+## Residual risk for Phases 7 and 8, recorded rather than hidden
+
+| # | Risk | Why it is not closed here |
+|---|---|---|
+| R8 | **The `dind` sidecar is the one privileged container on the platform, and it is untested.** `privileged: true` is root on the node host with every capability, inside a pod that runs arbitrary build steps. The alternative the roadmap names (kaniko, userspace builds) is not installed and would need its own pin. | no cluster |
+| R9 | **The agent pod's own spec lives inside a ConfigMap the Kubernetes plugin renders, so `conftest` never sees it.** The controller's resources are policy-checked; the agent's are not — the values are right today and nothing enforces that they stay right. | plugin behaviour |
+| R10 | **The `ci` namespace has no manifest.** `cluster/policies/` references it (quota, LimitRange) but nothing creates it; `ci/jenkins/README.md` carries the `kubectl create namespace ci` step instead. | the phase did not extend `cluster/` |
+| R11 | **A pinned tag is not a digest.** Every tool image in `pipelines/vars/toolImages.groovy` was checked against its registry's tag API (2026-10-14), and trivy is deliberately matched to the laptop's 0.69.3 — but a re-pointed tag or a new check bundle changes CI first and the laptop second. | inherent to tag pinning |
+| R12 | **The backup job and the promotion path depend on things that do not exist yet** (the S3 bucket, a cosign key, an ECR repository). Both are written to fail loudly rather than to skip quietly; until those exist, the failure is the feature. | see the blockers table |
 
 Move a task here only after its acceptance criteria and validation passed. Record skipped
 validation and residual risk instead of marking incomplete work done.
