@@ -1,0 +1,194 @@
+# Spanmetrics golden signals — recording rules and the connector's absence alert
+# -----------------------------------------------------------------------------
+# A BARE Prometheus rule file (`promtool check rules` accepts only `groups:`).
+# observability/kube-prometheus-stack/templates/platform-rules.yaml loads every
+# file under rules/ and wraps it into a PrometheusRule with the labels the
+# Prometheus Operator needs.
+#
+# WHERE THE SERIES COME FROM, and why the label is `job`
+# -----------------------------------------------------------------------------
+# `traces_spanmetrics_calls_total` and `traces_spanmetrics_duration_seconds`
+# are produced by the spanmetrics CONNECTOR in
+# apps/boutique/observability/opentelemetrycollector.yaml, fed from a dedicated
+# pre-sampling traces pipeline (every span, not the sampled 10%), scraped out of
+# the collector's prometheus exporter on :9464 by
+# observability/servicemonitors/opentelemetrycollector.yaml.
+#
+# The connector's own labels are `service_name`, `span_name`, `span_kind`,
+# `status_code` plus the configured `http.method` / `http.route` dimensions
+# (otelcol-contrib v0.160.0 connector/spanmetricsconnector/config.go: the four
+# default dimensions are service.name, span.name, span.kind, status.code).
+# `collector.instance.id` is excluded in the connector config so two collector
+# replicas do not double the series count; Prometheus' own `instance` label
+# still separates them and `sum by (job)` below aggregates them back.
+#
+# `job` is the LOGICAL service name (frontend, checkoutservice, ...), the same
+# label the Traefik-derived rules in boutique-golden-signals.yaml produce. The
+# rename happens in exactly one place, in the `label_replace` of the first rule
+# below, so the two sources can be joined — which is what
+# `boutique:edge_to_span_ratio` does, and what turns "the edge says requests
+# are flowing, the process says no spans are arriving" into a queryable
+# difference instead of an unexplained blank panel.
+#
+# SERVER SPANS ONLY, on purpose. A checkout produces a client span in frontend
+# AND a server span in checkoutservice for the same request. Counting both
+# would report every request twice; filtering `span_kind="SPAN_KIND_SERVER"`
+# counts each service's inbound work once, which is the number the word
+# "per-service request rate" promises.
+#
+# WHY THESE RULES MOVED HERE (2026-10-14, Phase 11)
+# -----------------------------------------------------------------------------
+# They were first written, pre-connector, inside
+# boutique-golden-signals.yaml — with `sum by (job)` over a metric whose label
+# is `service_name` (which silently collapses every service into one unnamed
+# series) and with `status_code="error"` where the connector emits the
+# protobuf enum `STATUS_CODE_ERROR` (which silently never matches). Both are
+# the exact failure this file exists to make visible: rules that `promtool
+# check rules` accepts, dashboards that accept, and that produce either one
+# wrong line or none. The group now lives here, fixed, next to the alert that
+# watches the connector itself.
+
+groups:
+  - name: spanmetrics.golden-signals
+    interval: 30s
+    rules:
+      # The one place service_name becomes job. Everything downstream — the
+      # error ratio, the latency quantile, the edge cross-check — uses `job`,
+      # so a change to the connector's dimension set is a change to exactly one
+      # expression.
+      #
+      # The service regex is the ten OTel-instrumented services. redis-cart and
+      # loadgenerator have no tracer (upstream has none; see TASKS.md U3/U4),
+      # and admitting them here would make "service X has no spans" look like a
+      # connector failure rather than a known gap.
+      - record: span:request_rate:ratio
+        expr: |
+          sum by (job) (
+            label_replace(
+              rate(
+                traces_spanmetrics_calls_total{
+                  span_kind="SPAN_KIND_SERVER",
+                  service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
+                }[5m]
+              ),
+              "job", "$1", "service_name", "(.*)"
+            )
+          )
+        # Per-second, per-service inbound span rate. Pre-sampling (see the
+        # connector's second traces pipeline), so this is a TRUE rate and not
+        # "10% of the rate, plus every error" — a post-sampling rate would be
+        # biased upward on errors and useless as a traffic signal.
+
+      # Errors are spans with OTel status ERROR, i.e. the protobuf enum value
+      # the connector emits. This is the numerator of the availability SLO's
+      # process-level cross-check, and unlike the Traefik 5xx ratio it counts
+      # an application-level failure that never reached an HTTP status code.
+      - record: span:error_ratio:ratio
+        expr: |
+          sum by (job) (
+            label_replace(
+              rate(
+                traces_spanmetrics_calls_total{
+                  span_kind="SPAN_KIND_SERVER",
+                  status_code="STATUS_CODE_ERROR",
+                  service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
+                }[5m]
+              ),
+              "job", "$1", "service_name", "(.*)"
+            )
+          )
+          /
+          sum by (job) (
+            label_replace(
+              rate(
+                traces_spanmetrics_calls_total{
+                  span_kind="SPAN_KIND_SERVER",
+                  service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
+                }[5m]
+              ),
+              "job", "$1", "service_name", "(.*)"
+            )
+          )
+
+      # p95 from the connector's explicit histogram. The buckets are the SAME
+      # ladder as cluster/traefik/values.yaml (0.05 ... 10s), so this p95 and
+      # the Traefik-edge p95 in boutique-golden-signals.yaml are measured with
+      # the same resolution and can be compared directly.
+      - record: span:latency_p95:seconds
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (job, le) (
+              label_replace(
+                rate(
+                  traces_spanmetrics_duration_seconds_bucket{
+                    span_kind="SPAN_KIND_SERVER",
+                    service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
+                  }[5m]
+                ),
+                "job", "$1", "service_name", "(.*)"
+              )
+            )
+          )
+
+      # The cross-check between the two views of one request: the edge
+      # (Traefik, job:request_rate:ratio) and the process (spans,
+      # span:request_rate:ratio). A value that is persistently far from 1 is
+      # either a broken OTLP path (edge up, spans flat) or traffic that never
+      # reaches the edge (spans up, edge flat). Either is a finding, and it is
+      # the reason both sources carry the same `job` label.
+      - record: boutique:edge_to_span_ratio
+        expr: |
+          job:request_rate:ratio{job=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"}
+          /
+          on (job) group_left
+          span:request_rate:ratio
+
+  - name: spanmetrics.alerts
+    interval: 30s
+    rules:
+      ## -------------------------------------------------------------------
+      ## TracesSpanmetricsMissing — the connector, watched by its own absence.
+      ##
+      ## `absent()` is the right operator here and the trap is worth naming:
+      ## `count(count by (service_name)(...)) < 1` evaluates to NOTHING when the
+      ## series is gone — an empty vector is not a small vector — so a "count
+      ## the series" alert can never fire for the one condition it exists to
+      ## catch. `absent()` returns a 1 exactly when the selector matches no
+      ## series, which is the definition of "the connector stopped producing".
+      ##
+      ## frontend is the probe service: every checkout passes through it, so a
+      ## live frontend server-span series means spans are arriving, being
+      ## aggregated and being scraped. Scoping to one service instead of
+      ## requiring "all ten" also means one instrumented service that stops
+      ## emitting does NOT fire this alert — that failure shows up as a missing
+      ## line on span:request_rate:ratio and is a per-service investigation,
+      ## not a pipeline one.
+      ##
+      ## severity: ticket, not page: the Traefik-derived golden signals and the
+      ## SLO alerts do not depend on this connector, so its death makes the
+      ## process-level view blind without taking away the user-visible-error
+      ## signal. docs/runbooks/traces.md ("the spanmetrics connector produces
+      ## no series") is the first stop.
+      ## -------------------------------------------------------------------
+      - alert: TracesSpanmetricsMissing
+        annotations:
+          summary: "Spanmetrics series for frontend are gone from the collector"
+          description: >-
+            No traces_spanmetrics_calls_total series exists for
+            service_name=frontend, span_kind=SPAN_KIND_SERVER. The collector's
+            spanmetrics connector has stopped producing: either the collector
+            Deployment is down, the metrics pipeline is broken, or the
+            ServiceMonitor stopped scraping. Every span-derived panel
+            (span:request_rate:ratio, span:error_ratio:ratio,
+            span:latency_p95:seconds, and the traces dashboard) is now blind;
+            the Traefik edge signals still work. First commands are in
+            docs/runbooks/traces.md.
+          runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks/traces.md
+        expr: |
+          absent(traces_spanmetrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})
+        for: 15m
+        labels:
+          severity: ticket
+          platform.boutique/component: traces
+          scope: platform

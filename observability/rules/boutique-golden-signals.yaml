@@ -25,12 +25,14 @@
 #
 #   2. The OTel Collector's spanmetrics connector (Phase 11) — server-side
 #      spans, `traces_spanmetrics_calls_total` and
-#      `traces_spanmetrics_duration_seconds`. The connector does not exist yet
-#      (apps/boutique/observability/opentelemetrycollector.yaml ships only
-#      memory_limiter, tail_sampling and batch), so those rules are written and
-#      documented but produce no series until Phase 11 adds the connector. They
-#      are NOT given the same names as the Traefik rules: overlap would make one
-#      series the sum of two sources and quietly double every request rate.
+#      `traces_spanmetrics_duration_seconds`. The connector and its rules now
+#      live with the rest of the span pipeline: the connector in
+#      apps/boutique/observability/opentelemetrycollector.yaml, the rules and
+#      the TracesSpanmetricsMissing alert in observability/rules/spanmetrics.yaml
+#      (moved there in Phase 11 when the connector landed, and fixed on the way
+#      out: the old copies here summed by a label the metric does not have). The
+#      two sources are NOT given the same names: overlap would make one series
+#      the sum of two sources and quietly double every request rate.
 #
 # Naming follows the Prometheus recording-rule convention
 # (https://prometheus.io/docs/practices/rules/): `level:metric:operation`, with
@@ -132,55 +134,3 @@ groups:
         expr: |
           count(count by (le) (traefik_service_request_duration_seconds_bucket{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}))
         # == 4 means the default buckets are in force.
-
-  ## -----------------------------------------------------------------------
-  ## spanmetrics-derived golden signals (Phase 11 owner, written now)
-  ## -----------------------------------------------------------------------
-  - name: boutique.golden-signals.spanmetrics
-    interval: 30s
-    rules:
-      # These exist so that the two independent views of the same request —
-      # the edge (Traefik) and the process (OTel spans) — can be compared, and
-      # so that a difference between them is itself a signal: if Traefik says
-      # requests are flowing and spanmetrics says no spans are arriving, the
-      # OTLP path is broken.
-      #
-      # Expected series shape, from the spanmetrics connector defaults in
-      # otel/opentelemetry-collector-contrib: `traces_spanmetrics_calls_total`
-      # with labels {service_name, span_name, status_code} where status_code
-      # is "" or "error", and `traces_spanmetrics_duration_seconds_bucket`
-      # with {service_name, span_name, le}.
-      #
-      # These rules produce NO SERIES until Phase 11. `promtool check rules`
-      # accepts them because it validates syntax, not existence — that is a
-      # known limitation of the local gate, and the Phase 11 exit criteria
-      # (`promtool query instant` returning non-zero span metrics) is what
-      # proves them live.
-      - record: span:request_rate:ratio
-        expr: |
-          sum by (job) (
-            rate(traces_spanmetrics_calls_total{service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"}[5m])
-          )
-      - record: span:error_ratio:ratio
-        expr: |
-          sum by (job) (
-            rate(traces_spanmetrics_calls_total{
-              service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice",
-              status_code="error"
-            }[5m])
-          )
-          /
-          sum by (job) (
-            rate(traces_spanmetrics_calls_total{
-              service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
-            }[5m])
-          )
-
-      # The cross-check between the two sources. A value other than 1 means
-      # the edge and the process disagree about how many requests happened.
-      - record: boutique:edge_to_span_ratio
-        expr: |
-          job:request_rate:ratio
-          /
-          on (job) group_left
-          span:request_rate:ratio

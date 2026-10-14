@@ -31,7 +31,9 @@ metadata:
       Runs tail_sampling, whose per-trace decision is made from the spans of that
       trace, so every span of a trace must land on the same replica. Scaling
       without a trace-aware load-balancing exporter silently corrupts sampling,
-      so the replica count is manual until Phase 11 lands that exporter.
+      so the replica count is manual: Phase 11 landed the Tempo backend and the
+      spanmetrics connector, but not that exporter, and it stays manual until
+      one or the other changes.
 spec:
   # ADDED (upstream runs 1). Behind a ClusterIP Service the collector is
   # stateless, so a single replica is a single point of failure in the trace
@@ -42,8 +44,10 @@ spec:
   # decision for a trace is made from the spans of that trace — so every span of
   # a trace has to arrive at the same replica, and scaling the collector without
   # a trace-aware load-balancing exporter in front of it silently corrupts
-  # sampling decisions. That exporter is Phase 11 work; until it lands the
-  # replica count is a manual decision. Two, on purpose.
+  # sampling decisions. Phase 11 landed the Tempo backend and the spanmetrics
+  # connector but NOT that exporter (it is still open work — see the
+  # `platform.boutique/hpa-reason` annotation above), so the replica count stays
+  # a manual decision. Two, on purpose.
   replicas: 2
   revisionHistoryLimit: 5
   progressDeadlineSeconds: 600
@@ -122,6 +126,22 @@ spec:
           containerPort: 4317
         - name: http-otlp
           containerPort: 4318
+        # ADDED (Phase 11). The prometheus exporter serves the spanmetrics
+        # pipeline's output — traces_spanmetrics_calls_total and
+        # traces_spanmetrics_duration_seconds — on :9464. Named port, because
+        # a ServiceMonitor selects endpoints by PORT NAME (the pattern already
+        # used in observability/servicemonitors/loki.yaml); a bare number in a
+        # Service with no name is the recorded gap this phase also closes.
+        - name: metrics
+          containerPort: 9464
+        # ADDED (Phase 11, closes U5-family gap): the collector's OWN telemetry
+        # (otelcol_* self-metrics — queue lengths, batch sizes, exporter
+        # failures) already listens on 0.0.0.0:8888 in the config below, but no
+        # Service port named it, so nothing could scrape it and a broken
+        # exporter looked identical to a healthy one from Prometheus' side.
+        # Named `telemetry` so the ServiceMonitor can target it explicitly.
+        - name: telemetry
+          containerPort: 8888
         # ADDED. The image is distroless, so an exec probe has no shell to run;
         # a tcpSocket probe is checked by the kubelet from outside the container
         # and is the only kind that works here. Without it a collector that
@@ -148,13 +168,22 @@ spec:
         # request (100m/64Mi) and be the first thing OOM-killed on a node under
         # pressure — for a component whose entire job is to survive a traffic
         # spike. Limits are pinned so the queue is bounded, not so it can burst.
+        #
+        # CHANGED in Phase 11: memory 128Mi/256Mi -> 192Mi/384Mi. The spanmetrics
+        # connector is a stateful aggregation (one accumulator per unique
+        # dimension set, until metrics_expiration retires it) and it now runs in
+        # a second traces pipeline plus a metrics pipeline. 384Mi of limit with
+        # memory_limiter at 75% = a 288Mi working ceiling, and the limiter sheds
+        # load instead of the kubelet killing the pod — which is the control that
+        # makes the number survivable rather than optimistic. CPU stays at 100m:
+        # the added work is aggregation and a second batcher, both amortised.
         resources:
           requests:
             cpu: 100m
-            memory: 128Mi
+            memory: 192Mi
           limits:
             cpu: 100m
-            memory: 256Mi
+            memory: 384Mi
       volumes:
       # CHANGED. Upstream ships an initContainer that curls
       # http://metadata.google.internal/computeMetadata/v1/project/project-id and
@@ -219,8 +248,9 @@ data:
     processors:
       # Back-pressure. The collector refuses to start a new receive batch once it
       # is holding more than 75% of its memory limit and sheds load instead of
-      # being OOM-killed by the kubelet. This is the control that makes the 256Mi
-      # limit above survivable.
+      # being OOM-killed by the kubelet. This is the control that makes the 384Mi
+      # limit above survivable. It is listed FIRST in every pipeline below —
+      # memory_limiter anywhere but first protects the wrong thing.
       memory_limiter:
         check_interval: 5s
         limit_percentage: 75
@@ -252,23 +282,159 @@ data:
         send_batch_size: 8192
         send_batch_max_size: 8192
     exporters:
-      # THE ONE LINE THAT CHANGES IN PHASE 11, stated plainly rather than faked
-      # with a guessed value. Phase 11 owns the Tempo endpoint and it does not
-      # exist yet, so there is no honest destination to configure here; a
-      # made-up one would be worse than this one. `debug` proves the pipeline
-      # end to end today: `kubectl logs -n observability deploy/
-      # opentelemetrycollector` shows the spans that survived sampling.
-      debug:
-        verbosity: basic
+      # PHASE 11: the debug exporter is gone and this is its replacement. The
+      # comment that used to live here said Phase 11 owns the Tempo endpoint —
+      # it does now. Spans that survive tail_sampling go to Tempo's OTLP/gRPC
+      # receiver (the `tempo` chart's distributor, Service `tempo`, port 4317).
+      # `tls.insecure` because both ends are in-cluster on a ClusterIP mesh with
+      # no mesh mTLS (SPEC non-goal: "not a service mesh") — the alternative is
+      # a CA the cluster has no PKI for.
+      otlp/tempo:
+        endpoint: tempo.observability.svc.cluster.local:4317
+        tls:
+          insecure: true
+        # Bounded queue with a hard cap: Tempo being down must degrade to "the
+        # collector sheds traces" and never to "the collector's heap grows until
+        # the kubelet kills it". 100 batches of queue at the measured span rate
+        # is enough to ride out a rolling restart of Tempo's single replica, not
+        # so much that a dead backend becomes an OOM.
+        sending_queue:
+          enabled: true
+          num_consumers: 4
+          queue_size: 100
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+      # The prometheus exporter serves the spanmetrics pipeline below on :9464.
+      # Prometheus scrapes it (observability/servicemonitors/
+      # opentelemetrycollector.yaml); nothing remote-writes from here. Keeping
+      # the scrape path means the usual scrape hygiene applies — `up{}` says
+      # whether the target is alive, and the TracesSpanmetricsMissing alert in
+      # observability/rules/spanmetrics.yaml fires when the series it serves
+      # stop appearing.
+      prometheus:
+        endpoint: 0.0.0.0:9464
+        # Cardinality is bounded by the dimension set in the connector below,
+        # not here. resource_to_telemetry_conversion stays OFF (the default):
+        # copying every resource attribute (k8s.pod.name, host.name, ...) onto
+        # every series would turn ~260 series into thousands for attributes no
+        # panel reads. service.name is already a dimension of its own.
+
+    # ---------------------------------------------------------------------------
+    # The spanmetrics connector — traces IN, RED metrics OUT (Phase 11).
+    #
+    # A connector is one component used twice: an exporter in the traces
+    # pipeline that feeds it, and a receiver in the metrics pipeline that drains
+    # it. There is exactly ONE instance of it in this config, and that matters:
+    # two instances writing the same metric family violates the OTel single-
+    # writer rule (connector README, "Known Limitation").
+    #
+    # WHERE IT IS FED FROM, and why it is not in the tail-sampled pipeline:
+    # the `traces/spanmetrics` pipeline below is a SECOND pipeline off the same
+    # otlp receiver, with no tail_sampling in it. The main `traces` pipeline
+    # keeps 100% of errors, 100% of spans slower than 500ms, and 10% of
+    # everything else — feed that into spanmetrics and the error RATIO is
+    # biased upward (errors are always counted, successes mostly are not), and
+    # the request RATE is a tenth of the truth. A fan-out pipeline fixes both:
+    # Tempo gets sampled traces, Prometheus gets true rates, and each span is
+    # still counted once because the receiver clones the stream, it does not
+    # duplicate the load (each collector replica sees each span once).
+    # ---------------------------------------------------------------------------
+    connectors:
+      spanmetrics:
+        # Seconds, not the connector's default of milliseconds. The default unit
+        # is an alpha-gated knob in v0.160.0 (useSecondAsDefaultMetricsUnit), so
+        # without this line the histogram would be
+        # traces_spanmetrics_duration_milliseconds and every PromQL expression
+        # in observability/rules/spanmetrics.yaml would be written against a
+        # metric name that does not exist. Named explicitly; not inherited.
+        histogram:
+          unit: s
+          explicit:
+            # THE SAME LADDER as cluster/traefik/values.yaml
+            # (metrics.prometheus.buckets) and the Tempo service-graphs
+            # processor in observability/tempo/values.yaml: 50ms to 10s, six
+            # resolution points under a second. One ladder across every layer
+            # means a p95 from spans and a p95 from the edge are comparable
+            # without a unit-conversion footnote.
+            buckets: [0.05s, 0.1s, 0.25s, 0.5s, 1s, 2.5s, 5s, 10s]
+        # Attributes promoted to labels ON TOP OF the connector's built-in
+        # defaults (service.name, span.name, span.kind, status.code).
+        #   http.method — GET/POST, cardinality 2-3, and the dimension that
+        #                 tells "the cart endpoint is failing" from "reads are
+        #                 slow".
+        #   http.route  — the bounded route template (/cart, /cart/setZone),
+        #                 NOT http.target: the target can carry a product ID and
+        #                 is exactly how a spanmetrics config turns into a
+        #                 cardinality incident.
+        # http.status_code is deliberately NOT here: status_code (the OTel span
+        # status, STATUS_CODE_ERROR) is already a default dimension and is the
+        # one the error-ratio rule uses; adding the HTTP code as well would
+        # multiply every series by ~5 for a label no rule reads.
+        dimensions:
+          - name: http.method
+          - name: http.route
+        # The beta feature gate includeCollectorInstanceID (on by default since
+        # v0.136.0) appends collector.instance.id to every series. With 2
+        # replicas that doubles the series count for a label nothing aggregates
+        # on — Prometheus already distinguishes the two scrape targets by
+        # `instance`, and `sum by (job)` in observability/rules/spanmetrics.yaml
+        # merges them back. Excluded on purpose, not forgotten.
+        exclude_dimensions: ["collector.instance.id"]
+        # Hard cap on unique dimension combinations. ~10 services x ~3 span
+        # kinds x ~2 methods x ~20 routes x 2 statuses is well under 3k; 5000
+        # is headroom with a floor under it, so a mislabelled attribute is
+        # dropped (with otel.metric.overflow="true") instead of becoming an
+        # unbounded heap.
+        aggregation_cardinality_limit: 5000
+        # 15s: faster than the 30s scrape interval would need, slow enough that
+        # the flush is not one batch per burst. This is the cadence the Tempo
+        # metrics-generator registry was set to as well, so the two Phase 11
+        # metric families land on the same time grid.
+        metrics_flush_interval: "15s"
+
     service:
       telemetry:
         metrics:
-          address: 0.0.0.0:8888
+          # The collector's own otelcol_* self-metrics, on 0.0.0.0:8888 so the
+          # ServiceMonitor can reach it (named port `telemetry`, in the Service
+          # below). This is the post-0.130 spelling: `address` was REMOVED by
+          # otelcol-contrib v0.160.0 — the binary rejects it with
+          # `migration.MetricsConfigV030 has invalid keys: address`, verified by
+          # running `otelcol-contrib validate --config` against this exact
+          # config. The pull endpoint is now a reader under `readers`; the
+          # exporter/prometheus keys here are telemetry self-metrics config and
+          # are NOT the spanmetrics exporter above, which has its own
+          # `endpoint` key and still uses it.
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
       pipelines:
+        # The SAMPLING path: tail_sampling keeps errors, slow traces and a 10%
+        # baseline; batch then collapses what survives into gRPC-sized messages
+        # for Tempo. memory_limiter first in every pipeline.
         traces:
           receivers: [otlp]
           processors: [memory_limiter, tail_sampling, batch]
-          exporters: [debug]
+          exporters: [otlp/tempo]
+        # The METRICS path, off the same receiver, deliberately WITHOUT
+        # tail_sampling — see the connector header above. batch is here because
+        # an unbatched metric flush is one message per series.
+        traces/spanmetrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [spanmetrics]
+        # The connector's output, aggregated and served for Prometheus to
+        # scrape on :9464.
+        metrics/spanmetrics:
+          receivers: [spanmetrics]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
 
 ---
 apiVersion: v1
@@ -278,6 +444,13 @@ metadata:
   namespace: observability
   labels:
     app: opentelemetrycollector
+    # The ServiceMonitor's `jobLabel: app.kubernetes.io/name` reads THIS label.
+    # Without it the operator falls back to the Service name (same string), so
+    # `up{job="opentelemetrycollector"}` came out right anyway — but a jobLabel
+    # that names a label nobody sets is a comment waiting to become a lie the
+    # first time the Service is renamed. The label the rest of this file already
+    # uses costs nothing here.
+    app.kubernetes.io/name: opentelemetrycollector
 spec:
   type: ClusterIP
   selector:
@@ -290,4 +463,27 @@ spec:
   - name: http-otlp
     port: 4318
     targetPort: 4318
+    protocol: TCP
+  # ADDED (Phase 11). Two named ports, one per thing Prometheus scrapes off
+  # this pod, and both are named because a ServiceMonitor selects endpoints by
+  # PORT NAME:
+  #
+  #   metrics    9464  the prometheus exporter — traces_spanmetrics_* (the RED
+  #                    series observability/rules/spanmetrics.yaml records and
+  #                    alerts on)
+  #   telemetry  8888  the collector's own otelcol_* self-metrics. This is the
+  #                    recorded gap: the config exposed 0.0.0.0:8888 but no
+  #                    Service port named it, so the exporter-health metrics
+  #                    (otelcol_exporter_send_failed_*, queue size) were
+  #                    unreachable from Prometheus — a broken exporter and a
+  #                    healthy one looked identical from the outside.
+  #
+  # observability/servicemonitors/opentelemetrycollector.yaml scrapes both.
+  - name: metrics
+    port: 9464
+    targetPort: 9464
+    protocol: TCP
+  - name: telemetry
+    port: 8888
+    targetPort: 8888
     protocol: TCP
