@@ -52,7 +52,7 @@ auto-refreshes every 30s</p>
 <p><strong>Everything below the approval gates is built, merged to <code>main</code> — and since 2026-10-14, applied.</strong> Both stacks are live in <code>us-east-1</code>. The numbers below were re-run on 2026-10-14 against this commit, not carried forward from an earlier one.</p>
 <p>What is applied and at what stage:</p>
 <table><thead><tr><th>phase</th><th>state</th><th>what it means</th></tr></thead><tbody><tr><td>0 guardrails</td><td>merged, green</td><td>SPEC / ROADMAP / TASKS / ADRs / <code>scripts/check.sh</code></td></tr><tr><td>1–2 network, IAM, VPC</td><td><strong>applied</strong></td><td>state bucket, VPC, subnets, security groups; bootstrap's 14 resources are live</td></tr><tr><td>3–4 cluster</td><td><strong>applied</strong></td><td>4 × t3.small running, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill</td></tr><tr><td>5 edge</td><td><strong>applied</strong></td><td>ALB active and logging to S3, count-mode Web ACL logging to CloudWatch, Traefik targets attached</td></tr><tr><td>6 metrics and logs</td><td>merged, green, not deployed</td><td>kube-prometheus-stack, Loki, Fluent Bit, SLOs, golden signals</td></tr><tr><td>7–8 CI/CD</td><td>merged, green, not deployed</td><td>Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile</td></tr><tr><td>11 traces</td><td>merged, green, not deployed</td><td>Tempo, spanmetrics, recording rules, traces dashboard</td></tr></tbody></table>
-<p><strong>The gate reads 136 PASS / 0 FAIL / 0 MISSING</strong> as of commit <code>98d9542</code>.</p>
+<p><strong>The gate reads 136 PASS / 0 FAIL / 0 MISSING</strong> as of commit <code>eb8b16d</code>.</p>
 <pre><code>terraform -chdir=bootstrap plan      0 resource changes (one output normalises "30" -&gt; "30.0")
 terraform -chdir=platform  plan      No changes. Your infrastructure matches the configuration.</code></pre>
 <p>Both stacks reach a clean plan; the bootstrap line is an output-only refresh against AWS's <code>limit_amount</code> formatting, not a resource diff.</p>
@@ -125,6 +125,28 @@ $ terraform -chdir=platform plan   -&gt;  No changes. Your infrastructure matche
 $ ./scripts/check.sh              -&gt;  PASS: 136   FAIL: 0   MISSING: 0
 $ checkov -d ./platform           -&gt;  Passed 224, Failed 0, Skipped 8</code></pre>
 <p>What this does <strong>not</strong> prove: no pod has ever run on these nodes. k3s itself, the app, and every chart are still un-deployed; the four checkov skips added here are named platform constraints, not waivers for a component nobody has exercised.</p>
+<h3>Waves C — 2026-10-14, the cluster formed, and what stopped it</h3>
+<p>The instance replacement in Wave A brought four nodes up, and none of them joined each other. Five defects, each found by reading the node rather than the plan, and each fixed in source:</p>
+<p><strong>C1 — node egress only allowed DNS and HTTPS.</strong> The ingress rule for 6443 from the admin CIDR was present and correct; the internal security group's *egress* was 53 and 443, so the follower could reach SSM and GitHub but never the leader. <code>Get "https://10.90.12.149:6443/cacerts": context deadline exceeded</code>, 483 restarts deep, while <code>describe-security-group-rules</code> showed no rule for 6443 at all. A handshake needs both halves. Scoped egress to the group itself rather than to <code>10.90.0.0/16</code>, so "node to node" still means exactly the group's name.</p>
+<p><strong>C2 — the leader never got <code>--cluster-init</code>.</strong> k3s therefore fell back to kine, and <code>/var/lib/rancher/k3s/server/</code> held <code>kine.sock</code> and <code>db/state.db</code> with no <code>db/etcd/</code> directory at all. The second server refused to join with <code>failed to bootstrap cluster data: etcd disabled</code>, SPEC.md:267 ("three k3s servers form an etcd quorum") was unmeetable, and the Phase 4 snapshot timer was pointed at a datastore that was not etcd.</p>
+<p><strong>C3 — launch template versions are never promoted to default.</strong> The instances are pinned to <code>version = "$Default"</code>, and AWS reports <code>LatestVersionNumber=3 / DefaultVersionNumber=1</code>. <code>-replace</code> therefore booted the *original* 464-line user_data while the template held the fixed one, which is why C2 survived its own fix. Pinned to <code>$Latest</code>.</p>
+<p><strong>C4 — a readable stale leader address is worse than an absent one.</strong> <code>ssm_wait</code> returned as soon as the parameter existed, and on a replace it still held the *previous* leader. Both followers built <code>--server https://10.90.12.149:6443</code> while the live leader was already at <code>10.90.0.50</code>. <code>leader_wait</code> now re-reads the parameter until an address answers <code>/cacerts</code>, which covers a stale value and a leader whose apiserver has not started yet.</p>
+<p><strong>C5 — two labels the operator and the scheduler both need were missing.</strong> The apiserver certificate carried no SAN for the public address <code>bootstrap-cluster.sh</code> points the kubeconfig at (<code>x509: certificate is valid for 10.43.0.1, 10.90.x.x, 127.0.0.1, ::1, not 100.61.37.125</code>), and no node carried <code>topology.kubernetes.io/zone</code> — k3s stamps <code>providerID: k3s://&lt;hostname&gt;</code>, so nothing ever resolves it to an AZ. Every <code>topologySpreadConstraints</code> in <code>apps/boutique/base</code> keys on that label, so the AZ spread was silently a no-op. Both now come from IMDS at boot.</p>
+<p>Separately, <code>scripts/bootstrap-cluster.sh</code> and <code>scripts/doctor.sh</code> called <code>aws ssm get-invocation</code>, which does not exist (it is <code>get-command-invocation</code>), and asked for <code>--query 'Command.Id'</code> when the field is <code>CommandId</code> — so every <code>send-command</code> captured the string <code>None</code>. <code>doctor.sh</code> also built <code>host:6443:6443</code>. All three scripts were unrunnable before this wave.</p>
+<p>Commits <code>8c968a7</code> and <code>eb8b16d</code>. Verification, not a report:</p>
+<pre><code>$ kubectl get nodes -L topology.kubernetes.io/zone
+boutique-leader-...      Ready  control-plane,etcd  2m26s  v1.36.5+k3s1  us-east-1a
+boutique-follower-...    Ready  control-plane,etcd     36s  v1.36.5+k3s1  us-east-1b
+boutique-follower-...    Ready  control-plane,etcd     51s  v1.36.5+k3s1  us-east-1c
+boutique-agent-...       Ready  &lt;none&gt;                 69s  v1.36.5+k3s1  us-east-1c
+
+$ kubectl get --raw=/healthz/etcd  -&gt;  ok
+  control-plane nodes Ready: 3 of 3 (quorum is 2)
+  ls /var/lib/rancher/k3s/server/db/etcd/  -&gt;  config  member  name
+
+$ ./scripts/doctor.sh  -&gt;  VERDICT: PASS -- 10 checks green, 0 warning(s), cluster healthy
+$ ./scripts/check.sh   -&gt;  PASS: 136   FAIL: 0   MISSING: 0</code></pre>
+<p>Still not proven: the etcd snapshot timer is <code>enabled / active</code> but its first run is three hours away (<code>LAST PASSED -</code>), so no snapshot has been written to S3 yet, and the restore drill in Phase 4 has never executed against this datastore. No chart has been installed and no application pod exists.</p>
 <h3>Waves B — 2026-10-09, from the plan, the scanners and two stubbed runs</h3>
 <pre><code>terraform -chdir=platform plan -no-color
   Plan: 58 to add, 0 to change, 0 to destroy.

@@ -23,7 +23,7 @@ What is applied and at what stage:
 | 7–8 CI/CD | merged, green, not deployed | Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile |
 | 11 traces | merged, green, not deployed | Tempo, spanmetrics, recording rules, traces dashboard |
 
-**The gate reads 136 PASS / 0 FAIL / 0 MISSING** as of commit `98d9542`.
+**The gate reads 136 PASS / 0 FAIL / 0 MISSING** as of commit `eb8b16d`.
 
 ```
 terraform -chdir=bootstrap plan      0 resource changes (one output normalises "30" -> "30.0")
@@ -220,6 +220,70 @@ $ checkov -d ./platform           ->  Passed 224, Failed 0, Skipped 8
 What this does **not** prove: no pod has ever run on these nodes. k3s itself, the app, and every
 chart are still un-deployed; the four checkov skips added here are named platform constraints, not
 waivers for a component nobody has exercised.
+
+### Waves C — 2026-10-14, the cluster formed, and what stopped it
+
+The instance replacement in Wave A brought four nodes up, and none of them joined each other.
+Five defects, each found by reading the node rather than the plan, and each fixed in source:
+
+**C1 — node egress only allowed DNS and HTTPS.** The ingress rule for 6443 from the admin CIDR
+was present and correct; the internal security group's *egress* was 53 and 443, so the follower
+could reach SSM and GitHub but never the leader. `Get "https://10.90.12.149:6443/cacerts":
+context deadline exceeded`, 483 restarts deep, while `describe-security-group-rules` showed no
+rule for 6443 at all. A handshake needs both halves. Scoped egress to the group itself rather
+than to `10.90.0.0/16`, so "node to node" still means exactly the group's name.
+
+**C2 — the leader never got `--cluster-init`.** k3s therefore fell back to kine, and
+`/var/lib/rancher/k3s/server/` held `kine.sock` and `db/state.db` with no `db/etcd/` directory
+at all. The second server refused to join with `failed to bootstrap cluster data: etcd
+disabled`, SPEC.md:267 ("three k3s servers form an etcd quorum") was unmeetable, and the
+Phase 4 snapshot timer was pointed at a datastore that was not etcd.
+
+**C3 — launch template versions are never promoted to default.** The instances are pinned to
+`version = "$Default"`, and AWS reports `LatestVersionNumber=3 / DefaultVersionNumber=1`.
+`-replace` therefore booted the *original* 464-line user_data while the template held the fixed
+one, which is why C2 survived its own fix. Pinned to `$Latest`.
+
+**C4 — a readable stale leader address is worse than an absent one.** `ssm_wait` returned as
+soon as the parameter existed, and on a replace it still held the *previous* leader. Both
+followers built `--server https://10.90.12.149:6443` while the live leader was already at
+`10.90.0.50`. `leader_wait` now re-reads the parameter until an address answers `/cacerts`,
+which covers a stale value and a leader whose apiserver has not started yet.
+
+**C5 — two labels the operator and the scheduler both need were missing.** The apiserver
+certificate carried no SAN for the public address `bootstrap-cluster.sh` points the kubeconfig
+at (`x509: certificate is valid for 10.43.0.1, 10.90.x.x, 127.0.0.1, ::1, not 100.61.37.125`),
+and no node carried `topology.kubernetes.io/zone` — k3s stamps `providerID: k3s://<hostname>`,
+so nothing ever resolves it to an AZ. Every `topologySpreadConstraints` in `apps/boutique/base`
+keys on that label, so the AZ spread was silently a no-op. Both now come from IMDS at boot.
+
+Separately, `scripts/bootstrap-cluster.sh` and `scripts/doctor.sh` called `aws ssm
+get-invocation`, which does not exist (it is `get-command-invocation`), and asked for
+`--query 'Command.Id'` when the field is `CommandId` — so every `send-command` captured the
+string `None`. `doctor.sh` also built `host:6443:6443`. All three scripts were unrunnable
+before this wave.
+
+Commits `8c968a7` and `eb8b16d`. Verification, not a report:
+
+```
+$ kubectl get nodes -L topology.kubernetes.io/zone
+boutique-leader-...      Ready  control-plane,etcd  2m26s  v1.36.5+k3s1  us-east-1a
+boutique-follower-...    Ready  control-plane,etcd     36s  v1.36.5+k3s1  us-east-1b
+boutique-follower-...    Ready  control-plane,etcd     51s  v1.36.5+k3s1  us-east-1c
+boutique-agent-...       Ready  <none>                 69s  v1.36.5+k3s1  us-east-1c
+
+$ kubectl get --raw=/healthz/etcd  ->  ok
+  control-plane nodes Ready: 3 of 3 (quorum is 2)
+  ls /var/lib/rancher/k3s/server/db/etcd/  ->  config  member  name
+
+$ ./scripts/doctor.sh  ->  VERDICT: PASS -- 10 checks green, 0 warning(s), cluster healthy
+$ ./scripts/check.sh   ->  PASS: 136   FAIL: 0   MISSING: 0
+```
+
+Still not proven: the etcd snapshot timer is `enabled / active` but its first run is three hours
+away (`LAST PASSED -`), so no snapshot has been written to S3 yet, and the restore drill in
+Phase 4 has never executed against this datastore. No chart has been installed and no
+application pod exists.
 
 ### Waves B — 2026-10-09, from the plan, the scanners and two stubbed runs
 
