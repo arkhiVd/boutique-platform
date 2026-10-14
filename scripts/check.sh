@@ -145,15 +145,85 @@ CHART_TEMPLATES='/templates/'
 # goes through the same schema and policy gates rather than being read by eye.
 MANIFESTS="$(find apps ci cluster observability -name '*.yaml' -not -path '*charts*' 2>/dev/null \
   | grep -Ev "$HELM_SOURCES" | grep -Ev "$BARE_RULE_FILES" | grep -Ev "$CHART_TEMPLATES" | sort)"
-# CRD schemas are not bundled with kubeconform. The default location covers the
-# Kubernetes API only, so PrometheusRule and ServiceMonitor objects would fail
-# with "could not find schema". The CRDs catalog is the community-maintained
-# schema set and it is the same one used in the Phase 6 kubeconform run.
+# SCHEMA SOURCES AND WHY THEY ARE NOT WHAT kubeconform PICKS BY DEFAULT
+#
+# Two of kubeconform's own defaults were wrong for this gate, and each was
+# measured rather than read off a README:
+#
+# 1. The version. Without `-kubernetes-version`, kubeconform resolves "latest"
+#    at run time against a live endpoint. The rendered-chart pass below has
+#    pinned 1.36.3 since Phase 6 and the raw pass did not, so the two halves of
+#    the same gate could validate against different API schemas.
+#
+# 2. The default schema host, `kubernetesjsonschema.dev`. It does not resolve
+#    to a reachable address from this network (curl returns 000 in ~0.1s, and
+#    the host maps to an AWS ap-southeast-1 address), but kubeconform's HTTP
+#    client waits on it far longer than curl does: a single `namespace.yaml`
+#    spent 111s blocked in `epoll_wait` with the gate stalled. A gate that can
+#    hang forever is worse than a gate that fails, because the reviewer sees
+#    nothing. The yannh/kubernetes-json-schema mirror is the same schema set
+#    served from GitHub raw — the same origin the CRDs catalog already uses,
+#    and both return 200 here.
+#
+# 3. `-cache`: schemas are downloaded once into a gitignored directory. Every
+#    run after the first is local, which is what makes the gate reproducible
+#    when the network is not.
+#
+# 4. `timeout`: the remaining failure mode. A hang becomes a visible FAIL with
+#    exit 124 instead of an infinite wait.
+K8S_VERSION='1.36.3'
+API_SCHEMAS='https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}{{.KindSuffix}}.json'
+# CRD schemas are not in the core schema set, so PrometheusRule, ServiceMonitor,
+# IngressRoute and the rest would fail with "could not find schema". The CRDs
+# catalog is the community-maintained schema set and it is the same one used
+# since Phase 6.
 CRD_SCHEMAS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+SCHEMA_CACHE="$ROOT/.kubeconform-cache"
+# kc is the one entry point for every kubeconform invocation in this file, so
+# the version, the sources, the cache and the timeout can only ever change in
+# one place. `check` invokes it as a command, and a shell function resolves
+# under `"$@"` exactly like a binary does.
+kc() {
+  # kubeconform refuses to create the cache folder itself, and a missing folder
+  # is reported as "failed opening cache folder" — a confusing error that reads
+  # like a broken schema source. Created here so a fresh clone behaves the same
+  # as a warm one.
+  mkdir -p "$SCHEMA_CACHE"
+  # ONE RETRY, AND ONLY ON exit 124.
+  #
+  # 124 is `timeout`'s own status: it means the run was killed before it could
+  # finish, which on this gate can only be a stalled schema download. A real
+  # finding — a manifest that violates its schema under -strict — comes back as
+  # exit 1, quickly, with the violations printed. So retrying 124 can never
+  # turn a red result green; it only absorbs the network, and it reports on the
+  # second failure rather than silently looping.
+  #
+  # The reason this exists at all: a ServiceMonitor file must miss the core
+  # schema location (yannh has no CRDs) before it hits the CRD catalog, so the
+  # CRD-bearing files do one uncached round trip per run. On 2026-10-14 that
+  # round trip stalled twice out of five within a single gate run, while the
+  # identical kind in an adjacent file passed.
+  local rc=0
+  timeout 60 kubeconform -strict -summary \
+    -kubernetes-version "$K8S_VERSION" \
+    -cache "$SCHEMA_CACHE" \
+    -schema-location "$API_SCHEMAS" \
+    -schema-location "$CRD_SCHEMAS" "$@" && return 0
+  rc=$?
+  if [[ $rc -eq 124 ]]; then
+    printf 'kubeconform timed out once, retrying\n' >&2
+    timeout 60 kubeconform -strict -summary \
+      -kubernetes-version "$K8S_VERSION" \
+      -cache "$SCHEMA_CACHE" \
+      -schema-location "$API_SCHEMAS" \
+      -schema-location "$CRD_SCHEMAS" "$@"
+    return $?
+  fi
+  return "$rc"
+}
 if need kubeconform kubeconform && [[ -n "$MANIFESTS" ]]; then
   while IFS= read -r f; do
-    check "kubeconform $f" -- kubeconform -strict -summary \
-      -schema-location default -schema-location "$CRD_SCHEMAS" "$f"
+    check "kubeconform $f" -- kc "$f"
   done <<< "$MANIFESTS"
 fi
 if need conftest conftest && [[ -d policy ]]; then
@@ -231,11 +301,7 @@ if need helm "helm"; then
         --set tlsSecretName=tls-example 2>&1)" || render_rc=$?
       if [[ $render_rc -eq 0 && -n "$render_err" ]]; then
         printf '%s\n' "$render_err" > /tmp/kubeconform-render.yaml
-        check "kubeconform (rendered $d)" -- \
-          kubeconform -strict -summary -kubernetes-version 1.36.3 \
-            -schema-location default \
-            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            /tmp/kubeconform-render.yaml
+        check "kubeconform (rendered $d)" -- kc /tmp/kubeconform-render.yaml
         rm -f /tmp/kubeconform-render.yaml
       else
         bad "helm template (rendered $d)" "$(basename "$d") render"

@@ -52,3 +52,6 @@ Chart.lock
 
 # local TLS material (generated scripts, never a certificate in git)
 .boutique-platform/
+
+# kubeconform schema cache (scripts/check.sh) -- downloaded once, never committed
+.kubeconform-cache/
