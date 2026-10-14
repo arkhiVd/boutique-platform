@@ -28,9 +28,10 @@ PRICED_ON="2026-10-08"
 : "${ALB:=1}"; : "${LCU:=2}"; : "${SNAP_GB:=4}"; : "${DATA_OUT_GB:=60}"; : "${LOG_GB:=2}"
 : "${WINDOW_DAYS:=43}"; : "${CREDIT_BUDGET:=200}"
 : "${VCPU_QUOTA:=8}"
-# Measured platform CPU requests (mCPU) from the rendered manifests: 3600m total,
-# of which 2820m is the `boutique` namespace. See docs/resource-budget.md.
-: "${MEASURED_REQUEST_MILLI:=3600}"
+# Measured platform CPU requests (mCPU) from the rendered manifests: 3850m total,
+# of which 2820m is the `boutique` namespace. Phase 11 added 250m (Tempo); the
+# number was 3600m before it. See docs/resource-budget.md.
+: "${MEASURED_REQUEST_MILLI:=3850}"
 # Expected sustained CPU as a fraction of the t3 baseline under demo
 # loadgenerator traffic. Requests are not usage; this is the honest
 # operating point, and the worst case is printed separately.

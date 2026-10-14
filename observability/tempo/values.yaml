@@ -1,0 +1,484 @@
+# Tempo — the trace backend, single binary, sized for THIS cluster
+# -----------------------------------------------------------------------------
+# `helm upgrade --install tempo observability/tempo -n observability`
+#
+# WHY THIS FILE IS NESTED TWICE, AND WHY IT MATTERS MORE THAN ANY VALUE IN IT
+# -----------------------------------------------------------------------------
+# This is a WRAPPER chart whose single dependency is the upstream `tempo`
+# chart. Helm scopes a parent chart's values by the dependency's NAME, so
+# everything below lives under `tempo:`. The upstream chart then keeps its OWN
+# root section also called `tempo:` (`tempo.storage`, `tempo.ingester`,
+# `tempo.metricsGenerator`, ...). So the values that configure Tempo itself are
+# one level deeper still:
+#
+#     tempo:               <- subchart scope, added by Helm
+#       tempo:             <- the upstream chart's own root section
+#         ingester: {}
+#
+# Getting this wrong is a SILENT failure, not an error: a key at the wrong
+# depth is accepted by Helm and ignored by the chart, and Tempo installs with
+# whatever default was there. The keys that stay at ONE level of nesting
+# (`tempo:`) are the chart's own structural knobs: replicas, config,
+# persistence, serviceMonitor, securityContext, serviceAccount,
+# priorityClassName. The keys that need TWO are the ones under the upstream's
+# own `tempo:` section.
+#
+# SPANMETRICS LIVES IN THE COLLECTOR, NOT HERE — the one duplication decision,
+# stated once so it cannot drift:
+#   - `traces_spanmetrics_*` (RED metrics per service) are produced by the
+#     spanmetrics CONNECTOR in apps/boutique/observability/, fed from a
+#     pre-sampling pipeline so the rates are true rates. That file owns it.
+#   - Tempo's metrics generator below runs ONLY the `service-graphs` processor:
+#     the dependency graph Grafana's service map renders. It is a different
+#     processor producing a different metric family (`traces_service_graph_*`),
+#     remote-written to Prometheus.
+#   - Enabling `span-metrics` in BOTH places would produce two metric families
+#     for one question and a dashboard that silently doubles a rate depending
+#     on which panel you look at. `processor` below therefore never lists
+#     `span-metrics`, and the overrides block activates `service-graphs` only.
+
+tempo:
+
+  ## =========================================================================
+  ## The upstream chart's own root section — everything here needs the extra
+  ## level of nesting explained above.
+  ## =========================================================================
+  tempo:
+
+    registry: docker.io
+    repository: grafana/tempo
+    ## Empty tag = the chart's appVersion (2.9.0, pinned in Chart.yaml). One
+    ## pin, two files, and the second one follows the first.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+    ## The chart default is 1024 MiB of ballast, which is larger than half this
+    ## pod's memory limit. Ballast was the pre-1.x way to hold the Go GC off a
+    ## fixed heap; Tempo 2.x sizes the heap with GOMEMLIMIT instead, so the flag
+    ## is accepted and does nothing useful here. 0 disables it.
+    memBallastSizeMbs: 0
+
+    ## Multitenancy OFF, deliberately. This is a single-writer, single-tenant
+    ## platform (SPEC.md: "one cluster, one observability namespace,
+    ## single-writer, single-owner"): there is no second tenant, so an X-Scope-
+    ## OrgID auth path would be a credential in a Secret with no consumer, and
+    ## every trace would be written under an ID nothing reads. The one hard
+    ## consequence is stated here rather than discovered later: without
+    ## multitenancy Tempo rejects `X-Scope-OrgID` headers, so any future second
+    ## tenant needs this flipped AND an auth section, not just a header.
+    multitenancyEnabled: false
+
+    ## Anonymous usage reporting to Grafana Labs (the shape of the deployment,
+    ## not data). Off because the default-on behaviour was never asked for on a
+    ## budget account, and a background phone-home in an otherwise air-tight
+    ## observability path is a surprise in a security review, not a feature.
+    reportingEnabled: false
+
+    ## -----------------------------------------------------------------------
+    ## Resources — sized against docs/resource-budget.md, not against the chart
+    ## -----------------------------------------------------------------------
+    ## The chart's own example is 1000m / 4Gi, which is more than the entire
+    ## workload node. This platform's measured span load is the loadgenerator's
+    ## ~1-2 req/s across 13 services (~30-60 spans/s server+client), 24h of
+    ## retention, one replica.
+    ##
+    ##   requests 250m / 512Mi  — what the scheduler reserves. 512Mi is the
+    ##     single binary's comfortable working set: distributor + ingester WAL +
+    ##     compactor + query frontend + the service-graphs registry, against a
+    ##     1Gi limit so a burst has somewhere to go before an OOMKill.
+    ##   limits    250m / 1Gi   — CPU request == CPU limit, because
+    ##     policy/resources.rego `deny_cpu_limits_differ_from_requests` requires
+    ##     it of every container (Guaranteed QoS: a CPU limit is only a throttle,
+    ##     and a request/limit gap is exactly what lets a burstable neighbour eat
+    ##     the reserve). Memory limits stay above the request — that is what the
+    ##     memory rule requires instead — so 512Mi reserve / 1Gi ceiling.
+    ##
+    ## Budget arithmetic (see docs/resource-budget.md): with Tempo at 250m/512Mi
+    ## and the collector at 192Mi per replica, the platform's measured requests
+    ## are 3850m / 4688Mi — 210.4% CPU / 125.3% RAM of one t3.medium's
+    ## schedulable (1830m / 3741Mi), which is why all four nodes are schedulable
+    ## and why the gate's 250% bound still holds.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 250m
+        memory: 1Gi
+
+    ## -----------------------------------------------------------------------
+    ## The container's securityContext — the platform contract, not the chart
+    ## -----------------------------------------------------------------------
+    ## policy/security.rego requires, on every container: readOnlyRootFilesystem,
+    ## runAsNonRoot, allowPrivilegeEscalation: false, capabilities drop ALL,
+    ## seccompProfile RuntimeDefault, and requests/limits. The chart ships this
+    ## block EMPTY (`securityContext: {}`), so an unextended install would be
+    ## rejected by the same conftest gate the app manifests pass. Each field:
+    ##
+    ##   readOnlyRootFilesystem — safe here because every writable path is a
+    ##     mount: /var/tempo is the PVC (storage below), /conf is a ConfigMap,
+    ##     and /tmp is the emptyDir added by extraVolumeMounts below. If Tempo
+    ##     ever fails to start with a permission error on /tmp or similar, that
+    ##     mount is the first thing to check (docs/runbooks/traces.md).
+    ##   capabilities/allowPrivilegeEscalation — Tempo listens only on high
+    ##     ports (4317/4318/3200/…); it needs no capability and no setuid.
+    ##   seccompProfile — RuntimeDefault, the same syscall surface the app gets.
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      readOnlyRootFilesystem: true
+      seccompProfile:
+        type: RuntimeDefault
+
+    ## /tmp under readOnlyRootFilesystem: the chart mounts an emptyDir at /tmp
+    ## for us WHENEVER metricsGenerator.enabled is true (templates/statefulset.yaml:
+    ## `{{- if .Values.tempo.metricsGenerator.enabled }} - mountPath: /tmp`), and
+    ## metricsGenerator IS enabled below for the service graph. So no
+    ## extraVolumeMounts entry is needed — and adding one would produce a
+    ## duplicate mountPath that the API server rejects at apply time. THE FOOTGUN,
+    ## named so nobody steps on it: if metricsGenerator.enabled is ever set to
+    ## false, that mount disappears and the container — whose root filesystem is
+    ## read-only — has no /tmp. Re-add, at that point:
+    ##   extraVolumeMounts: [{name: tmp, mountPath: /tmp}]
+    ##   (plus an `extraVolumes: [{name: tmp, emptyDir: {}}]`; the chart only adds
+    ##   the volume on the metricsGenerator branch too).
+
+    ## -----------------------------------------------------------------------
+    ## Ingester
+    ## -----------------------------------------------------------------------
+    ## Two settings, both deliberate:
+    ##
+    ##   replication_factor 1 — Tempo's own default for the single-binary target
+    ##     (modules/ingester/config.go sets it), restated here because a value
+    ##     that is only true by default is a value a reader cannot check from
+    ##     this file, and a ring of 3 on a 1-replica deployment never becomes
+    ##     ready.
+    ##   max_block_duration 5m — the chart default is 30m, which means a trace
+    ##     stays unsearchable-by-ID in the head block for half an hour. 5m puts
+    ##     every finished trace into a persisted block (and therefore into
+    ##     search) within minutes. The cost is slightly smaller blocks, which
+    ##     the compactor merges anyway.
+    ingester:
+      max_block_duration: 5m
+      lifecycler:
+        ring:
+          replication_factor: 1
+
+    ## -----------------------------------------------------------------------
+    ## Querier — one at a time per vCPU, and this node has two
+    ## -----------------------------------------------------------------------
+    ## max_concurrent_queries bounds the work ONE query fans out to the ingester
+    ## and the store. 2 matches the node's 2 vCPU; a higher value does not make
+    ## a trace query faster on this hardware, it just lets three simultaneous
+    ## dashboards evict each other.
+    querier:
+      max_concurrent_queries: 2
+
+    ## -----------------------------------------------------------------------
+    ## Query frontend — the two APIs the dashboard and the runbook use
+    ## -----------------------------------------------------------------------
+    ## trace_by_id: the API the SPEC acceptance criterion queries
+    ##   (`/api/traces/<id>`). Concurrent requests bounded to 4 — this is the
+    ##   fan-out the querier setting above multiplies.
+    ##
+    ## search: `/api/search`, TraceQL. The two SLO fields are what turn a slow
+    ##   search from a shrug into a number:
+    ##     duration_slo 5s            — a search that takes longer than 5s is
+    ##                                  recorded as a slow query in Tempo's own
+    ##                                  metrics, which TempoRequestLatency alerts
+    ##                                  on (observability/tempo/alerts.yaml).
+    ##     throughput_bytes_slo 10MB/s — the same idea for scans; 10MB/s is the
+    ##                                  Grafana-documented default and is
+    ##                                  reachable on gp3.
+    ##   max_duration 24h caps a search at the retention window, so a query for
+    ##   "everything since 2020" cannot turn into a full-store scan.
+    queryFrontend:
+      query:
+        concurrent_requests: 4
+      search:
+        max_duration: 24h
+        duration_slo: 5s
+        throughput_bytes_slo: 10000000
+
+    ## -----------------------------------------------------------------------
+    ## Metrics generator — service graphs ONLY (spanmetrics is the collector's)
+    ## -----------------------------------------------------------------------
+    ## This is what makes Grafana's service map real: the `service-graphs`
+    ## processor pairs client and server spans into edges and remote-writes
+    ## `traces_service_graph_request_total` / `_failed_total` /
+    ## `_server_seconds` into Prometheus (metric names verified in
+    ## grafana/tempo@v2.9.0 modules/generator/processor/servicegraphs/servicegraphs.go).
+    ##
+    ## `span-metrics` is deliberately absent from `processor` — see the header
+    ## of this file. One producer per metric family.
+    ##
+    ## The remote-write URL names the Prometheus service produced by installing
+    ## observability/kube-prometheus-stack with release name
+    ## `kube-prometheus-stack` (the repo's own convention: every ServiceMonitor
+    ## and PrometheusRule carries `release: kube-prometheus-stack`, and with
+    ## serviceMonitorSelectorNilUsesHelmValues at its default of true the
+    ## operator's selector IS {release: <release name>} — so that label must
+    ## equal the installed release name, and kube-prometheus-stack/values.yaml
+    ## says so explicitly). The chart's fullname for that release is
+    ## `kube-prometheus-stack-prometheus`. The receiver side is
+    ## `prometheus.prometheusSpec.enableRemoteWriteReceiver: true` in that
+    ## chart's values. Rename the release and this URL plus every `release:`
+    ## label in the repo must change together — same coupling, named here.
+    metricsGenerator:
+      enabled: true
+      remoteWriteUrl: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090/api/v1/write"
+      processor:
+        service_graphs:
+          ## How long to wait for the other half of an edge before giving up.
+          ## 10s is Tempo's default and is comfortably above the decision_wait
+          ## of 5s on the collector's tail_sampling, so a paired span is never
+          ## dropped for being "late" relative to the sampling decision.
+          wait: 10s
+          ## An edge store bounded at 10k entries. On this platform there are
+          ## ~13 services and a handful of peer relationships; 10k is three
+          ## orders of magnitude of headroom, and the bound is what stops a
+          ## cardinality bug in a span attribute from being an OOM.
+          max_items: 10000
+          ## The SAME ladder as cluster/traefik/values.yaml and the collector's
+          ## spanmetrics connector. One bucket ladder across the platform means
+          ## a p95 from any layer is comparable with a p95 from any other.
+          histogram_buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+      registry:
+        ## 15s matches the collector's spanmetrics flush interval, so both
+        ## metric families land in Prometheus on the same cadence and a
+        ## side-by-side panel is not comparing two different time grids.
+        collection_interval: 15s
+      storage:
+        ## On the PVC, not /tmp: the metrics-generator WAL is state that must
+        ## survive a container restart or the service graph loses its in-flight
+        ## edges. /tmp is a tmpfs, /var/tempo is the gp3 claim.
+        path: /var/tempo/metrics
+      traces_storage:
+        path: /var/tempo/metrics-traces-wal
+
+    ## -----------------------------------------------------------------------
+    ## Retention — 24h, enforced by the compactor that runs in this process
+    ## -----------------------------------------------------------------------
+    ## 24h matches the spanmetrics and Prometheus retention story on a platform
+    ## whose whole point is a live demo plus an evidence pack: a trace is a
+    ## debugging artefact, not an audit log (audit-shaped retention on gp3
+    ## would be S3, and S3 is not in this budget — see storage below).
+    ## The compactor's `compaction.block_retention` is rendered from this value
+    ## in the `config` block at the bottom of the file.
+    retention: 24h
+
+    ## Activates the service-graphs processor for the (single, unnamed) tenant.
+    ## Without this the processor above is configured but never instantiated —
+    ## `overrides` is where Tempo turns processors on, and forgetting it is the
+    ## documented way to get a service map with no edges in it.
+    overrides:
+      defaults:
+        metrics_generator:
+          processors:
+            - service-graphs
+
+    ## -----------------------------------------------------------------------
+    ## Receivers — OTLP is the only protocol anything on this platform speaks
+    ## -----------------------------------------------------------------------
+    ## The collector exports OTLP/gRPC (4317). Jaeger and OpenCensus are left
+    ## enabled because the chart's Service template reads these values to build
+    ## its port list (templates/_ports.tpl dereferences every jaeger protocol
+    ## endpoint), so deleting the block breaks the render rather than shrinking
+    ## the attack surface. Every one of those ports is ClusterIP-only, in a
+    ## namespace with its own NetworkPolicy posture, and the runbook's debug
+    ## path (a one-off `tempo-cli` or a port-forward) is why keeping them costs
+    ## nothing.
+    receivers:
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_binary:
+            endpoint: 0.0.0.0:6832
+          thrift_compact:
+            endpoint: 0.0.0.0:6831
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+      opencensus:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+
+    ## -----------------------------------------------------------------------
+    ## Storage — local filesystem on a gp3 PVC, and why not S3
+    ## -----------------------------------------------------------------------
+    ## SPEC.md commits observability state (Prometheus TSDB, Loki, Tempo) to
+    ## gp3 with snapshot/restore runbooks. This is the Tempo half of that:
+    ##
+    ##   1. CREDENTIALS. S3 needs an access key or an IRSA/OIDC trust
+    ##      relationship. This cluster's nodes share an instance profile scoped
+    ##      to SSM, ECR-pull, CloudWatch and S3 log/state access (SPEC "least
+    ##      privilege"); there is no bucket for traces and creating one is a
+    ##      cost line the SPEC table does not carry. A 10Gi traces bucket would
+    ##      be ~$0.23/mo of storage plus $0.50/mo of requests — small, but a new
+    ##      IAM principal and a new failure domain, not $0.23.
+    ##   2. LATENCY. Every span write and every block read is a network round
+    ##      trip on S3. On a 2 vCPU node that also runs Prometheus, that round
+    ##      trip comes out of the application's CPU budget.
+    ##   3. SHAPE. Single binary = one replica = one writer. The scaling reason
+    ##      S3 exists for (many ingesters, one store) does not apply to a
+    ##      deployment that will never be more than one pod.
+    ##
+    ## The documented cost of the choice: a 10Gi local volume is a single point
+    ## of failure and losing it loses the window. That is the same trade Loki's
+    ## filesystem backend makes (observability/loki/values.yaml), covered by the
+    ## same Phase 13 snapshot/restore runbook, and stated here so a reviewer
+    ## sees a decision rather than an omission. S3 is the upgrade path the day
+    ## the platform outgrows one node, and it is a values change, not a chart
+    ## rewrite.
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+
+  ## =========================================================================
+  ## The upstream chart's own structural keys (ONE level of nesting)
+  ## =========================================================================
+
+  ## One replica, and the honest reason it is not two: Tempo's single-binary
+  ## mode runs every role in one process with a local filesystem store, so a
+  ## second replica would be a second writer to its own disk — not a hot
+  ## standby, not a reader, and a guaranteed split-brain the day anything
+  ## shards by ring. HA Tempo is tempo-distributed (multiple Deployments, an
+  ## object store, a read/write split), which is a different chart and a
+  ## different budget. One replica here is a correctness statement, not a cost
+  ## cut; the failure mode it creates (lose the pod, lose in-flight traces up
+  ## to the 5m block cut) is in docs/runbooks/traces.md.
+  replicas: 1
+
+  ## Same class the rest of the observability tier uses (value 500, defined in
+  ## apps/boutique/priorityclass.yaml, below the add-ons and the CI controller):
+  ## under node memory pressure Tempo evicts before Traefik, CoreDNS or the
+  ## Jenkins controller, which is the correct order — a lost trace is a
+  ## debugging inconvenience, a lost edge is a user-visible outage.
+  priorityClassName: boutique-observability
+
+  ## A projected service-account token is a bearer credential. Tempo makes no
+  ## Kubernetes API calls in this configuration (local storage, no CRD
+  ## discovery, no autoscaling), so the token would be a credential with no
+  ## consumer — the same argument apps/boutique/ and the collector make, and
+  ## policy/security.rego enforces it on every pod in the platform.
+  serviceAccount:
+    automountServiceAccountToken: false
+
+  ## The POD-level securityContext (the container-level one is `tempo.tempo.
+  ## securityContext` above). runAsUser 10001 matches the grafana/tempo image's
+  ## declared non-root user — the same reasoning the collector manifest
+  ## documents for 10001. fsGroup 10001 is what makes the gp3 PVC writable by
+  ## that user. seccompProfile RuntimeDefault satisfies the platform policy's
+  ## pod-or-container merge.
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+
+  ## gp3, 10Gi, one claim per StatefulSet pod (volumeClaimTemplates). 10Gi is
+  ## the same shape as Loki's chunks volume: at the measured span volume
+  ## (~50 spans/s, ~300 bytes/span before compression) 24h of traces is well
+  ## under 1Gi, so 10Gi is headroom measured in weeks, not days — the point
+  ## being that nobody has to resize a volume during an incident.
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+
+  ## -----------------------------------------------------------------------
+  ## ServiceMonitor — this is what makes TempoRequestErrors/Latency able to
+  ## fire at all (observability/tempo/alerts.yaml reads Tempo's own /metrics)
+  ## -----------------------------------------------------------------------
+  ## `release:` is the Prometheus Operator's default selector; without it the
+  ## monitor exists and scrapes nothing, which is the exact silent failure the
+  ## other ServiceMonitors in observability/servicemonitors/ call out.
+  ##
+  ## KNOWN DANGLE, stated because the chart's template is not ours: the upstream
+  ## servicemonitor.yaml always renders a second endpoint on port
+  ## `jaeger-metrics` (16687), which only exists when `tempoQuery.enabled: true`
+  ## — and tempo-query is a Jaeger-query sidecar this platform does not run.
+  ## The Prometheus Operator skips an endpoint whose port is not on the Service,
+  ## so the extra endpoint is inert, not broken; it is also not removable
+  ## without forking the template. The first endpoint (tempo-prom-metrics,
+  ## 3200) is the one the alerts depend on, and it is real.
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    additionalLabels:
+      release: kube-prometheus-stack
+      app.kubernetes.io/part-of: boutique-platform
+
+  ## -----------------------------------------------------------------------
+  ## The Tempo configuration file, in full
+  ## -----------------------------------------------------------------------
+  ## Replaces the chart's default template rather than extending it, because
+  ## every section below is a decision that deserves to be readable in one
+  ## place. `tpl`-evaluated, so `.Values` references resolve at render time.
+  ## Metric names and API paths verified against grafana/tempo@v2.9.0 source,
+  ## not remembered.
+  config: |
+    ## Multitenancy flag is rendered from the value above so the comment and
+    ## the config cannot disagree.
+    multitenancy_enabled: {{ .Values.tempo.multitenancyEnabled }}
+    usage_report:
+      reporting_enabled: {{ .Values.tempo.reportingEnabled }}
+
+    ## The distributor is the stateless fan-in: every collector's OTLP/gRPC
+    ## lands here, is validated, and is pushed to the ingester ring.
+    distributor:
+      receivers:
+        {{- toYaml .Values.tempo.receivers | nindent 8 }}
+
+    ingester:
+      {{- toYaml .Values.tempo.ingester | nindent 6 }}
+
+    querier:
+      {{- toYaml .Values.tempo.querier | nindent 6 }}
+
+    query_frontend:
+      {{- toYaml .Values.tempo.queryFrontend | nindent 6 }}
+
+    ## The compactor merges small blocks and ENFORCES retention. With local
+    ## storage and one replica it runs in this process; `block_retention` is
+    ## rendered from `tempo.retention` so the two cannot drift.
+    compactor:
+      compaction:
+        block_retention: {{ .Values.tempo.retention }}
+
+    storage:
+      {{- toYaml .Values.tempo.storage | nindent 6 }}
+
+    server:
+      {{- toYaml .Values.tempo.server | nindent 6 }}
+
+    overrides:
+      {{- toYaml .Values.tempo.overrides | nindent 6 }}
+
+    {{- if .Values.tempo.metricsGenerator.enabled }}
+    metrics_generator:
+      processor:
+        {{- toYaml .Values.tempo.metricsGenerator.processor | nindent 8 }}
+      registry:
+        {{- toYaml .Values.tempo.metricsGenerator.registry | nindent 8 }}
+      storage:
+        path: {{ .Values.tempo.metricsGenerator.storage.path | quote }}
+        remote_write:
+          - url: {{ .Values.tempo.metricsGenerator.remoteWriteUrl | quote }}
+      traces_storage:
+        path: {{ .Values.tempo.metricsGenerator.traces_storage.path | quote }}
+    {{- end }}

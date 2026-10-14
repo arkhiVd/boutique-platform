@@ -115,6 +115,22 @@ kube-prometheus-stack:
       ## out-of-scope problem; SPEC.md lists it nowhere.
       replicas: 1
 
+      ## Phase 11: the remote-write RECEIVER, so Tempo's metrics generator can
+      ## push `traces_service_graph_*` (the dependency edges Grafana's service
+      ## map renders) into this Prometheus. It is a receiver on the existing
+      ## :9090, not a new port or a new process, and it is the other end of the
+      ## `remoteWriteUrl` in observability/tempo/values.yaml — change one and
+      ## the other must change with it.
+      ##
+      ## Security posture, stated because "enable remote write" sounds broader
+      ## than it is: the receiver is on the ClusterIP Service only (no Ingress,
+      ## no NodePort), inside a namespace whose NetworkPolicy posture is
+      ## cluster-internal, and it accepts series — it grants no read access and
+      ## no admin API. The one real risk is a misconfigured writer flooding the
+      ## TSDB, which is bounded by retentionSize (7GB) above and by the fact
+      ## that the only writer configured for it is Tempo.
+      enableRemoteWriteReceiver: true
+
       ## 7 days. ROADMAP Phase 12's burn-rate windows top out at 3 days, so 7d gives
       ## two full long windows of history for postmortems — the SRE Workbook's own
       ## postmortem trigger needs at least one complete window of data. 14d would
@@ -503,10 +519,11 @@ kube-prometheus-stack:
     ## which would make every panel that references it by UID silently unbound.
     ## The UID is fixed here so those references are stable.
     ##
-    ## The four dashboards in observability/dashboards/ are Prometheus-driven and
-    ## do not reference this uid today; it is provisioned for Explore (the
-    ## runbook's LogQL path) and for Phase 10's log dashboard, and it is why
-    ## ROADMAP Phase 10 calls for one.
+    ## The five dashboards in observability/dashboards/ are Prometheus-driven;
+    ## Phase 11's traces board references this uid directly (its RED panels and
+    ## the service-map's linked Prometheus queries). It is also provisioned for
+    ## Explore (the runbook's LogQL path) and for Phase 10's log dashboard, and
+    ## it is why ROADMAP Phase 10 calls for one.
     ##
     ## THE URL is the Loki chart's SingleBinary Service. Rendered and checked
     ## against loki 7.3.0 with a release named `loki`: the StatefulSet's Service
@@ -536,10 +553,50 @@ kube-prometheus-stack:
         isDefault: false
         jsonData:
           maxLines: 1000
-          # The `derivedFields` below turn a trace ID in a log line into a link
-          # to Tempo. That requires the Tempo datasource, which is Phase 11. It
-          # is left OUT on purpose rather than added as a link that 404s.
+          # The `derivedFields` below would turn a trace ID in a log line into a
+          # link to Tempo. Tempo's datasource now exists (it was the Phase 11
+          # dependency this entry was waiting on), but the matcher stays OFF
+          # deliberately: no Boutique service is verified to write a trace_id
+          # into its stdout log line — the vendored v0.10.7 manifests carry no
+          # logging-correlation configuration, and a derivedField that never
+          # matches is a decoration that costs an engineer one confused minute
+          # per incident. The day a service logs its span context, the field is
+          #   - datasourceUid: tempo
+          #     matcherRegex: "trace_id[\"':=\\s]+([a-f0-9]{32})"
+          #     name: TraceID
+          #     url: "$${__value.raw}"
         derivedFields: []
+      # Phase 11: Tempo itself. `uid: tempo` is fixed for the same reason
+      # `uid: loki` is — every panel in observability/dashboards/traces.yaml
+      # (under its `traces.json` data key) and every future Explore link
+      # references it by UID, and an auto-generated UID makes those references
+      # silently unbound.
+      #
+      # `serviceMap.datasourceUid: prometheus` is what makes the service-map
+      # panel work: Grafana's Tempo datasource queries the DEPENDENCY GRAPH
+      # metrics (traces_service_graph_request_total and friends) out of
+      # Prometheus, not out of Tempo — Tempo's metrics generator computes the
+      # edges and remote-writes them (see prometheusSpec.enableRemoteWriteReceiver
+      # above and observability/tempo/values.yaml). Without this key the panel
+      # renders an empty graph and says nothing about why.
+      #
+      # `nodeGraph` renders the same graph as a directed graph with per-edge
+      # latency; `tracesToMetrics` lets a trace search jump to the RED metrics
+      # of the service it found. Both are Grafana features that need no extra
+      # backend — only this datasource block.
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://tempo.observability.svc.cluster.local:3200
+        isDefault: false
+        jsonData:
+          nodeGraph:
+            enabled: true
+          serviceMap:
+            datasourceUid: prometheus
+          tracesToMetrics:
+            datasourceUid: prometheus
 
   ## ---------------------------------------------------------------------------
   ## Default rules

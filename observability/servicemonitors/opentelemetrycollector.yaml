@@ -1,0 +1,61 @@
+# OTel Collector ServiceMonitor
+# -----------------------------------------------------------------------------
+# Two endpoints, two different metric families, one collector:
+#
+#   telemetry (8888)  the collector's OWN self-metrics — otelcol_*
+#                     (receiver accepted/refused, processor queue size, batch
+#                     size, exporter send failures and queue depth). This is
+#                     the recorded gap this phase closes: the config has
+#                     listened on 0.0.0.0:8888 all along, but no Service port
+#                     named it, so none of these series were scrapeable and a
+#                     failing exporter was indistinguishable from a healthy one
+#                     from Prometheus' side.
+#   metrics (9464)    the prometheus exporter — traces_spanmetrics_calls_total
+#                     and traces_spanmetrics_duration_seconds, produced by the
+#                     spanmetrics connector. These are the series
+#                     observability/rules/spanmetrics.yaml records into
+#                     span:request_rate:ratio / span:error_ratio:ratio /
+#                     span:latency_p95:seconds and watches with
+#                     TracesSpanmetricsMissing.
+#
+# PORT NAMES, NOT NUMBERS — same rule as observability/servicemonitors/loki.yaml:
+# the Service in apps/boutique/observability/opentelemetrycollector.yaml names
+# these ports, and a name is one thing to reconcile at a version bump rather
+# than a number that silently starts scraping the wrong process.
+#
+# The 15s interval on `metrics` matches the connector's metrics_flush_interval:
+# a scrape slower than the flush skips a data point; this does not.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: opentelemetrycollector
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: boutique-platform
+    platform.boutique/source: traces
+spec:
+  # `job` becomes "opentelemetrycollector", from the Service's
+  # app.kubernetes.io/name label. spanmetrics alerts are NOT scoped by `job`
+  # (they aggregate by the metric's own service_name label), so this is for
+  # humans reading `up{}` and for the target-alive checks in
+  # docs/runbooks/traces.md.
+  jobLabel: app.kubernetes.io/name
+  namespaceSelector:
+    matchNames:
+      - observability
+  selector:
+    matchLabels:
+      # The label apps/boutique/observability/opentelemetrycollector.yaml puts
+      # on its Service.
+      app: opentelemetrycollector
+  endpoints:
+    - port: telemetry
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

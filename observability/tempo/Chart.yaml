@@ -1,0 +1,23 @@
+apiVersion: v2
+name: tempo
+description: >-
+  Platform wrapper around the upstream grafana/tempo chart 1.24.4 (app 2.9.0),
+  in Single Binary mode, sized for this cluster. Local filesystem storage on a
+  gp3 PVC, no multitenancy, metrics generator running service-graphs only
+  (spanmetrics lives in the OTel Collector, not here — see values.yaml).
+type: application
+version: 0.1.0
+appVersion: "2.9.0"
+kubeVersion: ">=1.25.0-0"
+dependencies:
+  - name: tempo
+    # Verified latest on 2026-10-14:
+    #   helm search repo grafana/tempo --versions | head -5
+    #     grafana/tempo  1.24.4  2.9.0  Grafana Tempo Single Binary Mode
+    # 1.24.4 == app 2.9.0 == SPEC.md's pinned Tempo. The upstream chart carries
+    # `deprecated: true` (Grafana steers new installs to tempo-distributed /
+    # tempo-separate-scalable); this platform deliberately runs the single
+    # binary, and deprecation is not incompatibility — `helm lint --strict` and
+    # `helm template` both pass against it.
+    version: 1.24.4
+    repository: https://grafana.github.io/helm-charts

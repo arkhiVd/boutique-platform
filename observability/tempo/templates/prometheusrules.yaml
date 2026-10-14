@@ -1,0 +1,26 @@
+{{- /*
+Wraps observability/tempo/alerts.yaml into a PrometheusRule.
+
+The rules are a BARE file (`groups:` only) because `promtool check rules` and
+`promtool test rules` reject anything else. This template adds the apiVersion,
+kind, namespace and the `release` label that the Prometheus Operator's default
+ruleSelector requires — in one place, rather than repeated in the rules file.
+
+Same shape as observability/loki/templates/prometheusrules.yaml: the rule file
+lives inside this chart directory so Helm's `.Files` can load it.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "alerts.yaml" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tempo-alerts
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    release: {{ $.Release.Name }}
+    app.kubernetes.io/part-of: boutique-platform
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+    platform.boutique/component: traces
+spec:
+{{ $.Files.Get $path | indent 2 }}
+{{- end }}
