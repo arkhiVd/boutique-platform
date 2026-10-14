@@ -311,8 +311,12 @@ resource "aws_lb_target_group" "traefik_http" {
   # the app to consider the ingress healthy, which is the failure mode this
   # comment exists to prevent.
   health_check {
-    path                = "/ping"
-    matcher             = "200"
+    path    = "/ping"
+    matcher = "200"
+    # The ping entrypoint, not traefik_nodeport_http. See the note on
+    # var.traefik_nodeport_ping: /ping on the `web` entrypoint is answered by
+    # that entrypoint's redirect with 301, so a 200 there is unreachable.
+    port                = var.traefik_nodeport_ping
     interval            = 15
     timeout             = 5
     healthy_threshold   = 2
@@ -338,10 +342,12 @@ resource "aws_lb_target_group" "traefik_https" {
   protocol_version = "HTTP1"
 
   health_check {
-    path                = "/ping"
-    matcher             = "200"
-    protocol            = "HTTP"
-    port                = var.traefik_nodeport_http
+    path     = "/ping"
+    matcher  = "200"
+    protocol = "HTTP"
+    # Same reason as the HTTP target group: the ping entrypoint answers /ping
+    # with 200, and `web` answers it with 301.
+    port                = var.traefik_nodeport_ping
     interval            = 15
     timeout             = 5
     healthy_threshold   = 2

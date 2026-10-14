@@ -274,24 +274,84 @@ resource "aws_security_group_rule" "edge_ingress_https" {
 # named by the source of the traffic. The ALB wears this same group in Phase 5,
 # so its target group's traffic is allowed by the node identity rather than by
 # a CIDR that has to be maintained by hand.
+# ALB to node, written on the RECEIVING side.
+#
+# These two rules were the other way around on 2026-10-14: they sat on
+# boutique_edge sourced from boutique_node_internal, which permits the nodes to
+# reach the ALB on the NodePort -- a path nothing uses -- while the ALB's own
+# health checks and forwards, which originate from the edge group, were denied.
+# Every target reported `Target.Timeout` for exactly that reason. An ingress
+# rule belongs to the group that receives the packet.
 resource "aws_security_group_rule" "edge_ingress_traefik_http" {
   type                     = "ingress"
-  description              = "Traefik NodePort, plaintext from the node group"
+  description              = "ALB to Traefik NodePort, plaintext"
   from_port                = var.traefik_nodeport_http
   to_port                  = var.traefik_nodeport_http
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.boutique_node_internal.id
-  security_group_id        = aws_security_group.boutique_edge.id
+  source_security_group_id = aws_security_group.boutique_edge.id
+  security_group_id        = aws_security_group.boutique_node_internal.id
 }
 
 resource "aws_security_group_rule" "edge_ingress_traefik_https" {
   type                     = "ingress"
-  description              = "Traefik NodePort, TLS from the node group"
+  description              = "ALB to Traefik NodePort, TLS"
   from_port                = var.traefik_nodeport_https
   to_port                  = var.traefik_nodeport_https
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.boutique_node_internal.id
+  source_security_group_id = aws_security_group.boutique_edge.id
+  security_group_id        = aws_security_group.boutique_node_internal.id
+}
+
+# The health-check port, same direction as the two above. Without it the ALB
+# cannot even reach the endpoint its own health check names, which is the
+# difference between `Target.Timeout` and a real answer.
+resource "aws_security_group_rule" "edge_ingress_traefik_ping" {
+  type                     = "ingress"
+  description              = "ALB health checks to the Traefik ping entrypoint"
+  from_port                = var.traefik_nodeport_ping
+  to_port                  = var.traefik_nodeport_ping
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.boutique_edge.id
+  security_group_id        = aws_security_group.boutique_node_internal.id
+}
+
+# ALB to the Traefik NodePorts, egress side.
+#
+# An SG filter has to pass on BOTH ends: the node accepts the packet (the
+# three ingress rules below) and the ALB must be allowed to send it. This
+# group carried only 443 and DNS on 2026-10-14, so the ALB's own health
+# checks were dropped at the source and every target read `Target.Timeout`
+# no matter what the node answered locally. One rule per port, rather than a
+# 32080-32443 range, so this never becomes implicit permission for unrelated
+# NodePorts.
+resource "aws_security_group_rule" "edge_egress_traefik_http" {
+  type                     = "egress"
+  description              = "ALB to the Traefik plaintext NodePort"
+  from_port                = var.traefik_nodeport_http
+  to_port                  = var.traefik_nodeport_http
+  protocol                 = "tcp"
   security_group_id        = aws_security_group.boutique_edge.id
+  source_security_group_id = aws_security_group.boutique_node_internal.id
+}
+
+resource "aws_security_group_rule" "edge_egress_traefik_ping" {
+  type                     = "egress"
+  description              = "ALB health checks to the Traefik ping entrypoint"
+  from_port                = var.traefik_nodeport_ping
+  to_port                  = var.traefik_nodeport_ping
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.boutique_edge.id
+  source_security_group_id = aws_security_group.boutique_node_internal.id
+}
+
+resource "aws_security_group_rule" "edge_egress_traefik_https" {
+  type                     = "egress"
+  description              = "ALB to the Traefik TLS NodePort"
+  from_port                = var.traefik_nodeport_https
+  to_port                  = var.traefik_nodeport_https
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.boutique_edge.id
+  source_security_group_id = aws_security_group.boutique_node_internal.id
 }
 
 resource "aws_security_group_rule" "edge_egress_https" {

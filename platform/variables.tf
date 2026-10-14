@@ -75,6 +75,17 @@ variable "traefik_nodeport_https" {
   description = "NodePort the in-cluster Traefik listens on for TLS-terminated traffic from the ALB."
 }
 
+variable "traefik_nodeport_ping" {
+  type        = number
+  default     = 32081
+  description = "NodePort of Traefik's own `traefik` entrypoint, which is where --ping answers. The ALB target groups health-check /ping here. Measured 2026-10-14: probing traefik_nodeport_http instead can never return 200, because that is the `web` entrypoint and it answers every request with the entrypoint's 301 to https."
+
+  validation {
+    condition     = var.traefik_nodeport_ping >= 30000 && var.traefik_nodeport_ping <= 32767
+    error_message = "NodePorts live in 30000-32767 (the Kubernetes NodePort range)."
+  }
+}
+
 variable "instance_type_servers" {
   type        = string
   default     = "t3.small"
