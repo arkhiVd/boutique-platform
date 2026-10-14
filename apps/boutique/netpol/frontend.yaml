@@ -14,16 +14,38 @@ spec:
   # NARROWED FROM UPSTREAM. Upstream's network-policy-frontend.yaml is
   # `ingress: - {}` — an empty rule that allows every source in every namespace.
   # SPEC.md's trust boundary 2 terminates at Traefik, so the rule is narrowed to
-  # the Traefik namespace by namespace label. `kubernetes.io/metadata.name` is
-  # added to every namespace by the NamespaceDefaultLabelName admission plugin
-  # (GA since 1.22), so this needs no hand-maintained label on the namespace.
+  # the two callers that actually exist, named rather than opened. Every other
+  # policy in this directory narrows egress; this is the only one that narrows
+  # ingress, because the storefront is the only service a browser reaches.
   #
   # Port 8080, not 80: NetworkPolicy ports match the destination pod's port. The
   # frontend Service publishes 80 and targets 8080, so the policy has to say 8080.
+  #
+  # `kubernetes.io/metadata.name` is added to every namespace by the
+  # NamespaceDefaultLabelName admission plugin (GA since 1.22), so this needs no
+  # hand-maintained label on the namespace.
   - from:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: traefik
+    ports:
+    - port: 8080
+      protocol: TCP
+  # The load generator, which is the storefront's only other client. Locust
+  # drives http://${FRONTEND_ADDR} for the whole run, and loadgenerator's
+  # initContainer pings the same address and exits 1 unless it gets a 200, so
+  # without this rule the pod never leaves Init:Error and there is no traffic
+  # for anything downstream to be measured with. Measured 2026-10-14: 3 restarts,
+  # `Error: Could not reach frontend - Status code:`, while every other workload
+  # in the namespace was Running.
+  #
+  # podSelector alone, no namespaceSelector: the two workloads share a namespace,
+  # and naming the namespace here would re-couple this policy to a name that
+  # `kustomize` is free to rewrite.
+  - from:
+    - podSelector:
+        matchLabels:
+          app: loadgenerator
     ports:
     - port: 8080
       protocol: TCP
