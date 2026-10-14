@@ -39,6 +39,42 @@ traefik:
   api:
     dashboard: false
 
+  # --- which namespaces Traefik is allowed to route out of -----------------
+  # allowCrossNamespace is the switch this chart ships off, and with it off
+  # every route in templates/routes.yaml was refused with the same line in the
+  # pod log, over and over:
+  #
+  #   ERR error="service boutique/frontend not in the parent resource namespace
+  #        traefik" ingress=frontend namespace=traefik providerName=kubernetescrd
+  #
+  # The routes live in traefik/ so the edge's whole surface is one file in one
+  # place, but their services live in boutique/, observability/ and ci/. A
+  # KubernetesIngressRoute may only name a Service in its own namespace unless
+  # the provider is told otherwise, and Traefik enforces that by dropping the
+  # route rather than by returning an error to the client -- which is why the
+  # ALB answered 404 with every target healthy and every pod Running.
+  #
+  # It is paired with an explicit namespace list rather than left watching the
+  # whole cluster. allowCrossNamespace alone would mean any IngressRoute in any
+  # namespace could point at any Service anywhere; bounding the watch list keeps
+  # the set of objects that can publish something at three namespaces. The
+  # kubernetesIngress provider is bounded to the same three, so the Ingress API
+  # is not the wider door into the same house.
+  providers:
+    kubernetesCRD:
+      allowCrossNamespace: true
+      namespaces:
+        - traefik
+        - boutique
+        - observability
+        - ci
+    kubernetesIngress:
+      namespaces:
+        - traefik
+        - boutique
+        - observability
+        - ci
+
   # --- deployment shape ---------------------------------------------------
   # A DaemonSet, not a Deployment: the chart expresses it as deployment.kind,
   # not a separate daemonset block (verified against the 39.0.1 values schema).
