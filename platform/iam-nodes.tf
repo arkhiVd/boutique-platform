@@ -119,6 +119,20 @@ data "aws_iam_policy_document" "boutique_node" {
     resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}/etcd-snapshots/*"]
   }
 
+  # And the read, which the design originally left out and the restore drill
+  # measured on 2026-10-15: `scripts/etcd-restore-drill.sh` runs on the leader
+  # with the node role and downloads the newest object to restore it into
+  # scratch, so a node that cannot read the bucket cannot prove a backup
+  # restores. The `TARGET=cluster-live` restore path needs the same GetObject.
+  # Scoped to the snapshot prefix: it is the node's ONE readable S3 location,
+  # and it holds etcd snapshots of this cluster and nothing else.
+  statement {
+    sid       = "EtcdSnapshotRead"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}/etcd-snapshots/*"]
+  }
+
   statement {
     sid       = "EtcdSnapshotList"
     effect    = "Allow"
@@ -137,6 +151,31 @@ data "aws_iam_policy_document" "boutique_node" {
     effect    = "Allow"
     actions   = ["s3:DeleteObject"]
     resources = ["arn:${data.aws_partition.current.partition}:s3:::${local.etcd_snapshot_bucket_name}/etcd-snapshots/*"]
+  }
+
+  # And the key the snapshot bucket encrypts WITH, which is the statement that
+  # was missing on 2026-10-15 when the end-to-end drill ran. The bucket is
+  # SSE-KMS (`kms_master_key_id = aws_kms_key.platform` in etcd-backup.tf), and
+  # an SSE-KMS PutObject calls GenerateDataKey on the CMK. The node role had
+  # s3:PutObject and kms:Decrypt but not GenerateDataKey, so every run failed
+  # with   "is not authorized to perform: kms:GenerateDataKey on resource:
+  #   arn:aws:kms:...:key/<platform CMK>"  and the bucket stayed empty while
+  # the snapshot service reported a successful save and a failing list. k3s
+  # logs it as "Error received during snapshot upload to S3".
+  #
+  # Narrow on purpose: GenerateDataKey (not WithoutPlaintext) is what a
+  # server-side encryption upload needs, and the resource is the one CMK, not a
+  # wildcard. Decrypt is here for the restore drill's download, and DescribeKey
+  # is what the S3 client consults before it will use the key.
+  statement {
+    sid    = "EtcdSnapshotKms"
+    effect = "Allow"
+    actions = [
+      "kms:GenerateDataKey",
+      "kms:Decrypt",
+      "kms:DescribeKey",
+    ]
+    resources = [aws_kms_key.platform.arn]
   }
 
   # The CMK that encrypts the node's root volume and the k3s join token. A role

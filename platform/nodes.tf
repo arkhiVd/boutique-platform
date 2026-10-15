@@ -253,6 +253,15 @@ data "aws_iam_policy_document" "kms_platform" {
       "kms:DescribeKey",
       "kms:ReEncrypt*",
       "kms:GenerateDataKeyWithoutPlaintext",
+      # Added 2026-10-15, the other half of the etcd snapshot failure: the
+      # node role's identity policy already allowed GenerateDataKey after the
+      # `EtcdSnapshotKms` statement landed in iam-nodes.tf, but a customer-managed
+      # key requires BOTH sides to allow, and the key policy only delegated the
+      # WithoutPlaintext form (volume attachments never need the plaintext key).
+      # Without this the upload still fails with
+      #   "no identity-based policy allows the kms:GenerateDataKey action"
+      # because the identity statement alone cannot override the key policy.
+      "kms:GenerateDataKey",
     ]
     resources = ["*"]
 

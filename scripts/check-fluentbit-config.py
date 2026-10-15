@@ -179,6 +179,13 @@ def assemble_mount(conf_text: str, boutique_parsers: str) -> str:
                  r"\1Parsers_File /cfg/custom-parsers.conf", out, flags=re.MULTILINE)
     out = re.sub(r"^(\s*)Parsers_File\s+/fluent-bit/etc/parsers/boutique-parsers\.conf.*$",
                  r"\1Parsers_File /cfg/boutique-parsers.conf", out, flags=re.MULTILINE)
+    # The step-7 lua filter's script is an absolute path in the config (a
+    # relative one resolves against the config's own directory, which the
+    # binary expands to a /cfg/..<tmp> path -- measured 2026-10-15). It is a
+    # separate ConfigMap the chart mounts at /fluent-bit/etc/lua, so here it is
+    # supplied by `--lua` and rewritten to the same /cfg root.
+    out = re.sub(r"^(\s*)script\s+/fluent-bit/etc/lua/\S+.*$",
+                 r"\1script /cfg/k8s-labels.lua", out, flags=re.MULTILINE)
     return out
 
 
@@ -300,7 +307,8 @@ def check_structural(conf_text: str, parsers_text: str) -> list[str]:
     return problems
 
 
-def check_with_binary(conf_text: str, chart_parsers: str, boutique_parsers: str) -> str | None:
+def check_with_binary(conf_text: str, chart_parsers: str, boutique_parsers: str,
+                      lua_script: str = "") -> str | None:
     """Run the pinned image's own `--dry-run`.
 
     Returns None when the binary validates, a diagnostic string when it does
@@ -331,6 +339,11 @@ def check_with_binary(conf_text: str, chart_parsers: str, boutique_parsers: str)
             handle.write(chart_parsers)
         with open(os.path.join(cfg, "boutique-parsers.conf"), "w", encoding="utf-8") as handle:
             handle.write(boutique_parsers)
+        # The step-7 lua filter's script. Absent, the binary aborts with
+        # "filter cannot be loaded" -- the exact failure a relative `script`
+        # path produces on a pod, and the reason this file is part of the check.
+        with open(os.path.join(cfg, "k8s-labels.lua"), "w", encoding="utf-8") as handle:
+            handle.write(lua_script)
         try:
             proc = subprocess.run(
                 ["docker", "run", "--rm", "-v", f"{cfg}:/cfg:ro", FLUENT_BIT_IMAGE,
@@ -368,6 +381,21 @@ def load_parsers(path: str) -> str:
     )
 
 
+def load_lua(path: str) -> str:
+    """The step-7 lua ConfigMap, which the chart mounts at /fluent-bit/etc/lua."""
+    with open(path, encoding="utf-8") as handle:
+        for doc in yaml.safe_load_all(handle):
+            if isinstance(doc, dict) and doc.get("kind") == "ConfigMap":
+                data = doc.get("data") or {}
+                for key in data:
+                    if key.endswith(".lua"):
+                        return data[key]
+    sys.exit(
+        f"!! {path}: no `.lua` key in that ConfigMap. Expected the file the chart "
+        f"mounts at /fluent-bit/etc/lua."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -379,12 +407,18 @@ def main() -> int:
         default="observability/fluent-bit/boutique-parsers.yaml",
         help="the Boutique parsers ConfigMap the chart mounts at /fluent-bit/etc/parsers",
     )
+    parser.add_argument(
+        "--lua",
+        default="observability/fluent-bit/k8s-labels.yaml",
+        help="the lua ConfigMap the chart mounts at /fluent-bit/etc/lua",
+    )
     args = parser.parse_args()
 
     failures: list[str] = []
     binary_backed = False
     try:
         parsers_text = load_parsers(args.parsers)
+        lua_text = load_lua(args.lua)
     except SystemExit as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -395,7 +429,7 @@ def main() -> int:
         for problem in check_structural(conf_text, parsers_text):
             failures.append(f"{path}: {problem}")
 
-        verdict = check_with_binary(conf_text, chart_parsers, parsers_text)
+        verdict = check_with_binary(conf_text, chart_parsers, parsers_text, lua_text)
         if verdict is None:
             binary_backed = True
             print(f"ok: {os.path.basename(path)} parses under fluent-bit {FLUENT_BIT_IMAGE}")

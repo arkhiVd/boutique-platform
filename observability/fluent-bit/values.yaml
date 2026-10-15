@@ -271,17 +271,30 @@ fluent-bit:
       #     are absent only if that filter fails on a record, which happens for
       #     a line written before the filter started.
       #
-      # `Copy` is conditional by definition — it copies only when the source
-      # key exists and the destination does not
-      # (https://docs.fluentbit.io/manual/pipeline/filters/modify) — so this
-      # filter cannot fail. The record accessor is accepted as the STRING:KEY
-      # parameter, which is why no flattening stage is needed first.
+      # THIS IS A LUA FILTER, NOT A `modify Copy`, AND THE REASON IS MEASURED.
+      # This block held four `Copy $kubernetes[...]` lines until 2026-10-15,
+      # when every stream in Loki arrived as
+      #     {namespace="unknown", app="unlabelled", container="unknown"}
+      # while the records themselves were correctly PARSED - the routing in
+      # step 2 reads the same accessor and the parsers in step 3 ran. A probe
+      # DaemonSet (`fluent-bit-debug`, stdout output, the same image) showed
+      # the `kubernetes` map fully populated in the record and these lines
+      # producing nothing: in fluent-bit 5.1.3 the `modify` filter writes
+      # `$kubernetes[...]` as a LITERAL STRING in `Set` and copies nothing at
+      # all in `Copy` (a `Set probe $stream` wrote the seven characters
+      # `$stream` to the record). `rewrite_tag` resolves accessors, `modify`
+      # does not, and the sentinels below were silently covering for it.
+      #
+      # The function is observability/fluent-bit/k8s-labels.lua, mounted at
+      # /fluent-bit/etc/lua (see daemonSetVolumes). It copies only when the
+      # destination key is absent, which is the same conditional the `Copy`
+      # documented and the reason the fallback below still means "missing",
+      # never "wrong".
       [FILTER]
-          Name modify
+          Name lua
           Match *
-          Copy $kubernetes['labels']['app']       app_label
-          Copy $kubernetes['namespace_name']      ns_label
-          Copy $kubernetes['container_name']      container_label
+          script /fluent-bit/etc/lua/k8s-labels.lua
+          call set_k8s_labels
 
       # `Add` writes only when the key does NOT already exist, so this is the
       # fallback and never overwrites a real value. One filter, three rules:
@@ -296,14 +309,13 @@ fluent-bit:
           Add container_label unknown
 
       # ---- 8. pod_name, to structured metadata -----------------------------
-      # A second `Copy` for the one field that must survive `Remove_Keys`
-      # below. The Loki output reads structured metadata through a record
-      # accessor, so a top-level copy is what makes `pod=$pod_name` resolvable
-      # after the whole `kubernetes` map has been deleted from the record.
-      [FILTER]
-          Name modify
-          Match *
-          Copy $kubernetes['pod_name'] pod_name
+      # `pod` leaves as structured metadata (`Structured_Metadata pod=$pod_name`
+      # in the output), which is the field every log query narrows to and the
+      # one thing worth keeping per line at zero stream cost. The copy happens
+      # in the lua filter in step 7 — it was a `Copy $kubernetes['pod_name']`
+      # line here until the same measurement showed that `Copy` with a record
+      # accessor is a no-op in fluent-bit 5.1.3 (see step 7). No filter is
+      # needed here at all; the key already exists on the record.
 
     ## -------------------------------------------------------------------------
     ## THE OUTPUT — the reason this chart exists
@@ -503,12 +515,25 @@ fluent-bit:
     - name: boutique-parsers
       configMap:
         name: fluent-bit-boutique-parsers
+    # The step-7 lua filter's script, applied by scripts/deploy-workloads.sh the
+    # same way the parsers ConfigMap is. It is NOT `config.extraFiles`: that key
+    # belongs to the chart's defaults ConfigMap and mounts at /fluent-bit/etc,
+    # while `script` in a FILTER resolves relative to the (temporary) config
+    # directory -- measured by running the probe, whose relative path failed with
+    # "cannot access script '/fluent-bit/etc/conf/..<tmp>/copy_k8s_labels.lua'".
+    # The absolute path /fluent-bit/etc/lua/k8s-labels.lua is what works.
+    - name: k8s-labels
+      configMap:
+        name: fluent-bit-k8s-labels
   daemonSetVolumeMounts:
     - name: varlog
       mountPath: /var/log
       readOnly: true
     - name: boutique-parsers
       mountPath: /fluent-bit/etc/parsers
+      readOnly: true
+    - name: k8s-labels
+      mountPath: /fluent-bit/etc/lua
       readOnly: true
 
   ## ---------------------------------------------------------------------------

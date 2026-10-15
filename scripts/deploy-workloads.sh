@@ -94,6 +94,12 @@ step "loki" \
 step "fluent-bit parser configmap" \
   kubectl apply -f observability/fluent-bit/boutique-parsers.yaml
 
+# The step-7 lua filter's script, the same shape as the parser ConfigMap: a file
+# in the repo applied before the chart that mounts it. Without it the DaemonSet
+# fails pre_run with "filter cannot be loaded" (measured 2026-10-15).
+step "fluent-bit k8s label configmap" \
+  kubectl apply -f observability/fluent-bit/k8s-labels.yaml
+
 step "fluent-bit" \
   helm upgrade --install fluent-bit observability/fluent-bit -n observability
 
