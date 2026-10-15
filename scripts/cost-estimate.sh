@@ -8,24 +8,31 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-PRICED_ON="2026-10-08"
+PRICED_ON="2026-10-15"
 # us-east-1 on-demand Linux, USD per hour and per GB-month. Verified against the
 # AWS price list on PRICED_ON. Override to re-price without editing the script.
 : "${P_T3_MICRO:=0.0104}"; : "${P_T3_SMALL:=0.0208}"
 : "${P_T3_MEDIUM:=0.0416}"; : "${P_T3_LARGE:=0.0832}"
 : "${P_T2_MICRO:=0.0116}"; : "${P_T2_SMALL:=0.0232}"
+# Added with the 2026-10-15 resize. Verified that day via pricing GetProducts
+# (us-east-1, Linux, shared tenancy, Used) -- note it is priced ABOVE t3.large
+# while carrying half its RAM (4GiB vs 8GiB): compute-optimised, not general.
+: "${P_C7I_FLEX_LARGE:=0.08479}"
 : "${P_GP3_GB:=0.08}"; : "${P_ALB_HR:=0.0225}"; : "${P_LCU_HR:=0.008}"
 : "${P_SNAP_GB:=0.05}"; : "${P_DATA_GB:=0.09}"; : "${P_LOG_GB:=0.50}"
 # t3 CPU-credit surcharge: an "unlimited" instance that exceeds its baseline accrues
 # $0.05 per vCPU-hour on the surplus. Modelled so the sustained-CPU trap is visible.
+# c7i-flex.large is NOT burstable and accrues none of this; leaving it inside the
+# t3 baseline overstates the surcharge risk and never understates it.
 : "${P_CPU_SURCHARGE:=0.05}"; : "${BASELINE_FRACTION:=0.20}"
 
-# The shape, as "<count>x <type> + <count>x <type>". Defaults to four equal
-# t3.small nodes: three k3s servers for etcd quorum plus one workload node.
-# Four, not "3 x t3.small + 1 x t3.medium" -- the apply measured that this
-# account rejects t3.medium (FreeTierEligible=false), and the equal shape is
-# cheaper. Override with SHAPE= to model something else.
-: "${SHAPE:=4xt3.small}"
+# The shape, as "<count>x <type> + <count>x <type>". Defaults to the DEPLOYED,
+# user-approved shape as of 2026-10-15: one c7i-flex.large leader (the bootstrap
+# and etcd anchor, the node that wedged under sustained load on t3.small) plus
+# three t3.small nodes -- two followers + one worker. The earlier default was
+# four equal t3.small, which is what launched first; the resize moved only the
+# leader. Override with SHAPE= to model something else.
+: "${SHAPE:=1xc7i-flex.large+3xt3.small}"
 : "${NODE_GB:=16}"
 : "${HOURS_PER_MONTH:=730}"; : "${FREE_TIER_HOURS:=750}"; : "${FREE_TIER_EBS_GB:=30}"
 : "${ALB:=1}"; : "${LCU:=2}"; : "${SNAP_GB:=4}"; : "${DATA_OUT_GB:=60}"; : "${LOG_GB:=2}"
@@ -54,6 +61,7 @@ node_price() {
     t3.small)  printf '%s' "$P_T3_SMALL" ;;
     t3.medium) printf '%s' "$P_T3_MEDIUM" ;;
     t3.large)  printf '%s' "$P_T3_LARGE" ;;
+    c7i-flex.large) printf '%s' "$P_C7I_FLEX_LARGE" ;;
     *) printf 'unknown instance type: %s\n' "$1" >&2; return 1 ;;
   esac
 }

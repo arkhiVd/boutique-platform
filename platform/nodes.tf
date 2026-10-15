@@ -415,10 +415,13 @@ data "aws_ssm_parameter" "amazon_linux_2023" {
 # LatestVersionNumber=3 / DefaultVersionNumber=1.
 # ---------------------------------------------------------------------------
 resource "aws_launch_template" "k3s_server" {
-  name_prefix   = "boutique-k3s-server-"
-  description   = "boutique-platform k3s server: t3.small, one per AZ, HA etcd. user_data renders platform/cluster-bootstrap.sh."
-  image_id      = data.aws_ssm_parameter.amazon_linux_2023.value
-  instance_type = var.instance_type_servers
+  # checkov:skip=CKV_AWS_341:Hop limit 2 is deliberate and load-bearing, not sloppy. The EBS CSI node plugin reads IMDS from a pod network namespace, which is one hop further out than the instance; at the default TTL of 1 the response expires before it reaches the pod and the driver fails to authenticate. Measured 2026-10-14: hop limit 1 broke the driver, hop limit 2 fixed it (this file's metadata_options block). IMDSv2 stays required; only the hop count moves.
+  name_prefix = "boutique-k3s-server-"
+  description = "boutique-platform k3s server: one c7i-flex.large leader + two t3.small followers, one per AZ, HA etcd. user_data renders platform/cluster-bootstrap.sh."
+  image_id    = data.aws_ssm_parameter.amazon_linux_2023.value
+  # No `instance_type` here: the shape differs by role (see
+  # var.instance_type_servers) and RunInstances takes it from the instance
+  # resource below, which is the only place the per-AZ choice is visible.
 
   iam_instance_profile {
     name = aws_iam_instance_profile.boutique_node.name
@@ -527,6 +530,7 @@ resource "aws_launch_template" "k3s_server" {
 # role, instance type, AZ and volume are all different -- and those are exactly
 # the four things a reader wants side by side.
 resource "aws_launch_template" "k3s_worker" {
+  # checkov:skip=CKV_AWS_341:Same deliberate hop limit 2 as the server template: a pod network namespace is one hop out, and the EBS CSI driver reads IMDS through it. See the server template's metadata_options block for the measured failure; IMDSv2 stays required.
   name_prefix   = "boutique-k3s-worker-"
   description   = "boutique-platform k3s workload node: t3.small (this account rejects t3.medium -- FreeTierEligible=false), schedulable, no control-plane taint. user_data renders platform/cluster-bootstrap.sh."
   image_id      = data.aws_ssm_parameter.amazon_linux_2023.value
@@ -616,8 +620,11 @@ resource "aws_launch_template" "k3s_worker" {
 resource "aws_instance" "k3s_server" {
   for_each = toset(local.azs)
 
-  ami           = data.aws_ssm_parameter.amazon_linux_2023.value
-  instance_type = var.instance_type_servers
+  ami = data.aws_ssm_parameter.amazon_linux_2023.value
+  # The one per-role asymmetry: the leader (local.leader_az) gets the large
+  # shape, the two followers the small one. Set here and not on the launch
+  # template because the template is shared and the role is decided by AZ.
+  instance_type = each.value == local.leader_az ? var.instance_type_servers.leader : var.instance_type_servers.followers
   subnet_id     = aws_subnet.boutique[each.value].id
 
   launch_template {
@@ -698,6 +705,14 @@ resource "aws_instance" "k3s_server" {
     # explicit `terraform apply -replace` is for.
     ignore_changes = [
       launch_template,
+      # The user_data EC2 returned at launch. The instance resource copies the
+      # launch template's value into state even though the template owns it, so
+      # every plan after the first shows a removal -- and the apply that
+      # enforces it stops and starts the instance (measured on the 2026-10-15
+      # resize plan: all four nodes). The template is the source of truth; a
+      # bootstrap edit reaching a RUNNING node is a documented `-replace`,
+      # never an in-place stop.
+      user_data,
       tags["node.kubernetes.io/instance-type"],
       tags["kubernetes.io/cluster/boutique-platform"],
       tags_all,
@@ -797,6 +812,11 @@ resource "aws_instance" "k3s_worker" {
       tags["node.kubernetes.io/instance-type"],
       tags["kubernetes.io/cluster/boutique-platform"],
       tags_all,
+      # Same class as the launch-template ignore above: user_data is
+      # launch-time input owned by the template, and the instance's copy of
+      # it is state noise whose "fix" is a needless stop/start. See the
+      # matching comment on the server instances.
+      user_data,
     ]
   }
 

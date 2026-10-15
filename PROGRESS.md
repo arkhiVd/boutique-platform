@@ -1,6 +1,6 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-14** · rendered browser view: `docs/progress.html`
+**Last updated: 2026-10-15** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
 ---
@@ -8,8 +8,9 @@
 ## ▶ Where we are
 
 **Everything below the approval gates is built, merged to `main` — and since 2026-10-14, applied.**
-Both stacks are live in `us-east-1`. The numbers below were re-run on 2026-10-14 against this
-commit, not carried forward from an earlier one.
+Both stacks are live in `us-east-1`. Waves C, D and E are now **deployed and verified live**
+(`scripts/doctor.sh`: **PASS 9 / WARN 1 / FAIL 0**) as of 2026-10-15; the numbers below were re-run
+that day against this commit, not carried forward from an earlier one.
 
 What is applied and at what stage:
 
@@ -17,13 +18,13 @@ What is applied and at what stage:
 |---|---|---|
 | 0 guardrails | merged, green | SPEC / ROADMAP / TASKS / ADRs / `scripts/check.sh` |
 | 1–2 network, IAM, VPC | **applied** | state bucket, VPC, subnets, security groups; bootstrap's 14 resources are live |
-| 3–4 cluster | **applied** | 4 × t3.small running, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill |
+| 3–4 cluster | **applied** | 1 × c7i-flex.large (leader) + 3 × t3.small running, k3s v1.36.5+k3s1, etcd snapshots, RBAC, restore drill |
 | 5 edge | **applied** | ALB active and logging to S3, count-mode Web ACL logging to CloudWatch, Traefik targets attached |
-| 6 metrics and logs | merged, green, not deployed | kube-prometheus-stack, Loki, Fluent Bit, SLOs, golden signals |
-| 7–8 CI/CD | merged, green, not deployed | Jenkins wrapper chart, RBAC, backup, shared library, root Jenkinsfile |
-| 11 traces | merged, green, not deployed | Tempo, spanmetrics, recording rules, traces dashboard |
+| 6 metrics and logs | **applied, verified live** | kube-prometheus-stack, Grafana, Loki, Fluent Bit, Promtail→Fluent Bit trail, golden-signal dashboards |
+| 7–8 CI/CD | **applied, verified live** | Jenkins controller `ci` 2/2 Running (0 failed plugin loads, 0 JCasC errors, `/login` 200), pods scheduled, shared library ready |
+| 11 traces | **applied** | Tempo up, spanmetrics wired, OTel collector gateway shipping traces |
 
-**The gate reads 136 PASS / 0 FAIL / 0 MISSING** as of commit `eb8b16d`.
+**The gate reads 145 PASS / 0 FAIL / 0 MISSING** as of this working tree.
 
 ```
 terraform -chdir=bootstrap plan      0 resource changes (one output normalises "30" -> "30.0")
@@ -33,25 +34,35 @@ terraform -chdir=platform  plan      No changes. Your infrastructure matches the
 Both stacks reach a clean plan; the bootstrap line is an output-only refresh against AWS's
 `limit_amount` formatting, not a resource diff.
 
-**Billing started on 2026-10-14.** The first apply's cost line, recomputed for the shape that
-actually launched:
+**Billing started on 2026-10-14.** The current cost line, recomputed by `scripts/cost-estimate.sh`
+(priced 2026-10-15) for the shape that is actually running:
 
 ```
-committed total   $82.56/month   $116.78 over 43 days (guarded)   -> 58% of the $200 credit
-incl. worst case  $164.69/month  $232.94 over 43 days             -> still over the credit
+committed total   $129.27/month   $182.85 over 43 days (guarded)  -> 91% of the $200 credit
+incl. worst case  $211.40/month   $299.02 over 43 days            -> OVER the credit
+exit 0 (guarded figure under the credit; the worst case is a modelled t3 CPU-credit risk)
 ```
 
 Two cost lines land with the instances that the SPEC's table does not yet carry: the CMK at
 $1.00/month and detailed monitoring at $0.30 per instance per month (**+$2.20/month, $3.13 over
-the 43-day window**).
+the 43-day window**). The earlier `$82.56/month` line was the 4 × t3.small shape measured on
+2026-10-14; the leader's move to c7i-flex.large is what puts ~$47/month on top of it.
 
-**The node shape changed under the apply, and the reason is measured, not aesthetic.** The
-spec's 3 × t3.small + 1 × t3.medium cannot launch in this account: `RunInstances` rejects
-t3.medium with `InvalidParameterCombination: The specified instance type is not eligible for
-Free Tier`, and `describe-instance-types --filters free-tier-eligible=true` confirms t3.medium
-and `t2.*` are ineligible while t3.small, t4g.small, `c7i-flex.large` and `m7i-flex.large` are.
-The deployed shape is **four equal t3.small**, which is both launchable and **$15.18/month
-cheaper** than the blocked one.
+**The node shape changed twice, and both reasons are measured, not aesthetic.** The spec's
+3 × t3.small + 1 × t3.medium cannot launch in this account: `RunInstances` rejects t3.medium with
+`InvalidParameterCombination: The specified instance type is not eligible for Free Tier`, and
+`describe-instance-types --filters free-tier-eligible=true` confirms t3.medium and `t2.*` are
+ineligible while t3.small, t4g.small, `c7i-flex.large` and `m7i-flex.large` are. The first
+deployed shape was therefore **four equal t3.small** ($15.18/month cheaper than the blocked one).
+On 2026-10-15 the cluster was **resized to the approved 1-large + 3-small shape**: the leader —
+the bootstrap node, the `--cluster-init` etcd member and the node observed wedging under load —
+kept `c7i-flex.large`, while the two followers went to `t3.small` (user-approved; applied one node
+at a time so an etcd quorum of three was never lost, then confirmed with a clean
+`terraform plan`). vCPU is unchanged at exactly 8 of the 8 quota; RAM is now 6 GiB advertised
+(4 GiB on the leader, 2 GiB on each follower and the worker). `scripts/cost-estimate.sh` carries
+both prices (`P_C7I_FLEX_LARGE=0.08479`, verified via pricing `GetProducts` on 2026-10-15) and
+defaults `SHAPE=1xc7i-flex.large+3xt3.small`, so its worst-case t3 CPU-credit model now
+overstates the risk: c7i-flex is not burstable and accrues no surcharge.
 
 **The headline number, stated plainly because it is the one that matters:**
 the platform **does not fit** on one node. `docs/resource-budget.md` holds the arithmetic —
@@ -100,8 +111,8 @@ Critic: `pending` · `pass` · `gap named`
 - `[x]` **Phase 2 — network + node identity: VPC, 3 public subnets, IGW, 4 SGs, node instance profile**
 
 ### Wave B — Cluster
-- `[~]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · built on this branch; blocked on the first cost-bearing apply
-  - Launch templates per node role, 3 servers (one per AZ) + 1 worker, **all four schedulable, none tainted**; the four are `t3.small` (see the apply findings below)
+- `[x]` **Phase 3 — k3s HA, 3 AZ, SSM-only** · applied and verified; resized to the approved 1-large + 3-small shape on 2026-10-15
+  - Launch templates per node role, 3 servers (one per AZ) + 1 worker, **all four schedulable, none tainted**; the servers are `object({leader = "c7i-flex.large", followers = "t3.small"})` — the leader keeps the large shape as the etcd anchor, the two followers were resized one node at a time on 2026-10-15 with quorum held (see the apply findings below)
   - Root volumes encrypted gp3 under a CMK this stack owns; **no `key_name`, no port 22, SSM only**
   - The join token is an **ephemeral variable written into a write-only `value_wo` SecureString**: 0 hits in the plan text, the plan JSON and the saved plan file, and the provider nulls the value on read
   - Cloud-init elects the leader by AZ, reads the token and the leader address from SSM with the instance role, hardens the k3s unit, and installs the etcd snapshot timer on the leader
@@ -112,18 +123,18 @@ Critic: `pending` · `pass` · `gap named`
   - `scripts/etcd-restore-drill.sh`: restores into scratch, times each phase, and **refuses `TARGET=cluster-live` without `LIVE_ACK=yes`**
 
 ### Wave C — Edge and workload
-- `[~]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · critic: `pending`
-- `[~]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · manifest layer done; cluster-side proof blocked
+- `[x]` **Phase 5 — two-layer edge: ALB + WAF + TLS + access logs + Traefik** · applied and verified
+- `[x]` **Phase 6 — Boutique production-grade (PDB, HPA, topology spread, netpol, OTel, chaos)** · deployed and verified live on 2026-10-15
 
 ### Wave D — CI/CD
-- `[~]` **Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)** · wrapper chart, namespace-scoped RBAC and daily backup built and merged; the controller has never booted (TASKS blockers)
-- `[~]` **Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback** · 9 shared-library steps plus the root Jenkinsfile, all twelve gates run locally in their pinned containers; no cluster has executed one (TASKS blockers)
+- `[x]` **Phase 7 — Jenkins controller + ephemeral Kubernetes agents (JCasC)** · wrapper chart, namespace-scoped RBAC and daily backup merged; **the controller boots verified on 2026-10-15** (2/2 Running, 0 failed plugin loads, 0 JCasC errors, `/login` 200) — the six failures that got in the way are all documented in `ci/jenkins/values.yaml`
+- `[~]` **Phase 8 — pipeline library: scan, sign, deploy, canary, auto-rollback** · 9 shared-library steps plus the root Jenkinsfile, all twelve gates run locally in their pinned containers; no pipeline has executed on the cluster yet (awaiting a first real build)
 
 ### Wave E — Observability
-- `[~]` **Phase 9 — Prometheus / Grafana / Alertmanager + golden signals** · built and validated; cluster-side proof pending
-- `[~]` **Phase 10 — Loki + Fluent Bit logs with bounded cardinality** · built and validated; cluster-side proof pending
-- `[~]` **Phase 11 — OTel Collector gateway + Tempo** · built on `feat/traces`, merged: the collector ships (2 replicas, real processors, `otlp/tempo` + spanmetrics) **and Tempo now exists** (single binary, gp3, service-graphs metrics generator); cluster-side proof pending (TASKS U13)
-- `[~]` **Phase 12 — SLOs, error budget, multiwindow multi-burn-rate alerts** · built and validated
+- `[x]` **Phase 9 — Prometheus / Grafana / Alertmanager + golden signals** · deployed and verified live on 2026-10-15 (8/8 pods Running, scrapes active)
+- `[x]` **Phase 10 — Loki + Fluent Bit logs with bounded cardinality** · deployed and verified live on 2026-10-15 (log line volumes confirmed flowing)
+- `[x]` **Phase 11 — OTel Collector gateway + Tempo** · deployed and verified live on 2026-10-15 (collector gateway + single-binary Tempo on gp3)
+- `[~]` **Phase 12 — SLOs, error budget, multiwindow multi-burn-rate alerts** · built and validated; alert rules live, not yet fired on purpose
 
 ### Wave F — Operational clarity
 - `[!]` **Phase 13 — runbooks, DR drill, evidence pack**
@@ -144,7 +155,7 @@ Critic: `pending` · `pass` · `gap named`
 ## What is proven so far (real evidence, not reports)
 
 - Account `348032171026` / `us-east-1`, default VPC `vpc-0cf47bfcd22729c1a`
-- Quota: **8.0 vCPU** running on-demand standard instances → 4 × t3-class total
+- Quota: **8.0 vCPU** running on-demand standard instances → the deployed 4 nodes sit exactly at it (1 × c7i-flex.large leader + 3 × t3.small); a fifth node cannot launch without a quota increase
 - Free-tier eligibility is enforced **by the API, not by the console** (`RunInstances` fails with
   `InvalidParameterCombination`). Eligible in `us-east-1`: **t3.small**, t4g.small, t3.micro,
   t4g.micro, t8i.micro, t8i.small, c7i-flex.large, m7i-flex.large. **Not** eligible: **t3.medium**
@@ -160,6 +171,56 @@ Critic: `pending` · `pass` · `gap named`
 - Verified absent and **not** to be built: `adServiceFailure`, `recommendationCacheFailure`
   (checked across v0.1.4–v0.10.7), `ml-pipeline/`, Cloud CDN, Argo CD / Config Sync descriptors
 - k3s stable channel resolves to **v1.36.5+k3s1** (`curl -s https://update.k3s.io/v1-release/channels/stable`)
+
+### 2026-10-15 — waves C, D and E verified live, and the resize to 1-large + 3-small
+
+The cluster was rebuilt on `c7i-flex.large` servers (t3.medium still rejected), then resized to
+the shape the user approved — the leader keeps `c7i-flex.large`, the two followers go back to
+`t3.small`. The resize was applied one node at a time so the etcd quorum of three was never
+lost, and closed with a clean `terraform plan`:
+
+```
+$ terraform apply -auto-approve -target=aws_launch_template.k3s_server \
+      -target='aws_instance.k3s_server["us-east-1b"]'     # follower → t3.small, then wait Ready
+$ terraform apply -auto-approve -target='aws_instance.k3s_server["us-east-1c"]'  # second follower
+$ terraform plan                                             # No changes. Your infrastructure matches the configuration.
+```
+
+Watch item: follower 1b wedged once after the resize — memory 1.68/1.9 GiB used and load 11 on
+2 vCPU while still hosting the pre-resize pod set (Loki-0 is AZ-pinned to us-east-1b). Kubelet
+stopped heartbeating, the node took `node.kubernetes.io/unreachable` taints and pods hung
+Terminating. It recovered with `aws ec2 reboot-instances --instance-ids i-043323974c30b6b52`;
+memory then settled at 59%. `scripts/doctor.sh` currently reports the followers at 83% / 59% RAM
+— the 2 GiB followers are the tightest constraint left and the reason a 5th pod on 1c should be
+watched.
+
+Waves C, D and E were then deployed by one scripted entry point, `scripts/deploy-workloads.sh`
+(namespaces → policies → Traefik → Boutique → EBS CSI → Grafana secret → Jenkins secrets →
+kube-prometheus-stack → Loki → Fluent Bit → Tempo → blackbox → Jenkins RBAC + chart → rollout
+waits → verdict), and verified:
+
+```
+$ ./scripts/doctor.sh
+  VERDICT: PASS -- 9 checks green, 1 warning(s), cluster healthy
+  (warning: 4 PDBs allow no voluntary disruption — single-replica components by design)
+
+$ ./scripts/check.sh
+  PASS: 145   FAIL: 0   MISSING: 0
+```
+
+The Jenkins controller's first boot took six fixes, each with the measured evidence recorded in
+`ci/jenkins/values.yaml`: the namespace ServiceAccount was never applied (`ci/rbac/`); two
+Secrets the chart projects were missing (`scripts/create-jenkins-secrets.sh`, with the chart's
+own key names `jenkins-admin-user`/`jenkins-admin-password`); both the init and the k8s-sidecar
+containers were OOMKilled at 512Mi / 64Mi (now 1Gi / 256Mi); the plugins failed on a two-round
+dependency ladder, pinned with the exact versions Jenkins named; and the JCasC credentials block
+used `domain:` where this version wants the `domainCredentials:` list. The standalone PVC is the
+chart's `home-pvc.yaml`, not a volumeClaimTemplate — deleting it by hand needs another
+`helm upgrade` to recreate.
+
+The cost ledger was re-priced for the live shape (`$0.08479/hr` for c7i-flex.large, verified via
+pricing `GetProducts` on 2026-10-15): committed **$129.27/month / $182.85 over the 43-day window**,
+91% of the $200 credit, gate exit 0.
 
 ### The first apply — 2026-10-14, live account, three runs to green
 

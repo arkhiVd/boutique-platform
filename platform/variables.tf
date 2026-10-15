@@ -87,9 +87,27 @@ variable "traefik_nodeport_ping" {
 }
 
 variable "instance_type_servers" {
-  type        = string
-  default     = "t3.small"
-  description = "Instance shape of the three k3s server nodes (Phase 3). Read here, at plan time, so the shape is validated against the account's vCPU quota before anything is launched."
+  type = object({
+    leader    = string
+    followers = string
+  })
+  default = {
+    leader    = "c7i-flex.large"
+    followers = "t3.small"
+  }
+  description = <<-EOT
+    Instance shapes of the three k3s server nodes (Phase 3), split by role. The
+    leader is the bootstrap node: it runs `--cluster-init`, holds the first etcd
+    member and hosts the first API server, and it is the node that was observed
+    wedging under sustained load on the original all-t3.small cluster (SSM
+    unresponsive, TLS handshakes to :6443 timing out). It therefore gets the
+    large shape; the two followers, which idle behind it, stay on t3.small.
+    Measured 2026-10-15 against the same account: 1 x c7i-flex.large +
+    2 x t3.small + 1 x t3.small worker = exactly the 8.0 vCPU running-on-demand
+    quota, and cheaper than three large servers by roughly $85/mo. Read here, at
+    plan time, so the shape is validated against that quota before anything is
+    launched (data.tf `check`).
+  EOT
 }
 
 variable "instance_type_worker" {

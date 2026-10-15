@@ -53,8 +53,12 @@ locals {
 
 data "aws_partition" "current" {}
 
-data "aws_ec2_instance_type" "server" {
-  instance_type = var.instance_type_servers
+data "aws_ec2_instance_type" "server_leader" {
+  instance_type = var.instance_type_servers.leader
+}
+
+data "aws_ec2_instance_type" "server_followers" {
+  instance_type = var.instance_type_servers.followers
 }
 
 data "aws_ec2_instance_type" "worker" {
@@ -81,10 +85,11 @@ data "aws_servicequotas_service_quota" "running_on_demand" {
 check "node_shape_within_vcpu_quota" {
   assert {
     condition = (
-      (3 * data.aws_ec2_instance_type.server.default_vcpus) +
+      (1 * data.aws_ec2_instance_type.server_leader.default_vcpus) +
+      (2 * data.aws_ec2_instance_type.server_followers.default_vcpus) +
       (1 * data.aws_ec2_instance_type.worker.default_vcpus) <=
       data.aws_servicequotas_service_quota.running_on_demand.value
     )
-    error_message = "The SPEC's shape (3 servers + 1 worker) does not fit the ${data.aws_servicequotas_service_quota.running_on_demand.value} vCPU running-on-demand quota: 3 x ${var.instance_type_servers} (${data.aws_ec2_instance_type.server.default_vcpus} vCPU) + 1 x ${var.instance_type_worker} (${data.aws_ec2_instance_type.worker.default_vcpus} vCPU). Reduce the node count or the type; a 5th instance cannot launch here."
+    error_message = "The shape (1 leader + 2 followers + 1 worker) does not fit the ${data.aws_servicequotas_service_quota.running_on_demand.value} vCPU running-on-demand quota: 1 x ${var.instance_type_servers.leader} (${data.aws_ec2_instance_type.server_leader.default_vcpus} vCPU) + 2 x ${var.instance_type_servers.followers} (${data.aws_ec2_instance_type.server_followers.default_vcpus} vCPU) + 1 x ${var.instance_type_worker} (${data.aws_ec2_instance_type.worker.default_vcpus} vCPU). Reduce the node count or the type; a 5th instance cannot launch here."
   }
 }

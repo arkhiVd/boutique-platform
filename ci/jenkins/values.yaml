@@ -120,16 +120,21 @@ jenkins:
         memory: "1024Mi"
 
     # The chart falls back to `controller.resources` when this is empty. It is
-    # set anyway because the init container's job (plugin install, JCasC copy) is
-    # network-bound and does not deserve the jenkins container's 1Gi ceiling, and
-    # because a pod's ResourceQuota consumption counts init containers too.
+    # set explicitly so the two numbers move independently and a pod's
+    # ResourceQuota consumption stays visible.
+    #
+    # The 512Mi ceiling this used to carry was measured wrong: on the first
+    # fresh cluster the `init` container was OOMKilled mid-plugin-install
+    # (Init:OOMKilled, exit 137) — the 11 plugins unpack to roughly 700Mi before
+    # the JVM even starts. 1Gi matches the controller ceiling; the install is
+    # one-shot, so the quota headroom it costs is transient.
     initContainerResources:
       requests:
         cpu: "50m"
         memory: "256Mi"
       limits:
         cpu: "250m"
-        memory: "512Mi"
+        memory: "1024Mi"
 
     # ---------------------------------------------------------------------------
     # Security context
@@ -177,13 +182,18 @@ jenkins:
     sidecars:
       configAutoReload:
         enabled: true
+        # Measured on the first fresh cluster: the 64Mi limit this carried was
+        # OOMKilled before the container ever reached a ready state
+        # (config-reload-init, exit 137, restartCount climbing while the pod sat
+        # in Init). k8s-sidecar is a python process and its baseline working set
+        # exceeds 64Mi; 256Mi gives it room without mattering at this scale.
         resources:
           requests:
             cpu: "10m"
             memory: "32Mi"
           limits:
             cpu: "50m"
-            memory: "64Mi"
+            memory: "256Mi"
         containerSecurityContext:
           runAsUser: 1000
           runAsGroup: 1000
@@ -278,6 +288,19 @@ jenkins:
       - configuration-as-code:2136.veb_3a_554550b_f
       - matrix-auth:3.3
       - pipeline-groovy-lib:822.vc95f70dea_db_7
+      # Pinned because plugin-cli's resolver left older versions in place and
+      # the controller refused to load its dependents on first boot. The list
+      # came from two rounds of load failures on 2026-10-15; each version is
+      # the exact minimum Jenkins named, one step up the dependency ladder:
+      #   round 1: github -> workflow-job 1540.v295eccc9778f
+      #            github-branch-source -> json-path-api 2.9.0-148
+      #   round 2: workflow-multibranch -> workflow-job 1546.v62a_c59c112dd
+      #            pipeline-model-definition -> pipeline-model-api 2.2277.v00573e73ddf1
+      #            pipeline-stage-view -> pipeline-stage-step 322.vecffa_99f371c
+      - workflow-job:1546.v62a_c59c112dd
+      - json-path-api:2.9.0-148.v22a_7ffe323ce # gitleaks:allow -- plugin version, not a credential
+      - pipeline-model-api:2.2277.v00573e73ddf1
+      - pipeline-stage-step:322.vecffa_99f371c
 
     # With persistence enabled, install plugins once on first boot and never
     # again: a controller that re-resolves plugins on every restart turns a pod
@@ -397,12 +420,19 @@ jenkins:
         # The credentials store. Both values resolve from the projected Secret
         # named in `additionalExistingSecrets` above; there is no literal
         # username or password anywhere in this repository.
+        #
+        # `domainCredentials:` is a LIST and is the attribute
+        # SystemCredentialsProvider actually accepts. The `domain: default:`
+        # form used here first fails JCasC boot with
+        # `UnknownAttributesException: systemCredentialsProvider: ... : domain.`
+        # — caught on the first fresh cluster, where it crashlooped the
+        # controller. An entry with no `domain:` key lands in the default
+        # domain, which is the intent.
         platform-credentials: |-
           credentials:
             system:
-              domain:
-                default:
-                  credentials:
+              domainCredentials:
+                - credentials:
                     - usernamePassword:
                         scope: GLOBAL
                         id: "github-arkhiVd"
@@ -594,18 +624,12 @@ jenkins:
   # ---------------------------------------------------------------------------
   persistence:
     enabled: true
-    # local-path, not gp3. ROADMAP Phase 7 asks for gp3 and SPEC.md commits
-    # observability state to gp3, but a repo-wide `grep -rn "kind: StorageClass"`
-    # returns nothing and no EBS CSI driver is installed anywhere in platform/ or
-    # bootstrap/: a claim with storageClassName: gp3 would stay Pending forever,
-    # and a controller whose jenkins-home never mounts is a controller that never
-    # starts. `local-path` is what cluster/traefik/values.yaml:158 already binds
-    # through and what cluster/policies/policies.yaml:96 calls "the default
-    # StorageClass. Every PVC in observability ... binds through it".
-    #
-    # The gap — gp3 + CSI driver missing while SPEC.md says otherwise — is
-    # recorded in TASKS.md as a Phase 7 finding rather than papered over here.
-    storageClass: local-path
+    # gp3, because the EBS CSI driver now exists (cluster/ebs-csi). This was
+    # local-path when written, with the reason recorded in the git history: no
+    # StorageClass named gp3 existed, so a gp3 claim would have stayed Pending
+    # forever. The driver landed in the observability stage, and this moved with
+    # it.
+    storageClass: gp3
     accessMode: ReadWriteOnce
     # 10Gi: 8Gi of job history + plugins (11 plugins unpack to ~700Mi) + headroom.
     # It is an RWO claim on local-path, so the controller pod and the backup

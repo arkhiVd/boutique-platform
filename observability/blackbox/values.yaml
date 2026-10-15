@@ -39,7 +39,6 @@ prometheus-blackbox-exporter:
           # https probe a redirect is a FAILURE: if the https endpoint redirects
           # anything, the two-layer edge is not doing what SPEC says it does.
           follow_redirects: false
-          fail_not_https: true
           fail_if_not_ssl: true
           preferred_ip_protocol: "ip4"
           # The probe leaves the cluster. On a public-subnet node with no NAT
@@ -57,7 +56,6 @@ prometheus-blackbox-exporter:
           valid_status_codes: [200]
           method: GET
           follow_redirects: false
-          fail_not_https: true
           fail_if_not_ssl: true
           preferred_ip_protocol: "ip4"
           # TLS 1.2 minimum, matching SPEC's trust-boundary-1 requirement. A
