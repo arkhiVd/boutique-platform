@@ -14,7 +14,7 @@ data:
     -- `namespace_name`, `container_name`, `pod_name` and `labels["app"]`. They are
     -- read by Lua because the `modify` filter cannot read record accessors in
     -- fluent-bit 5.1.3 — measured live 2026-10-15, not assumed.
-    -- 
+    --
     -- THE MEASUREMENT, IN FULL, BECAUSE IT COST AN HOUR
     -- ------------------------------------------------
     -- The pipeline was fully working and fully wrong at the same time: records were
@@ -25,18 +25,18 @@ data:
     -- complete `kubernetes` map while all four label keys were missing, because the
     -- four `modify` lines that were supposed to copy them are no-ops. The same
     -- probe tested the exact behaviours, so there is no guessing left:
-    -- 
+    --
     -- Set probe $stream                -> wrote the 7 characters "$stream"
     -- Set probe $kubernetes['x']       -> wrote the literal "$kubernetes['x']"
     -- Copy stream probe                -> worked ("stderr")
     -- Copy $kubernetes['namespace_name'] probe -> absent (nothing copied)
-    -- 
+    --
     -- `rewrite_tag` resolves record accessors in its Rule keys, which is why the
     -- routing and the parsers never showed the problem; `modify` does not resolve
     -- them in `Set` or `Copy` at all in this version. The `Add` fallbacks below
     -- then quietly filled the gap with the sentinel strings, so nothing failed
     -- loudly — a pipeline can be green and wrong at once.
-    -- 
+    --
     -- WHAT THIS FUNCTION GUARANTEES
     -- -----------------------------
     -- * Reads the record's own `kubernetes` map; nothing is fetched.
@@ -45,7 +45,7 @@ data:
     -- sentinels in step 7 still mean "missing" rather than "wrong".
     -- * Returns record unchanged when the map is absent, which happens for a line
     -- written before the kubernetes filter started.
-    -- 
+    --
     -- It is mounted at /fluent-bit/etc/lua/k8s-labels.lua from the ConfigMap
     -- `fluent-bit-k8s-labels`, declared in the chart's `daemonSetVolumes`. A plain
     -- file, not a Helm value, for the same reason the parsers are: this is the file
