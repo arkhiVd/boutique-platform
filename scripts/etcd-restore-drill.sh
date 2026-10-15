@@ -114,14 +114,22 @@ fi
 
 # etcdctl: k3s ships its own, and the static build on a workstation is not always
 # the same version as the one that wrote the snapshot. Prefer the node's copy.
+# etcd 3.6+ moved `snapshot` status/restore out of `etcdctl` into `etcdutl`.
+# k3s still ships a combined `etcdctl` in 1.36, but that binary only carries `save`;
+# `restore` lives in the co-packaged `etcdutl`. Prefer the split binary when both
+# are present so the integrity + restore steps actually run.
 ETCDCTL="${ETCDCTL:-}"
 if [ -z "$ETCDCTL" ]; then
-  if [ -x /var/lib/rancher/k3s/data/current/bin/etcdctl ]; then
+  if command -v etcdutl >/dev/null 2>&1; then
+    ETCDCTL=etcdutl
+  elif [ -x /var/lib/rancher/k3s/data/current/bin/etcdutl ]; then
+    ETCDCTL=/var/lib/rancher/k3s/data/current/bin/etcdutl
+  elif [ -x /var/lib/rancher/k3s/data/current/bin/etcdctl ]; then
     ETCDCTL=/var/lib/rancher/k3s/data/current/bin/etcdctl
   elif command -v etcdctl >/dev/null 2>&1; then
     ETCDCTL=etcdctl
   else
-    die "no etcdctl found (looked for /var/lib/rancher/k3s/data/current/bin/etcdctl and etcdctl on PATH). Run this on the designated k3s leader, or set ETCDCTL. The bucket download and checksum steps CANNOT be completed without it, so this is a reported gap and not a pass."
+    die "no etcdutl/etcdctl found. Run this on the designated k3s leader. The integrity and restore steps CANNOT run without it, so this is a reported gap and not a pass."
   fi
 fi
 
@@ -173,6 +181,27 @@ aws s3 cp --region "$REGION" "s3://$BUCKET/$FOLDER/$SNAPSHOT_NAME" "$LOCAL_FILE"
 DOWNLOAD_END="$(now)"
 echo "    $((DOWNLOAD_END - DOWNLOAD_START))s, $(stat -c %s "$LOCAL_FILE" 2>/dev/null || echo 0) bytes"
 
+# k3s `etcd-snapshot save --etcd-snapshot-compress` writes a ZIP (the Phase 4
+# timer passes that flag, so every object under the prefix ends .zip and the
+# uncompressed db lives inside it). Measured 2026-10-15: etcdctl's
+# `snapshot status` rejects the zip with usage output, which reads like a flag
+# error and is actually a format mismatch. Unpack here so the verification and
+# the restore below operate on the db, which is what they were written for.
+if [ "$(stat -c %s "$LOCAL_FILE")" -gt 0 ] && {
+     printf '%s' "$SNAPSHOT_NAME" | grep -qi '\.zip$' ||
+       head -c 4 "$LOCAL_FILE" | grep -q 'PK'; }; then
+  command -v unzip >/dev/null 2>&1 || die "the snapshot is a ZIP and unzip is not on PATH"
+  cyan "== unpack the compressed snapshot =="
+  UNZIP_DIR="$SCRATCH_DIR/unzipped"
+  mkdir -p "$UNZIP_DIR"
+  unzip -o -q "$LOCAL_FILE" -d "$UNZIP_DIR" || die "unzip failed"
+  # One member in a k3s snapshot zip; if there are more, the largest is the db.
+  DB_MEMBER="$(find "$UNZIP_DIR" -type f -printf '%s %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+  [ -n "$DB_MEMBER" ] || die "the zip unpacked to no files"
+  LOCAL_FILE="$DB_MEMBER"
+  echo "    unpacked to $(stat -c %s "$LOCAL_FILE") bytes"
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Integrity: the snapshot's own checksum, from etcdctl
 # ---------------------------------------------------------------------------
@@ -211,11 +240,15 @@ if [ "$TARGET" = "scratch" ]; then
   # the restored data directory does not have a member directory. It is derived
   # from the snapshot's filename, which k3s builds as
   # <snapshot-name>-<node-name>-<timestamp>.
-  MEMBER_NAME="$SNAPSHOT_NAME"
+  # `--name` must name a member that exists in `--initial-cluster`, and for a
+  # scratch dir there is no real member; `default` works with the defaults the
+  # tool ships, freeing the drill to validate the snapshot rather than the
+  # cluster topology. A live restore (TARGET=cluster-live) uses k3s server
+  # --cluster-reset instead of this binary.
   "$ETCDCTL" snapshot restore "$LOCAL_FILE" \
-    --data-dir="$RESTORE_DIR" --name="$MEMBER_NAME" \
-    --skip-hash-check=false 2>&1 | sed 's/^/    /' \
-    || die "etcdctl snapshot restore failed"
+    --data-dir="$RESTORE_DIR" --name=default \
+    --initial-cluster="default=http://localhost:2380" 2>&1 | sed 's/^/    /' \
+    || die "etcdutl snapshot restore failed"
 else
   red "    TARGET=cluster-live: this is the real, destructive path."
   cat <<EOF

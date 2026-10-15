@@ -257,10 +257,8 @@ pipeline {
                 // without the services to shift traffic between, would move
                 // traffic and then be unable to say whether it was a mistake.
                 expression {
-                    params.APP_CANARY_DEPLOYMENT && params.APP_PROM_URL
-                        && params.APP_BURN_QUERY && params.APP_TRAEFIK_SERVICE
-                        && params.APP_STABLE_SERVICE && params.APP_CANARY_SERVICE
-                }
+                        params.APP_CANARY_DEPLOYMENT && params.APP_PROM_URL && params.APP_BURN_QUERY && params.APP_TRAEFIK_SERVICE && params.APP_STABLE_SERVICE && params.APP_CANARY_SERVICE
+                    }
             }
             steps {
                 script {
