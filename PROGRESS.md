@@ -222,6 +222,17 @@ The cost ledger was re-priced for the live shape (`$0.08479/hr` for c7i-flex.lar
 pricing `GetProducts` on 2026-10-15): committed **$129.27/month / $182.85 over the 43-day window**,
 91% of the $200 credit, gate exit 0.
 
+The operator's ISP address rotates (three in 48 hours), which locked `kubectl` out of 6443 while
+the cluster kept reporting itself healthy. `scripts/update-admin-cidr.sh` now reconciles it: it
+resolves the egress address, **imports an already-present out-of-band rule into Terraform state**
+(the first version instead tried to create a duplicate and failed with
+`InvalidPermission.Duplicate`, leaving the stack half-swapped — state pointing at a destroyed
+rule), writes it to the gitignored tfvars, applies the one rule resource, revokes any leftover
+6443 /32, and proves the API server still answers. It is idempotent and safe on a timer; the
+in-sync check now requires tfvars, state and AWS to agree, because a stale tfvars line alone is a
+latent lockout on the next full `terraform apply` anywhere. Live state after the run: **tfvars,
+state and AWS all say `149.88.103.57/32`**, and `terraform plan` is clean.
+
 ### The first apply — 2026-10-14, live account, three runs to green
 
 The apply is the test harness, and it found four things the plan could not. Each was fixed,
