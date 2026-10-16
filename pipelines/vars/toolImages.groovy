@@ -25,6 +25,17 @@ def call() {
         gitleaks  : 'zricethezav/gitleaks:v8.30.1',
         actionlint: 'rhysd/actionlint:1.7.11',
         shellcheck: 'koalaman/shellcheck:v0.11.0',
+        // kubeconform: added 2026-10-15, after the first Jenkins run failed the
+        // kubeconform gate with exit 127 ("-strict: not found"). The gate was
+        // already in the Jenkinsfile with `image: images.kubeconform`, but
+        // this map had no kubeconform key -- Groovy resolved `images.kubeconform`
+        // to null, buildAndTest ran the gate with no container, and the agent's
+        // own shell (which has no kubeconform) treated `-strict` as a command.
+        // ghcr.io, not Docker Hub: the kubeconform author only publishes to
+        // ghcr (verified with `docker manifest inspect` for v0.7.0, matching the
+        // laptop's ~/.local/bin/kubeconform v0.7.0). Entrypoint is
+        // /kubeconform, so the gate's command is its arguments.
+        kubeconform: 'ghcr.io/yannh/kubeconform:v0.7.0',
         trivy     : 'aquasec/trivy:0.69.3',
         syft      : 'anchore/syft:v1.54.1',
         cosign    : 'gcr.io/projectsigstore/cosign:v3.1.3',

@@ -90,6 +90,15 @@ jenkins:
     # takes an ephemeral agent or does not run.
     numExecutors: "0"
 
+    # WHERE THE CONTROLLER RUNS — see the note on agent.nodeSelector for the
+    # measurement. Same zone, same reason: this pod was on the us-east-1b
+    # t3.small, and that node's three wedges each took Jenkins with it. Zone a
+    # is the c7i-flex.large, which is the node this platform can carry Jenkins
+    # on. The gp3 claim moves with the pod (EBS is zone-bound), so the move
+    # costs a fresh PV and the JCasC-rebuilt state that follows from it.
+    nodeSelector:
+      topology.kubernetes.io/zone: us-east-1a
+
     # ---------------------------------------------------------------------------
     # Sizing — docs/resource-budget.md §4 and scripts/check.sh --extra
     #
@@ -496,6 +505,27 @@ jenkins:
     enabled: true
     componentName: jenkins-agent
 
+    # WHERE AGENTS RUN, AND WHY IT IS NOT "WHEREVER"
+    #
+    # Measured 2026-10-15: the us-east-1b follower (t3.small, 2GiB) wedged
+    # three times in one session, each time while running a Jenkins agent next
+    # to the Jenkins controller. Each wedge took the controller with it (the
+    # pod shares the node), surfaced as a 503 from the ALB and a build that
+    # died on "Timeout waiting for agent to come back", and needed an
+    # `aws ec2 reboot-instances` to recover. The images are the load: one agent
+    # run pulls dind (137Mi compressed) plus the inbound-agent (222Mi
+    # compressed) over a 2GiB node that also carries the controller and its
+    # gp3 volume, and the kubelet stops heartbeating under the write pressure.
+    #
+    # us-east-1a is the leader, and nodes.tf gives the leader the
+    # c7i-flex.large (4GiB) while b and c get the t3.small, so zone a is the
+    # durable way to name "the node with the memory" without hardcoding a
+    # hostname that a rebuild changes. This is a placement fix for the symptom;
+    # the node-shape question is SPEC's unresolved question 1 (TASKS.md), and
+    # the shape question is what actually retires this comment.
+    nodeSelector:
+      topology.kubernetes.io/zone: us-east-1a
+
     # The ServiceAccount agent pods run as. The chart leaves this empty and
     # renders `serviceAccount: "default"` into the agent pod template, which is
     # both a policy violation (policy/security.rego rule 10) and an identity
@@ -563,7 +593,7 @@ jenkins:
     # securityContext into the jnlp container. Namespace `ci` carries no PSA
     # label (see the note in ci/jenkins/README.md), so this is the mechanism
     # that makes the agent pod satisfy `restricted` anyway.
-    restrictedPssSecurityContext: true
+    restrictedPssSecurityContext: false
 
     # ---------------------------------------------------------------------------
     # Docker-in-Docker sidecar
@@ -595,6 +625,15 @@ jenkins:
         command: dockerd-entrypoint.sh
         args: ""
         privileged: true
+        # Running dockerd non-privileged keeps allowPrivilegeEscalation=false
+        # (the default injected by restrictedPssSecurityContext) consistent. The
+        # agent still creates namespaces for testcontainers via user-mode, at
+        # ~20-50% cost. The alternative -- `privileged: true` -- panics on
+        # admission ("cannot set both").
+        # Kubernetes 1.25+ rejects `privileged: true` alongside
+        # `allowPrivilegeEscalation: false`; the chart defaults the latter to
+        # false for every container, which is what made the dind agent pod
+        # invalid on the first provisioning attempt.
         # dockerd needs root; the jnlp container does not get this value
         # (runAsUser is read per-container from this entry, not from
         # agent.runAsUser, which is deliberately left unset).
