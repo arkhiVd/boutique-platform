@@ -42,9 +42,7 @@ FOLDER="${BOUTIQUE_ETCD_SNAPSHOT_FOLDER:-etcd-snapshots}"
 REGION="${AWS_REGION:-us-east-1}"
 SNAPSHOT="${SNAPSHOT:-}"
 SCRATCH_DIR="${SCRATCH_DIR:-}"
-TARGET="${TARGET:-scratch}"
 KEEP="${KEEP:-no}"
-LIVE_ACK="${LIVE_ACK:-no}"
 
 # The one path this script must never write to. k3s's data directory contains the
 # live cluster: server/db/etcd is the state, server/tls is the CA, and
@@ -61,10 +59,16 @@ usage() {
   cat <<'EOF'
 boutique etcd restore drill -- prove a snapshot restores, without touching the cluster.
 
-  TARGET=scratch (default)   restore into a throwaway data dir under $TMPDIR
-                             SAFE: nothing outside the scratch dir is written
-  TARGET=cluster-live        the real restore path. REFUSED unless
-                             LIVE_ACK=yes is also set
+Download the newest snapshot from S3, verify its checksum with the tool that
+wrote it, and restore it into a throwaway directory. NOTHING under
+/var/lib/rancher/k3s is written; the script refuses a scratch dir that
+resolves near it.
+
+The live cluster restore is NOT this script, and deliberately so: see the note
+under "WHAT THIS DOES NOT DO" in docs/runbooks/. This script proves the backup
+is loadable, which is the part that can be automated and run on a schedule. The
+live procedure needs the cluster stopped on three nodes and a maintenance
+window, so it stays a signed-off human step in the runbook.
 
   BOUTIQUE_ETCD_SNAPSHOT_BUCKET=<bucket>   override the bucket
   FOLDER=etcd-snapshots                   override the prefix
@@ -72,11 +76,8 @@ boutique etcd restore drill -- prove a snapshot restores, without touching the c
   SCRATCH_DIR=<path>                       default: a mktemp directory
   KEEP=yes                                 leave the scratch dir for inspection
 
-examples
-  # on the designated k3s leader, over SSM:
+example, on the designated k3s leader over SSM:
   sudo BOUTIQUE_ETCD_SNAPSHOT_BUCKET=... /usr/local/bin/boutique-etcd-restore-drill.sh
-  # the destructive path, in a maintenance window only:
-  sudo TARGET=cluster-live LIVE_ACK=yes ...
 EOF
 }
 
@@ -84,16 +85,6 @@ EOF
 # 0. Arguments and the guard rails
 # ---------------------------------------------------------------------------
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { usage; exit 0; }
-
-case "$TARGET" in
-  scratch) ;;
-  cluster-live)
-    if [ "$LIVE_ACK" != "yes" ]; then
-      die "TARGET=cluster-live refused. A k3s restore removes every cluster member except the node it runs on and moves the live etcd database aside; there is no undo. Re-run with LIVE_ACK=yes if that is genuinely what you intend, in a maintenance window."
-    fi
-    ;;
-  *) die "TARGET must be scratch or cluster-live (got $TARGET)" ;;
-esac
 
 command -v aws >/dev/null 2>&1 || die "aws cli not on PATH"
 
@@ -235,37 +226,16 @@ case "$RESTORE_DIR/" in
 esac
 
 RESTORE_START="$(now)"
-if [ "$TARGET" = "scratch" ]; then
-  # `--name` must match the member name the snapshot was taken with, otherwise
-  # the restored data directory does not have a member directory. It is derived
-  # from the snapshot's filename, which k3s builds as
-  # <snapshot-name>-<node-name>-<timestamp>.
-  # `--name` must name a member that exists in `--initial-cluster`, and for a
-  # scratch dir there is no real member; `default` works with the defaults the
-  # tool ships, freeing the drill to validate the snapshot rather than the
-  # cluster topology. A live restore (TARGET=cluster-live) uses k3s server
-  # --cluster-reset instead of this binary.
-  "$ETCDCTL" snapshot restore "$LOCAL_FILE" \
-    --data-dir="$RESTORE_DIR" --name=default \
-    --initial-cluster="default=http://localhost:2380" 2>&1 | sed 's/^/    /' \
-    || die "etcdutl snapshot restore failed"
-else
-  red "    TARGET=cluster-live: this is the real, destructive path."
-  cat <<EOF
-    Before continuing, confirm on the leader node, over SSM:
-      * systemctl stop k3s                # on ALL THREE servers
-      * k3s etcd-snapshot save            # one more snapshot before touching anything
-      * k3s server --cluster-reset \\
-          --cluster-reset-restore-path=$LOCAL_FILE     # on the leader only
-      * rm -rf \${data-dir}/server/db/    # on the other two, then start k3s
-    See docs/runbooks/ for the full sequence; a half-done restore leaves a
-    single-member cluster with the other two separated.
-EOF
-  read -r -p "    Type 'yes' to proceed: " ANSWER
-  [ "$ANSWER" = "yes" ] || die "aborted, nothing was changed"
-  "$ETCDCTL" snapshot restore "$LOCAL_FILE" --data-dir="$RESTORE_DIR" --name="$MEMBER_NAME" \
-    || die "restore failed"
-fi
+# `--name` must name a member that exists in `--initial-cluster`, and for a
+# scratch dir there is no real member: `default` satisfies both, which is what
+# frees the drill to validate the snapshot rather than the cluster topology.
+# Measured 2026-10-16: naming it after the snapshot filename (the member name
+# embedded in it) fails with "couldn't find local name ... in the initial
+# cluster configuration", because a scratch restore has no such member.
+"$ETCDCTL" snapshot restore "$LOCAL_FILE" \
+  --data-dir="$RESTORE_DIR" --name=default \
+  --initial-cluster="default=http://localhost:2380" 2>&1 | sed 's/^/    /' \
+  || die "etcdutl snapshot restore failed"
 RESTORE_END="$(now)"
 
 if [ -d "$RESTORE_DIR/member/snap" ] || [ -d "$RESTORE_DIR/member/wal" ]; then
@@ -294,5 +264,5 @@ fi
 
 green "VERDICT: PASS -- $SNAPSHOT_NAME (revision $REVISION, $TOTAL_KEY keys) downloaded, verified and restored into scratch in $((TOTAL_END - TOTAL_START))s"
 echo "         This proves the snapshot is loadable. It does NOT prove a full cluster"
-echo "         restore: that is the TARGET=cluster-live path and it needs a window."
+echo "         restore: that path is a runbook step, not this script (see above)."
 exit 0

@@ -114,9 +114,30 @@ traefik:
       # cert mode the ALB holds the ACM cert and re-encrypts to Traefik's own
       # self-signed one, so the hop is end-to-end encrypted. In http01 mode a
       # cert-manager issued cert terminates here instead.
+    # The metrics entrypoint, and the one value that makes it useful.
+    #
+    # MEASURED 2026-10-16. The chart ships this entry with
+    # `expose.default: false` ("You may not want to expose the metrics port on
+    # production deployments"), and that default is why the Service rendered
+    # only web/websecure/traefik while the Deployment already exposed
+    # containerPort 9100 named `metrics`. The hand-written ServiceMonitor in
+    # observability/servicemonitors/traefik.yaml named `port: metrics`, so it
+    # pointed at a port that existed on the pod and on no Service: every
+    # Traefik series was dark, and `TargetDown` paged forever from its
+    # `absent(up{job="traefik"})` branch -- an alert that fires because there
+    # is no data, caused by there being no data.
+    #
+    # `true` puts 9100 on the cluster-internal Service so Prometheus can
+    # scrape it, which is the one consumer the chart's default was protecting
+    # it from. There is no nodePort here, so the port is still unreachable
+    # from outside the cluster, and `metrics.prometheus.service.enabled` is
+    # not a key in traefik chart v39 (rendering with it set produces no second
+    # Service), so a port on the Service that exists is the only option.
     metrics:
       port: 9100
       protocol: TCP
+      expose:
+        default: true
 
     # Traefik's own entrypoint, which is where --ping answers (the liveness
     # probe hits :8080/ping inside the pod, so this is already the health

@@ -167,6 +167,21 @@ pipeline {
                         [name : 'conftest (apps cluster ci observability)',
                          image: images.conftest,
                          command: "test apps cluster ci observability -p policy --ignore '${conftestIgnore}'"],
+                        // THE SECOND MODE, AND WHY CI WAS MISSING IT.
+                        //
+                        // --combine hands the policy every document at once, which
+                        // is the only way deny_deployment_without_hpa can fire: a
+                        // Deployment and its HorizontalPodAutoscaler are two
+                        // separate YAML documents, and the rule is guarded by
+                        // is_array(input), which single-document mode never
+                        // produces. Proven 2026-10-16 with a Deployment that has
+                        // no HPA anywhere: laptop (both modes) rejects it, CI
+                        // (single-document only) passed it 18/18. Every rule in
+                        // policy/ that compares two resources was therefore
+                        // unenforced in CI from Phase 10 until now.
+                        [name : 'conftest --combine (cross-document rules)',
+                         image: images.conftest,
+                         command: "test apps cluster ci observability -p policy --ignore '${conftestIgnore}' --combine"],
                         [name : 'conftest rejects every should-fail fixture',
                          image: images.conftest,
                          // The fixture loop is shell, the conftest image's

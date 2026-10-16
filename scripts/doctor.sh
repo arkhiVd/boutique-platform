@@ -225,7 +225,13 @@ check_pods() {
 
 check_pdb() {
   local json
-  json="$(kjson get pdb -A 2>/dev/null || true)"
+  # No `|| true`. kjson() returns 1 when kubectl fails or the output does
+  # not parse, and swallowing it here reports a broken API server as "no
+  # PodDisruptionBudgets exist" -- the exact fail-open pattern this script's
+  # header forbids. An unreachable cluster must be a FAIL, not a WARN.
+  if ! json="$(kjson get pdb -A)"; then
+    echo "    kubectl could not list PodDisruptionBudgets -- the API is unreachable, so their absence cannot be asserted"; return 1
+  fi
   [ -n "$json" ] || { echo "    no PodDisruptionBudgets -- the SPEC's resilience criterion requires one per service"; return 77; }
   echo "    $(printf '%s' "$json" | jq '[.items[]] | length') PodDisruptionBudgets"
   printf '%s' "$json" | jq -r '.items[] |
@@ -247,7 +253,10 @@ check_pdb() {
 
 check_hpa() {
   local json
-  json="$(kjson get hpa -A 2>/dev/null || true)"
+  # Same fail-closed reasoning as check_pdb: no `|| true`.
+  if ! json="$(kjson get hpa -A)"; then
+    echo "    kubectl could not list HorizontalPodAutoscalers -- the API is unreachable, so their absence cannot be asserted"; return 1
+  fi
   [ -n "$json" ] || { echo "    no HPAs (none deployed yet -- Phase 6)"; return 77; }
   echo "    $(printf '%s' "$json" | jq '[.items[]] | length') HorizontalPodAutoscalers"
   printf '%s' "$json" | jq -r '.items[] |
@@ -267,7 +276,12 @@ check_hpa() {
 
 check_pvc() {
   local json pending
-  json="$(kjson get pvc -A 2>/dev/null || true)"
+  # Same fail-closed reasoning as check_pdb, and this one was worse: it
+  # returned 0 (a PASS) on an API error, so an unreachable cluster read as
+  # a healthy one.
+  if ! json="$(kjson get pvc -A)"; then
+    echo "    kubectl could not list PersistentVolumeClaims -- the API is unreachable"; return 1
+  fi
   [ -n "$json" ] || { echo "    no PersistentVolumeClaims (local-path-provisioner is idle)"; return 0; }
   pending="$(printf '%s' "$json" | jq -r '[.items[] | select(.status.phase != "Bound")] | length')"
   echo "    $(printf '%s' "$json" | jq '[.items[]] | length') PVCs, $pending not Bound"

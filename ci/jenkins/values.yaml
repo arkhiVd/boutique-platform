@@ -153,6 +153,18 @@ jenkins:
     # those two rules, which is how Kubernetes itself merges them for these two
     # fields. Everything is therefore stated on the container as well as the pod.
     # ---------------------------------------------------------------------------
+    # `capabilities` is deliberately NOT here. It is not a PodSecurityContext
+    # field -- it is container-level only, and Kubernetes has no pod-level
+    # capability setting to set. MEASURED 2026-10-16: with this block here the
+    # chart renders
+    #     StatefulSet ci is invalid: at '/spec/template/spec/securityContext':
+    #       additional properties 'capabilities' not allowed
+    # under kubeconform -strict. The live object does not carry it (the field is
+    # dropped somewhere between the template and the API), which is exactly the
+    # danger: a manifest that validates nowhere and silently works on this
+    # cluster. The identical block already exists in containerSecurityContext
+    # below, where it is legal and where it actually applies -- verified on the
+    # live pod, whose jnlp container carries capabilities.drop [ALL].
     podSecurityContextOverride:
       runAsUser: 1000
       runAsGroup: 1000
@@ -161,9 +173,6 @@ jenkins:
       runAsNonRoot: true
       seccompProfile:
         type: RuntimeDefault
-      capabilities:
-        drop:
-          - ALL
 
     containerSecurityContext:
       runAsUser: 1000

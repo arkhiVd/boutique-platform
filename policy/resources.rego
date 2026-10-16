@@ -176,23 +176,68 @@ deny_memory_request_above_limit contains msg if {
 	)
 }
 
-# Kubernetes memory quantities: 128974848, 128e3, 128M, 128Mi, 128G, ... The
-# two forms the manifests actually use are plain integers and the Ki/Mi/Gi
-# binary suffixes, so this covers what can be written here. A quantity this
-# cannot parse leaves the rule silently un-fired — see the note in
-# docs/chaos-experiments.md on which checks were verified versus asserted.
+# Kubernetes memory quantities, parsed the way the API does.
+#
+# HOW THIS WAS BROKEN UNTIL 2026-10-16, MEASURED
+# ----------------------------------------------
+# The four branches below used to be built on
+#     to_number(trim_suffix(q, "i"))
+# and that one-character trim is the whole bug: for "128Mi" it returns "128M",
+# and to_number("128M) raises a type error, so every rule body calling
+# memory_bytes is undefined -- deny_memory_request_above_limit included. Proof:
+# a probe pod with requests.memory 128Mi and limits.memory 64Mi (request ABOVE
+# limit) passed all 18 rules cleanly. Every memory quantity in this repo is
+# Mi or Gi (grep memory: apps/boutique -- zero bare integers), so the rule was
+# dead for 100% of real input. docs/chaos-experiments.md's rule of recording
+# which checks were verified rather than asserted is exactly this finding.
+#
+# The trim now removes the whole two-character binary suffix, so the number is
+# left bare and to_number() always succeeds. Decimal forms (128M, 1G) are
+# handled by the same two-character trim and a separate multiplier table, so
+# the parse does not silently treat them as bytes.
+#
+# And the guard at the end exists so this class of bug cannot come back: any
+# quantity the parser cannot read is now a POLICY FAILURE with the offending
+# string in it, instead of a rule that quietly stops firing.
+_bin_suffix(q) := suffix if {
+	suffix := substring(q, count(q) - 2, count(q))
+	suffix in {"Ki", "Mi", "Gi"}
+}
+
+_dec_suffix(q) := suffix if {
+	suffix := substring(q, count(q) - 1, count(q))
+	suffix in {"K", "M", "G", "T", "P", "E"}
+}
+
+memory_bytes(q) := to_number(substring(q, 0, count(q) - 2)) * mult if {
+	suffix := _bin_suffix(q)
+	mult := {"Ki": 1024, "Mi": 1048576, "Gi": 1073741824}[suffix]
+}
+
+memory_bytes(q) := to_number(substring(q, 0, count(q) - 1)) * mult if {
+	not _bin_suffix(q)
+	suffix := _dec_suffix(q)
+	mult := {"K": 1000, "M": 1000000, "G": 1000000000,
+		"T": 1000000000000, "P": 1000000000000000,
+		"E": 1000000000000000000}[suffix]
+}
+
 memory_bytes(q) := to_number(q) if {
-	not endswith(q, "i")
+	not _bin_suffix(q)
+	not _dec_suffix(q)
 }
 
-memory_bytes(q) := to_number(trim_suffix(q, "i")) * 1024 if {
-	endswith(q, "Ki")
-}
-
-memory_bytes(q) := to_number(trim_suffix(q, "i")) * 1024 * 1024 if {
-	endswith(q, "Mi")
-}
-
-memory_bytes(q) := to_number(trim_suffix(q, "i")) * 1024 * 1024 * 1024 if {
-	endswith(q, "Gi")
+# The guard. A quantity this file cannot parse makes the rule that uses it
+# undefined, which is the failure that hid for the entire life of the repo.
+# Naming the string in the denial is what turns it back into a finding.
+deny_unparseable_memory_quantity contains msg if {
+	some pair in owned_containers
+	some key in ["requests", "limits"]
+	raw := object.get(pair.container, ["resources", key], {})
+	raw.memory
+	not memory_bytes(raw.memory)
+	msg := sprintf(
+		"[resources] %s: container %q has a memory quantity this policy cannot parse: %q. A quantity the parser silently rejects takes deny_memory_request_above_limit with it.",
+		[where(pair), container_name(pair), raw.memory],
+	)
 }

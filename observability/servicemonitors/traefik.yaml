@@ -28,28 +28,45 @@ spec:
   # alert readable rather than a spelunking exercise.
   jobLabel: app.kubernetes.io/name
 
-  # Traefik ships as part of k3s, in kube-system, and is not deployed by this
-  # chart. Nothing in this repo owns that Service, which is exactly why the
-  # port is bound by NAME rather than by number.
+  # Traefik is deployed by this repo, into namespace `traefik`, not the
+  # kube-system that k3s's bundled Traefik would use.
+  #
+  # MEASURED 2026-10-16: this block said `kube-system` until today, and it was
+  # wrong the day it was written. `platform/nodes.tf` starts k3s with
+  # `--disable traefik` and `scripts/deploy-workloads.sh` installs the chart
+  # with `-n traefik`, so there has never been a Traefik in kube-system -- a
+  # namespaceSelector that names a namespace which does not exist selects
+  # nothing. Two more mismatches stacked behind it (the instance label, and a
+  # port that existed on the pod but on no Service), and the result was a
+  # monitor that scraped nothing at all while `TargetDown` paged from its
+  # `absent()` branch. See cluster/traefik/values.yaml for the port, and the
+  # next block for the label.
   namespaceSelector:
     matchNames:
-      - kube-system
+      - traefik
 
-  # Selects the chart's dedicated metrics Service, created only when
-  # `metrics.prometheus.service.enabled: true`. See the note below.
+  # The chart's own Service. The instance label is what the selector missed
+  # for the same reason: the traefik chart's `_helpers.tpl` composes it as
+  # `<release>-<chart>`, which for this release is `traefik-traefik`, not the
+  # bare `traefik` a reader would assume. Verified against the live object:
+  #   kubectl get svc traefik -n traefik -o jsonpath='{.metadata.labels}'
+  #   -> {"app.kubernetes.io/instance":"traefik-traefik",
+  #       "app.kubernetes.io/name":"traefik", ...}
   selector:
     matchLabels:
       app.kubernetes.io/name: traefik
-      app.kubernetes.io/instance: traefik
+      app.kubernetes.io/instance: traefik-traefik
 
   endpoints:
     # `port: metrics` binds to the NAME of a port on the selected Service, not to
-    # a number. That is deliberate and it is the single most important line in
-    # this file: the traefik chart's `ports.metrics.port` defaults to 9100 in
-    # the published values.yaml, but k3s v1.36.5+k3s1 sets a pod annotation
-    # `prometheus.io/port: "8082"` in manifests/traefik.yaml, which suggests the
-    # rancher build uses a different number. Binding by name means this monitor
-    # is correct either way, and the number never has to be reconciled.
+    # a number. That is deliberate, and the note about which number it is was
+    # itself wrong until 2026-10-16: it claimed the rancher build might use
+    # 8082, on the strength of k3s's bundled manifests. The chart we actually
+    # install sets `prometheus.io/port: "9100"` on its pods (verified on the
+    # live pod), and 9100 is also the containerPort named `metrics`. Binding
+    # by name means the monitor survives either number being changed in the
+    # chart, which is the property the old note wanted for a reason it had not
+    # verified.
     - port: metrics
       path: /metrics
       interval: 30s
