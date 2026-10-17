@@ -112,6 +112,16 @@ kube-prometheus-stack:
   prometheus:
     enabled: true
 
+    ## Prometheus's scrape of ITSELF. The global labelValueLengthLimit (200, set
+    ## below) rejected the whole target: the operator names each rule file
+    ## after its PrometheusRule plus a UID, so `rule_group` on
+    ## prometheus_rule_evaluation_failures_total measures 242 characters
+    ## (measured 2026-10-17). The scrape failed, the self-metrics went dark, and
+    ## TargetDown fired for Prometheus. Raised for this one target only; the
+    ## guard stays at 200 everywhere else.
+    serviceMonitor:
+      labelValueLengthLimit: 512
+
     prometheusSpec:
       ## ONE replica. A second replica of the same rule evaluation and the same
       ## scrape interval doubles the TSDB write rate, the CPU and the memory for a
@@ -313,20 +323,21 @@ kube-prometheus-stack:
             receiver: sns-ticket
       receivers:
         - name: default
-        ## The SNS topic ARNs below are a PLATFORM CONTRACT, not a value read from
-        ## a live account: bootstrap/ Phase 1 owns these topics and it does not
-        ## exist yet (see TASKS.md). They are not secrets — an ARN is an
-        ## identifier — but they ARE unverified, so the contract is stated where a
-        ## reviewer will see it: Phase 1 must create `boutique-platform-page` and
-        ## `boutique-platform-ticket` in 348032171026/us-east-1, or override
-        ## `alertmanager.sns.pageTopicArn` / `.ticketTopicArn` at deploy time.
+        ## Both receivers publish to the ONE topic bootstrap/ owns,
+        ## `boutique-platform-alerts`, which already carries the confirmed email
+        ## subscription the Budget alerts use. The earlier contract named two
+        ## topics (`-page`, `-ticket`) that were never created, so every
+        ## notification since deploy failed with a 403 and nobody was told
+        ## (measured 2026-10-17 in the alertmanager log). Page and ticket stay
+        ## separate receivers so the `severity` message attribute still lets a
+        ## subscription filter policy split them later without touching this file.
         ##
         ## SigV4 uses the nodes' shared instance profile (SPEC "least privilege"),
         ## so NO AWS credential is placed in this repo, in values.yaml, or in a
         ## Secret. That is the whole reason SNS is the chosen destination.
         - name: sns-page
           sns_configs:
-            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-page
+            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-alerts
               sigv4:
                 region: us-east-1
               ## Page alerts are the ones that wake someone up, so they carry the
@@ -336,12 +347,79 @@ kube-prometheus-stack:
                 severity: page
         - name: sns-ticket
           sns_configs:
-            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-ticket
+            - topic_arn: arn:aws:sns:us-east-1:348032171026:boutique-platform-alerts
               sigv4:
                 region: us-east-1
               send_resolved: true
               attributes:
                 severity: ticket
+
+  ## ---------------------------------------------------------------------------
+  ## k3s control plane: one process, so one scrape
+  ## ---------------------------------------------------------------------------
+  ## k3s runs the apiserver, scheduler, controller-manager, kube-proxy and
+  ## kubelet inside ONE process, and every server node serves that whole
+  ## registry from both :6443/metrics and the kubelet's :10250/metrics. Measured
+  ## 2026-10-17 on the leader: 35969 samples from the apiserver and 35918 from
+  ## the kubelet, the same metric families. Both blew the global 10000
+  ## sampleLimit, so all six control-plane targets failed every scrape and
+  ## KubeAPIInstanceUnreachable / KubeletInstanceUnreachable fired on healthy
+  ## nodes.
+  ##
+  ## The fix splits ownership instead of raising the limit for everything:
+  ##   - the `apiserver` job keeps what the default apiserver rules and the
+  ##     apiserver dashboard query, and drops the histogram families nothing
+  ##     reads. Measured result on the leader: 10264 samples.
+  ##   - the `kubelet` job drops every family that belongs to another embedded
+  ##     component, so a server node's kubelet scrape matches a pure agent's.
+  ##     Measured result: 3114 on the leader, 2816 on the agent.
+  ## Both figures come from replaying these exact regexes over the raw payloads
+  ## (`kubectl get --raw /metrics` and `/api/v1/nodes/<n>/proxy/metrics`).
+  kubeApiServer:
+    serviceMonitor:
+      ## 2x the measured 10264, so a k3s upgrade that adds families degrades
+      ## into a visible sample-count climb rather than a dark target.
+      sampleLimit: 20000
+      metricRelabelings:
+        ## Upstream's default bucket thinning, restated because setting
+        ## metricRelabelings replaces the chart's list rather than extending it.
+        - action: drop
+          regex: (etcd_request|apiserver_request_slo|apiserver_request_sli|apiserver_request)_duration_seconds_bucket;(0\.15|0\.2|0\.3|0\.35|0\.4|0\.45|0\.6|0\.7|0\.8|0\.9|1\.25|1\.5|1\.75|2|3|3\.5|4|4\.5|6|7|8|9|15|20|40|45|50)(\.0)?
+          sourceLabels:
+            - __name__
+            - le
+        ## Families no default rule or bundled dashboard queries. The SLO and
+        ## burn-rate rules read apiserver_request_sli_* and apiserver_request_total,
+        ## both kept. scheduler_* is dropped here because its dashboard selects
+        ## job="kube-scheduler", which k3s never has.
+        - action: drop
+          regex: (apiserver_request_duration_seconds_bucket|apiserver_request_body_size_bytes_bucket|apiserver_response_sizes_.*|apiserver_watch_.*|apiserver_flowcontrol_.*|apiserver_admission_.*|apiserver_storage_.*|apiserver_cache_.*|etcd_request_duration_seconds_bucket|scheduler_.*)
+          sourceLabels:
+            - __name__
+
+  kubelet:
+    serviceMonitor:
+      ## Applies to the kubelet's own /metrics endpoint only; cAdvisor and probes
+      ## keep their chart defaults. The prefixes are the families present on a
+      ## k3s SERVER's kubelet endpoint and absent from the agent's, so after this
+      ## drop every node reports the same kubelet-shaped payload.
+      metricRelabelings:
+        - action: drop
+          regex: (apiserver|etcd|workqueue|scheduler|authorization|authenticated|attachdetach|cronjob|endpoint|ephemeral|field|garbagecollector|grpc|horizontal|lasso|pod|pv|replicaset|retroactive|root|running|serviceaccount|taint|ttl|watch|aggregator|apiextensions|authentication|cardinality)_.*
+          sourceLabels:
+            - __name__
+
+  ## No separate scheduler, controller-manager or kube-proxy endpoint exists on
+  ## k3s, so these monitors selected nothing and their absent() alerts paged
+  ## critical forever (KubeSchedulerDown, KubeControllerManagerDown,
+  ## KubeProxyDown). A dead k3s process is caught by the apiserver job's `up`,
+  ## KubeAPIDown and KubeNodeNotReady, because it is the same process.
+  kubeScheduler:
+    enabled: false
+  kubeControllerManager:
+    enabled: false
+  kubeProxy:
+    enabled: false
 
   ## ---------------------------------------------------------------------------
   ## kube-state-metrics
@@ -644,17 +722,18 @@ kube-prometheus-stack:
       kubeApiserverBurnrate: true
       kubeApiserverHistogram: true
       kubeApiserverSlos: true
-      kubeControllerManager: true
+      ## Off with their monitors above: k3s has no separate endpoint for either.
+      kubeControllerManager: false
       kubelet: true
-      kubeProxy: true
+      kubeProxy: false
       kubePrometheusGeneral: true
       kubePrometheusNodeRecording: true
       kubernetesApps: true
       kubernetesResources: true
       kubernetesStorage: true
       kubernetesSystem: true
-      kubeSchedulerAlerting: true
-      kubeSchedulerRecording: true
+      kubeSchedulerAlerting: false
+      kubeSchedulerRecording: false
       kubeStateMetrics: true
       network: true
       node: true
