@@ -58,4 +58,21 @@ while IFS= read -r f; do
     fi
 done < "$listing"
 
+# Cross-document rules only evaluate under --combine (see scripts/check.sh), so
+# their fixtures live in a sibling directory and are run that way.
+combined="${root}/policy/tests/should-fail-combined"
+if [ -d "$combined" ]; then
+    find "$combined" -name '*.yaml' -print | sort > "$listing" || exit 1
+    while IFS= read -r f; do
+        out="$(conftest test "$f" -p "$policy" --combine 2>&1)" && rc=0 || rc=$?
+        if [ "$rc" -eq 1 ]; then
+            printf 'rejects (--combine): %s\n' "$f"
+        else
+            printf 'NOT REJECTED (--combine): %s (conftest exit %s)\n' "$f" "$rc"
+            printf '%s\n' "$out"
+            status=1
+        fi
+    done < "$listing"
+fi
+
 exit "$status"

@@ -65,7 +65,7 @@ output "alert_email" {
   description = "Where the Phase 9 cluster alarms will point. Stated here so the operator can confirm it matches the bootstrap SNS subscription."
   value = {
     email     = var.alert_email
-    topic_arn = "arn:aws:sns:us-east-1:${data.aws_caller_identity.current.account_id}:boutique-platform-alerts"
+    topic_arn = local.alerts_topic_arn
   }
 }
 

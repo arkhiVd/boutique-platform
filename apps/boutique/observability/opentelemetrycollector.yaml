@@ -127,8 +127,8 @@ spec:
         - name: http-otlp
           containerPort: 4318
         # ADDED (Phase 11). The prometheus exporter serves the spanmetrics
-        # pipeline's output — traces_spanmetrics_calls_total and
-        # traces_spanmetrics_duration_seconds — on :9464. Named port, because
+        # pipeline's output — traces_span_metrics_calls_total and
+        # traces_span_metrics_duration_seconds — on :9464. Named port, because
         # a ServiceMonitor selects endpoints by PORT NAME (the pattern already
         # used in observability/servicemonitors/loki.yaml); a bare number in a
         # Service with no name is the recorded gap this phase also closes.
@@ -347,9 +347,18 @@ data:
         # Seconds, not the connector's default of milliseconds. The default unit
         # is an alpha-gated knob in v0.160.0 (useSecondAsDefaultMetricsUnit), so
         # without this line the histogram would be
-        # traces_spanmetrics_duration_milliseconds and every PromQL expression
+        # traces_span_metrics_duration_milliseconds and every PromQL expression
         # in observability/rules/spanmetrics.yaml would be written against a
         # metric name that does not exist. Named explicitly; not inherited.
+        #
+        # The metric PREFIX is inherited: with no `namespace:` set, the connector
+        # uses its default `traces.span.metrics`, which the prometheus exporter
+        # renders as traces_span_metrics_*. Until 2026-10-17 every rule,
+        # dashboard and alert in this repo queried traces_spanmetrics_* (no
+        # underscore), a name this collector never emitted, so the spanmetrics
+        # layer was dark from the day it shipped. Verified on the live :9464
+        # endpoint: traces_span_metrics_calls_total and
+        # traces_span_metrics_duration_seconds_bucket.
         histogram:
           unit: s
           explicit:
@@ -468,7 +477,7 @@ spec:
   # this pod, and both are named because a ServiceMonitor selects endpoints by
   # PORT NAME:
   #
-  #   metrics    9464  the prometheus exporter — traces_spanmetrics_* (the RED
+  #   metrics    9464  the prometheus exporter — traces_span_metrics_* (the RED
   #                    series observability/rules/spanmetrics.yaml records and
   #                    alerts on)
   #   telemetry  8888  the collector's own otelcol_* self-metrics. This is the

@@ -20,17 +20,37 @@ jobs:
   security:
     name: secret scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # Full history: gitleaks scans the PR's commit range, base..head.
+          fetch-depth: 0
       - name: gitleaks
         uses: gitleaks/gitleaks-action@1371ffca5405c3aff0215e23384577a3d7d60e73 # v2.0.4
+        # v2 refuses to scan a pull_request event without a token: it lists the
+        # PR's commits through the API. Without this every PR failed the scan
+        # before reading a single line (found on PR #3, 2026-10-17). Comments
+        # are off so the read-only job token is all the action ever needs.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
   terraform:
     name: terraform plan
     runs-on: ubuntu-latest
     needs: security
+    # The plan role trusts only tokens issued to a GitHub environment, so the
+    # job has to run in one. `plan` holds the role ARN and the three platform
+    # inputs that live in gitignored tfvars locally.
+    environment: plan
+    permissions:
+      contents: read
+      id-token: write       # OIDC token for the read-only plan role
+      pull-requests: write  # the plan and cost comment
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -47,11 +67,17 @@ jobs:
       - name: terraform fmt
         run: terraform fmt -recursive -check -diff
 
+      # The repository has two Terraform roots and nothing at its top level, so
+      # init/validate/plan at the root checked nothing and planned nothing.
       - name: terraform init (no backend)
-        run: terraform init -backend=false
+        run: |
+          terraform -chdir=bootstrap init -backend=false -input=false
+          terraform -chdir=platform init -backend=false -input=false
 
       - name: terraform validate
-        run: terraform validate
+        run: |
+          terraform -chdir=bootstrap validate
+          terraform -chdir=platform validate
 
       - name: tflint
         uses: terraform-linters/setup-tflint@19a52fbac37dacb22a09518e4ef6ee234f2d4987 # v4.0.0
@@ -73,8 +99,21 @@ jobs:
           curl -sSL --max-time 120 -o kubeconform.tar.gz \
             https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
           tar -xzf kubeconform.tar.gz kubeconform
-          ./kubeconform -strict -summary -kubernetes-version v1.36.3 \
-            apps/ ci/ observability/
+          # The same files, version and schema sources as scripts/check.sh, so
+          # the PR gate and the local gate cannot disagree. kubeconform takes
+          # a bare x.y.z (a leading "v" is rejected), and the core schema set
+          # has no CRDs, so ServiceMonitor and friends come from the CRDs catalog.
+          # Helm inputs, bare rule files and chart templates are not manifests;
+          # check.sh says why and validates them by rendering instead.
+          files="$(find apps ci cluster observability -name '*.yaml' -not -path '*charts*' \
+            | grep -Ev '(values\.yaml|Chart\.ya?ml|Chart\.lock)' \
+            | grep -Ev '(/rules/|/slos/|alerts\.yaml$)' \
+            | grep -Ev '/templates/' | sort)"
+          # shellcheck disable=SC2086
+          ./kubeconform -strict -summary -kubernetes-version 1.36.3 \
+            -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}{{.KindSuffix}}.json' \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            $files
 
       # Dependabot PRs cannot see secrets, so the real plan is skipped for them —
       # a green no-secrets run is still a useful signal, and the plan runs on every
@@ -104,15 +143,33 @@ jobs:
       # If the repo secret K3S_TOKEN_PLAN_ONLY is ever set to the real token,
       # nothing changes for CI: it still only ever plans.
       - name: provide the ephemeral k3s token variable for the plan
-        run: echo "TF_VAR_k3s_token=${K3S_TOKEN_PLAN_ONLY:-ci-plan-only-not-a-credential}" >> "$GITHUB_ENV"
+        # 32+ characters: the variable's own validation rejects anything shorter,
+        # and the old 29-character default failed it before a single API call.
+        run: echo "TF_VAR_k3s_token=${K3S_TOKEN_PLAN_ONLY:-ci-plan-only-not-a-credential-0000000000000000}" >> "$GITHUB_ENV"
 
       - name: terraform init (backend)
         if: github.actor != 'dependabot[bot]'
-        run: terraform init
+        working-directory: platform
+        env:
+          TF_VAR_bootstrap_state_bucket: ${{ secrets.TF_VAR_BOOTSTRAP_STATE_BUCKET }}
+        run: terraform init -input=false -reconfigure -backend-config="bucket=${TF_VAR_bootstrap_state_bucket}"
 
       - name: terraform plan
         if: github.actor != 'dependabot[bot]'
-        run: terraform plan -input=false -no-color -out=tfplan
+        working-directory: platform
+        env:
+          TF_VAR_bootstrap_state_bucket: ${{ secrets.TF_VAR_BOOTSTRAP_STATE_BUCKET }}
+          TF_VAR_admin_cidr: ${{ secrets.TF_VAR_ADMIN_CIDR }}
+          TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+        # -lock=false: the role is read-only by design and cannot write the S3
+        # lock object. A plan that never applies has nothing to protect.
+        #
+        # -refresh=false: refreshing the k3s token parameter makes the provider
+        # decrypt it, and the PR gate must not hold a key that reads the cluster
+        # join token. The plan still diffs every config change against state and
+        # still reads every data source (the AMI drift shows here); live drift
+        # outside Terraform is what doctor.sh and a local refresh are for.
+        run: terraform plan -input=false -no-color -lock=false -refresh=false -out=tfplan
 
       - name: checkov (IaC scan)
         if: github.actor != 'dependabot[bot]'
@@ -128,7 +185,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          terraform show -no-color tfplan > plan.txt
+          terraform -chdir=platform show -no-color tfplan > plan.txt
           {
             echo "### Cost estimate"
             echo '```'

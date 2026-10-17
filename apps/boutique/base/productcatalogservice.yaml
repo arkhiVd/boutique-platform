@@ -165,7 +165,10 @@ spec:
   minReplicas: 2
   # ADDED. Read by every request path (frontend, checkoutservice and
   # recommendationservice all call it), so it gets the widest band.
-  maxReplicas: 6
+  # Bounded by the boutique ResourceQuota, not by taste: the HPA budget table in
+  # apps/boutique/quota.yaml sums every maxReplicas against the quota, and
+  # policy rule deny_hpa_ceiling_exceeds_quota fails the gate if they stop fitting.
+  maxReplicas: 3
   metrics:
   # ADDED, and not decoration: autoscaling/v2 removed
   # spec.targetCPUUtilizationPercentage. The API server still accepts it as a

@@ -46,7 +46,7 @@ data:
         "to": "now"
       },
       "refresh": "30s",
-      "description": "Phase 11 traces layer. Sources: traces_spanmetrics_* from the OTel Collector's spanmetrics connector (scraped on :9464), traces_service_graph_* from Tempo's metrics generator (remote-written to Prometheus), and Tempo itself for the trace list and waterfall. Rule names are in each panel description so every line is checkable.",
+      "description": "Phase 11 traces layer. Sources: traces_span_metrics_* from the OTel Collector's spanmetrics connector (scraped on :9464), traces_service_graph_* from Tempo's metrics generator (remote-written to Prometheus), and Tempo itself for the trace list and waterfall. Rule names are in each panel description so every line is checkable.",
       "templating": {
         "list": [
           {
@@ -174,7 +174,7 @@ data:
         {
           "type": "timeseries",
           "title": "Request rate (server spans)",
-          "description": "span:request_rate:ratio \u2014 rate(traces_spanmetrics_calls_total{span_kind=\"SPAN_KIND_SERVER\"}) per service, produced pre-sampling so it is a true rate and not a sampled one.",
+          "description": "span:request_rate:ratio \u2014 rate(traces_span_metrics_calls_total{span_kind=\"SPAN_KIND_SERVER\"}) per service, produced pre-sampling so it is a true rate and not a sampled one.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -267,7 +267,7 @@ data:
         {
           "type": "timeseries",
           "title": "p95 latency (server spans)",
-          "description": "span:latency_p95:seconds from traces_spanmetrics_duration_seconds_bucket. The buckets are the same ladder as Traefik's custom buckets (0.05 ... 10s), so this p95 and the edge p95 are measured with the same resolution.",
+          "description": "span:latency_p95:seconds from traces_span_metrics_duration_seconds_bucket. The buckets are the same ladder as Traefik's custom buckets (0.05 ... 10s), so this p95 and the edge p95 are measured with the same resolution.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -395,7 +395,7 @@ data:
           },
           "targets": [
             {
-              "expr": "absent(traces_spanmetrics_calls_total{service_name=\"frontend\", span_kind=\"SPAN_KIND_SERVER\"})",
+              "expr": "absent(traces_span_metrics_calls_total{service_name=\"frontend\", span_kind=\"SPAN_KIND_SERVER\"})",
               "instant": true,
               "refId": "A"
             }

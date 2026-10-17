@@ -174,7 +174,11 @@ spec:
   # ADDED. Called on every product page render, and the only service whose
   # upstream memory limit (450Mi) is more than double its next-largest peer, so
   # it gets the same wide band as the frontend.
-  maxReplicas: 6
+  # Bounded by the boutique ResourceQuota, not by taste: the HPA budget table in
+  # apps/boutique/quota.yaml sums every maxReplicas against the quota, and
+  # policy rule deny_hpa_ceiling_exceeds_quota fails the gate if they stop fitting.
+  # Pinned at min: the quota's scale-out headroom goes to the request path first.
+  maxReplicas: 2
   metrics:
   # ADDED, and not decoration: autoscaling/v2 removed
   # spec.targetCPUUtilizationPercentage. The API server still accepts it as a

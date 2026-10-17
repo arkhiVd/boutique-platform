@@ -24,8 +24,8 @@
 #      so for the frontend it is `boutique-frontend-80@kubernetes`.
 #
 #   2. The OTel Collector's spanmetrics connector (Phase 11) — server-side
-#      spans, `traces_spanmetrics_calls_total` and
-#      `traces_spanmetrics_duration_seconds`. The connector and its rules now
+#      spans, `traces_span_metrics_calls_total` and
+#      `traces_span_metrics_duration_seconds`. The connector and its rules now
 #      live with the rest of the span pipeline: the connector in
 #      apps/boutique/observability/opentelemetrycollector.yaml, the rules and
 #      the TracesSpanmetricsMissing alert in observability/rules/spanmetrics.yaml

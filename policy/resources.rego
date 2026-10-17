@@ -241,3 +241,77 @@ deny_unparseable_memory_quantity contains msg if {
 		[where(pair), container_name(pair), raw.memory],
 	)
 }
+
+# ---------------------------------------------------------------------------
+# 5. Every HPA's ceiling must fit its namespace's ResourceQuota
+# ---------------------------------------------------------------------------
+# An HPA the quota cannot hold scales nothing. The controller raises the
+# desired count, the ReplicaSet's pod create fails with `exceeded quota`, and
+# the only record is an event. Found live 2026-10-17: the boutique HPAs summed
+# to 6470m of CPU requests at maxReplicas against a 3000m quota, so most of
+# them could never leave their floor and no gate noticed.
+#
+# Each workload counts at the replica count it can reach (maxReplicas when an
+# HPA targets it, spec.replicas otherwise), with per-pod figures in the quota's
+# own accounting: the larger of the app containers' sum and the largest init
+# container. Combined mode only, like rule 3; scripts/check-hpa-quota.py prints
+# the same arithmetic as a table.
+
+_quota_resources := {"requests.cpu", "limits.cpu", "requests.memory", "limits.memory"}
+
+_quantity(resource, q) := millicores(q) if endswith(resource, ".cpu")
+
+_quantity(resource, q) := memory_bytes(q) if endswith(resource, ".memory")
+
+# A missing value counts as zero here; rules 1, 2 and security.rego already
+# reject a container without requests and limits, so this rule never has to.
+_container_quantity(c, resource) := _quantity(resource, sprintf("%v", [raw])) if {
+	parts := split(resource, ".")
+	raw := object.get(c, ["resources", parts[0], parts[1]], "0")
+}
+
+_pod_quantity(spec, resource) := max([app, init]) if {
+	app := sum([_container_quantity(c, resource) | some c in object.get(spec, "containers", [])])
+	init := max(array.concat([0], [_container_quantity(c, resource) | some c in object.get(spec, "initContainers", [])]))
+}
+
+_hpa_max(ns, name) := doc.spec.maxReplicas if {
+	some doc in documents
+	doc.kind == "HorizontalPodAutoscaler"
+	object.get(doc, ["metadata", "namespace"], "") == ns
+	object.get(doc, ["spec", "scaleTargetRef", "name"], "") == name
+}
+
+_reachable_replicas(doc) := _hpa_max(doc.metadata.namespace, doc.metadata.name)
+
+_reachable_replicas(doc) := object.get(doc, ["spec", "replicas"], 1) if {
+	not _hpa_max(object.get(doc, ["metadata", "namespace"], ""), doc.metadata.name)
+}
+
+_namespace_ceiling(ns, resource) := sum([n |
+	some doc in documents
+	doc.kind in {"Deployment", "StatefulSet"}
+	object.get(doc, ["metadata", "namespace"], "") == ns
+	n := _pod_quantity(doc.spec.template.spec, resource) * _reachable_replicas(doc)
+])
+
+_show(resource, v) := sprintf("%vm", [round(v)]) if endswith(resource, ".cpu")
+
+_show(resource, v) := sprintf("%vMi", [round(v / 1048576)]) if endswith(resource, ".memory")
+
+deny_hpa_ceiling_exceeds_quota contains msg if {
+	is_array(input)
+	some quota in documents
+	quota.kind == "ResourceQuota"
+	ns := object.get(quota, ["metadata", "namespace"], "")
+	some resource in _quota_resources
+	hard := object.get(quota, ["spec", "hard", resource], null)
+	hard != null
+	cap := _quantity(resource, sprintf("%v", [hard]))
+	total := _namespace_ceiling(ns, resource)
+	total > cap
+	msg := sprintf(
+		"[resources] %s/%s: at every HPA's maxReplicas the namespace needs %v of %s but the quota allows %v (%v%%). The HPAs cannot reach their ceilings; scale-out would fail with `exceeded quota`. Lower maxReplicas or raise the quota; scripts/check-hpa-quota.py prints the per-workload table.",
+		[ns, quota.metadata.name, _show(resource, total), resource, _show(resource, cap), round((total * 100) / cap)],
+	)
+}

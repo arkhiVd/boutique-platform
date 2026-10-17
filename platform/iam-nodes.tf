@@ -351,6 +351,17 @@ data "aws_iam_policy_document" "boutique_node" {
       values   = [data.aws_region.current.region]
     }
   }
+
+  # Alertmanager signs its SNS calls with the node's instance profile (SigV4,
+  # no stored credential), so this grant is what lets a page leave the cluster.
+  # Without it every notification failed with a 403 that only the alertmanager
+  # log recorded. One action, one topic: the topic bootstrap/ owns.
+  statement {
+    sid       = "AlertPublish"
+    effect    = "Allow"
+    actions   = ["sns:Publish"]
+    resources = [local.alerts_topic_arn]
+  }
 }
 
 resource "aws_iam_role_policy" "boutique_node" {

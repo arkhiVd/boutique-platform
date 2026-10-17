@@ -7,7 +7,7 @@
 #
 # WHERE THE SERIES COME FROM, and why the label is `job`
 # -----------------------------------------------------------------------------
-# `traces_spanmetrics_calls_total` and `traces_spanmetrics_duration_seconds`
+# `traces_span_metrics_calls_total` and `traces_span_metrics_duration_seconds`
 # are produced by the spanmetrics CONNECTOR in
 # apps/boutique/observability/opentelemetrycollector.yaml, fed from a dedicated
 # pre-sampling traces pipeline (every span, not the sampled 10%), scraped out of
@@ -66,7 +66,7 @@ groups:
           sum by (job) (
             label_replace(
               rate(
-                traces_spanmetrics_calls_total{
+                traces_span_metrics_calls_total{
                   span_kind="SPAN_KIND_SERVER",
                   service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
                 }[5m]
@@ -88,7 +88,7 @@ groups:
           sum by (job) (
             label_replace(
               rate(
-                traces_spanmetrics_calls_total{
+                traces_span_metrics_calls_total{
                   span_kind="SPAN_KIND_SERVER",
                   status_code="STATUS_CODE_ERROR",
                   service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
@@ -101,7 +101,7 @@ groups:
           sum by (job) (
             label_replace(
               rate(
-                traces_spanmetrics_calls_total{
+                traces_span_metrics_calls_total{
                   span_kind="SPAN_KIND_SERVER",
                   service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
                 }[5m]
@@ -121,7 +121,7 @@ groups:
             sum by (job, le) (
               label_replace(
                 rate(
-                  traces_spanmetrics_duration_seconds_bucket{
+                  traces_span_metrics_duration_seconds_bucket{
                     span_kind="SPAN_KIND_SERVER",
                     service_name=~"frontend|checkoutservice|productcatalogservice|currencyservice|emailservice|adservice|shippingservice|paymentservice|recommendationservice|cartservice"
                   }[5m]
@@ -175,7 +175,7 @@ groups:
         annotations:
           summary: "Spanmetrics series for frontend are gone from the collector"
           description: >-
-            No traces_spanmetrics_calls_total series exists for
+            No traces_span_metrics_calls_total series exists for
             service_name=frontend, span_kind=SPAN_KIND_SERVER. The collector's
             spanmetrics connector has stopped producing: either the collector
             Deployment is down, the metrics pipeline is broken, or the
@@ -186,7 +186,7 @@ groups:
             docs/runbooks/traces.md.
           runbook_url: https://github.com/arkhiVd/boutique-platform/tree/main/docs/runbooks/traces.md
         expr: |
-          absent(traces_spanmetrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})
+          absent(traces_span_metrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})
         for: 15m
         labels:
           severity: ticket

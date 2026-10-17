@@ -19,6 +19,10 @@ locals {
   # grant is already in place when the schedule exists.
   etcd_snapshot_bucket_name = "boutique-platform-etcd-snapshots-${data.aws_caller_identity.current.account_id}"
 
+  # bootstrap/ owns this topic (local state, so no remote-state lookup); the
+  # name is the contract between the two stacks. Alertmanager publishes to it.
+  alerts_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:boutique-platform-alerts"
+
   # Phase 3 writes this and the nodes read it at boot, so the k3s channel has
   # one source of truth that is not a cloud-init string. SSM ARNs do not carry
   # the leading slash the API name has, hence the trimprefix.

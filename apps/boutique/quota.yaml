@@ -5,14 +5,13 @@ metadata:
   namespace: boutique
 spec:
   hard:
-    requests.cpu: "3"
+    # Sized from the cluster, not from the namespace: see the HPA budget at the
+    # bottom of this file. policy/resources.rego rule 5 enforces it in CI.
+    requests.cpu: "3600m"
     requests.memory: "3Gi"
-    # Measured from the render, not estimated. See the arithmetic block at the
-    # bottom of this file.
     limits.cpu: "4"
-    # Measured 4348Mi at minimum replicas, so 5Gi leaves 772Mi of headroom
-    # without letting one namespace declare more memory than the node has.
-    limits.memory: "5Gi"
+    # 5212Mi at every HPA's maxReplicas; 5.5Gi keeps 420Mi for a canary pod.
+    limits.memory: "5632Mi"
     # 40 pods against 22 at minimum replicas (10 services x 2 + redis-cart 1 +
     # loadgenerator 1): room for a canary set, a `kubectl debug` pod, a runbook
     # one-off, and an HPA scale-up, without reopening the ceiling by hand.
@@ -57,59 +56,42 @@ spec:
       memory: 2Gi
 
 # ===========================================================================
-# ARITHMETIC, against the real render. Measured with:
+# HPA BUDGET, against the live cluster (re-measured 2026-10-17)
 #
-#   kubectl kustomize apps/boutique/ | python3 scripts/../tmp/sum.py
-#   (or the one-liner in the report)
+# The previous block sized this quota for one t3.medium. The cluster that
+# shipped is 1 x c7i-flex.large + 3 x t3.small, all four schedulable, and the
+# quota was never re-derived for it: the HPAs summed to 6470m of CPU requests
+# at maxReplicas against a 3000m cap, with 230m of headroom at the floor. Most
+# HPAs could not scale at all, and nothing said so.
 #
-# Namespace `boutique` only — the OTel Collector is in `observability` and is
-# counted by Phase 11's quota, not this one.
+# The ceiling comes from losing a node, not from the healthy cluster:
 #
-#   Deployment                replicas   cpu req/pod   mem req/pod
-#   adservice                       2        200m          180Mi
-#   cartservice                     2        200m           64Mi
-#   checkoutservice                 2        100m           64Mi
-#   currencyservice                 2        100m           64Mi
-#   emailservice                    2        100m           64Mi
-#   frontend                        2        100m           64Mi
-#   loadgenerator                   1        350m          288Mi   (main 300m/256Mi + init 50m/32Mi)
-#   paymentservice                  2        100m           64Mi
-#   productcatalogservice           2        100m           64Mi
-#   recommendationservice           2        100m          220Mi
-#   redis-cart                      1         70m          200Mi
-#   shippingservice                 2        100m           64Mi
-#   -------------------------------------------------------------------
-#   TOTAL                                        2820m         2312Mi
+#   allocatable, 4 nodes                          8000m     ~9543Mi
+#   minus one t3.small (the N-1 case)            -2000m     -1909Mi
+#   minus every non-boutique request (live)      -2020m     -3780Mi
+#   ----------------------------------------------------------------
+#   what boutique can hold with a node down       3980m     ~3854Mi
+#   requests.cpu, keeping ~10% for bin-packing    3600m
 #
-# MEMORY: 2312Mi of requests against a t3.medium's 4096Mi, of which roughly
-# 3400Mi is actually allocatable once kube-reserved, the eviction threshold and
-# the node's own pods (kube-proxy, kube-router, the CNI, node-exporter) are
-# taken out. 2312Mi < 3400Mi, so the app fits one node on memory with about
-# 1.1Gi spare for the rest of Phase 7-12. THIS IS THE NUMBER THE SPEC'S
-# "workload requests sum to ~9.5GiB" claim was checked against, and it is the
-# number that says the spec figure is optimistic.
+# At the floor (min replicas) boutique requests 2770m, so scale-out headroom is
+# 830m. It goes to the request path, where load arrives first:
 #
-# CPU: 2820m of requests against a t3.medium's 2000m. IT DOES NOT FIT. This is
-# not a rounding error and it is not fixable by choosing a different quota
-# number: HPA minReplicas: 2 on ten services, with upstream's own CPU request
-# values kept verbatim (100m each on seven, 200m on two, 300m on loadgenerator,
-# 70m on redis), sums to 2820m the moment the namespace is at its floor. A
-# node-sized `requests.cpu: "2000m"` here would not make the workload fit; it
-# would make the ReplicaSet's pod creation fail with `exceeded quota` and leave
-# the namespace permanently short. So the cap is set just above the measured
-# floor instead, and the real gap is recorded in TASKS.md as a blocker on
-# SPEC.md's unresolved question 1 (node shape). Three ways to close it:
+#   frontend 2->5, cartservice 2->3, checkoutservice 2->3, currencyservice 2->3,
+#   productcatalogservice 2->3                    = +800m, +512Mi requests
 #
-#   1. A larger workload node. t3.large (2 vCPU) is the same vCPU; t3.xlarge is
-#      4 vCPU / 16GiB for ~$0.1664/h — over the 8.0 vCPU quota the account has
-#      left once the three k3s servers are counted, so this is not available.
-#   2. Relax the workload-node taint so `boutique` can also schedule on the
-#      three t3.small servers (6 GiB / 6 vCPU aggregate). 2820m fits 6 vCPU.
-#      This is what the SPEC's own "3 servers + 1 medium = 10GiB / 8vCPU"
-#      diagram actually assumes, and its taint line contradicts.
-#   3. Drop HPA minReplicas to 1 for the low-traffic services. Costs the
-#      single-replica availability story the PDBs are there to provide.
+# adservice, emailservice, paymentservice, recommendationservice and
+# shippingservice keep an HPA (policy/resources.rego requires one) pinned at
+# min == max == 2. Widening any of them means narrowing another or raising this
+# quota, and the gate makes that trade visible instead of silent.
 #
-# Option 2 is the one the SPEC diagram already implies and is the recommendation;
-# it is a decision for Aravind, not for this file.
+# At every HPA's maxReplicas (scripts/check-hpa-quota.py, 2026-10-17):
+#
+#   requests.cpu     3570m  of 3600m   (99%)
+#   requests.memory  2728Mi of 3072Mi  (89%)
+#   limits.cpu       3570m  of 4000m   (89%)
+#   limits.memory    5212Mi of 5632Mi  (93%)
+#   pods             29     of 40
+#
+# Enforced:   policy/resources.rego rule 5 (conftest --combine, laptop and CI)
+# Table:      kubectl kustomize apps/boutique | scripts/check-hpa-quota.py
 # ===========================================================================

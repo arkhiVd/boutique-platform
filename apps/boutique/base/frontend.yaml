@@ -286,7 +286,10 @@ spec:
   # ADDED (upstream ships no HPA for any service). Sized per service from the
   # CPU limit the Deployment now holds: frontend is the only user-facing pod and
   # carries the whole checkout journey, so it gets the widest band.
-  maxReplicas: 6
+  # Bounded by the boutique ResourceQuota, not by taste: the HPA budget table in
+  # apps/boutique/quota.yaml sums every maxReplicas against the quota, and
+  # policy rule deny_hpa_ceiling_exceeds_quota fails the gate if they stop fitting.
+  maxReplicas: 5
   metrics:
   # ADDED, and not decoration: autoscaling/v2 removed
   # spec.targetCPUUtilizationPercentage. The API server still accepts it as a

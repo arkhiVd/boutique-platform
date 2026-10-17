@@ -10,6 +10,13 @@ locals {
   node_role_name        = "boutique-platform-node"
   node_instance_profile = "boutique-platform-node"
   github_repository     = "arkhiVd/boutique-platform"
+  # The repository opted into GitHub's immutable OIDC subject, which names the
+  # owner and repo by id as well as by name. A trust policy written only for
+  # the legacy `repo:owner/name:` form matches no token at all, and that is why
+  # the plan gate could never assume its role (found 2026-10-17 from
+  # GET /repos/{repo}/actions/oidc/customization/sub). Both forms are trusted:
+  # the ids pin this exact repository even across a rename.
+  github_repository_immutable = "arkhiVd@95763443/boutique-platform@1410757654"
 
   github_oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github_actions[0].arn : var.existing_oidc_provider_arn
 }
@@ -142,7 +149,10 @@ data "aws_iam_policy_document" "github_actions_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.github_repository}:environment:*"]
+      values = [
+        "repo:${local.github_repository}:environment:*",
+        "repo:${local.github_repository_immutable}:environment:*",
+      ]
     }
   }
 }
@@ -192,6 +202,7 @@ data "aws_iam_policy_document" "plan_readonly" {
     sid    = "PlanReadsAccount"
     effect = "Allow"
     actions = [
+      "servicequotas:GetAWSDefaultServiceQuota",
       "servicequotas:GetServiceQuota",
       "servicequotas:ListServiceQuotas",
       "sts:GetCallerIdentity",
@@ -214,6 +225,21 @@ data "aws_iam_policy_document" "plan_readonly" {
     # The plan gate diffs the platform stack, whose only role is the node role.
     # Scoped rather than `*` so the role cannot read the account's other roles.
     resources = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/boutique-platform-*"]
+  }
+
+  # The PR gate plans with -refresh=false (see .github/workflows/plan.yml): the
+  # AWS provider refreshes an SSM SecureString WITH decryption even when it was
+  # written via value_wo, so a refreshing plan needs kms:Decrypt on the key
+  # that guards the k3s join token, and that is not a read a PR gate gets
+  # (measured 2026-10-17: AccessDenied on kms:Decrypt for /boutique-platform/k3s/token).
+  # Without refresh, the plan still reads every DATA source, and these are the
+  # two that the EC2 statement above does not cover.
+  statement {
+    sid     = "PlanReadsDataSources"
+    effect  = "Allow"
+    actions = ["ssm:GetParameter", "ssm:GetParameters"]
+    # The AL2023 AMI id the launch template resolves through a public parameter.
+    resources = ["arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}::parameter/aws/service/*"]
   }
 
   statement {
