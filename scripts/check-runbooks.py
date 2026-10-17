@@ -86,6 +86,9 @@ kubectl() {
     rollout)
       case "$sub" in
         status|history) command kubectl "${args[@]}" --request-timeout=30s ;;
+        restart) # no --dry-run in kubectl: prove the target exists instead
+          local tgt=(); for a in "${args[@]}"; do [ "$a" = rollout ] || [ "$a" = restart ] || tgt+=("$a"); done
+          _run "$label [target exists: not restarted]" command kubectl get "${tgt[@]}"; return 0 ;;
         *) _run "$label [dry-run]" command kubectl "${args[@]}" --dry-run=server; return 0 ;;
       esac ;;
     port-forward)

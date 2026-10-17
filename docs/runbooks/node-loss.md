@@ -92,9 +92,21 @@ Drain one node at a time and wait for `doctor.sh` to pass before the next.
 Pods do **not** move back after `uncordon`: rebalance afterwards (below), or the
 servers stay packed.
 
+**redis-cart blocks a drain on purpose.** It is one replica on an `emptyDir`, and
+its PodDisruptionBudget (`minAvailable: 1`, `apps/boutique/base/redis-cart.yaml`)
+refuses every eviction, because evicting it empties every cart in the shop. If
+it is on the node being drained, the drain waits forever. Moving it is a
+decision: delete the pod yourself, knowing the carts go, then drain the rest.
+
 ```bash
 NODE="$(kubectl get nodes -l boutique.io/role=agent -o name | head -1)"
-kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=300s
+kubectl cordon "$NODE"
+# Is the cart store on this node? If so, this is the "carts are emptied" step.
+REDIS_POD="$(kubectl -n boutique get pods -l app=redis-cart -o name \
+  --field-selector "spec.nodeName=${NODE#node/}")"
+[ -z "$REDIS_POD" ] || kubectl -n boutique delete "$REDIS_POD"
+kubectl drain "$NODE" --ignore-daemonsets --delete-emptydir-data --timeout=300s \
+  --pod-selector='app!=redis-cart'
 scripts/doctor.sh          # expect FAIL naming the cordoned node -- that is correct
 kubectl uncordon "$NODE"
 # Rebalance: restart the shop one Deployment at a time so the scheduler spreads it.
