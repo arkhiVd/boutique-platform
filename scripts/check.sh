@@ -517,6 +517,16 @@ if need python3 python3 && [[ -d scripts ]]; then
   check "python3 -m compileall scripts" -- python3 -m compileall -q scripts
 fi
 
+# Runbooks: every fenced command parses, none is a <placeholder>, and every
+# runbook carries a Last verified date. The live half -- reads run, writes as
+# server-side dry-runs -- needs the cluster, so it is run by hand and its output
+# kept in docs/evidence/phase-13/runbook-check.txt (docs/runbooks/README.md).
+cyan "== runbooks =="
+if need python3 python3; then
+  check "runbooks parse, have no placeholders, carry Last verified" -- \
+    env OFFLINE=1 python3 scripts/check-runbooks.py
+fi
+
 echo
 cyan "==============================================="
 printf '  PASS: %d   FAIL: %d   MISSING: %d\n' "$PASS" "$FAIL" "$MISSING"

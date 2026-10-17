@@ -1,8 +1,9 @@
 # Runbook — the edge (Phase 5)
 
-**Last verified:** not yet — Phase 5 has no cluster. Every command below is one that
-will be run and its output pasted into `docs/evidence/` on the first deploy. Until then the
-commands are correct and untested; that state is the honest one.
+**Last verified: 2026-10-17** — every fenced command below was executed by
+`scripts/check-runbooks.py` against the live cluster: reads run for real, writes as
+server-side dry-runs, `terraform apply` recognised and never run (output in
+`docs/evidence/phase-13/runbook-check.txt`).
 
 The edge is two layers: an AWS ALB (TLS, Web ACL, access logs, HTTP→HTTPS redirect) and an
 in-cluster Traefik DaemonSet (host routing, middlewares). A failure can live in either, and the
@@ -12,12 +13,15 @@ first job is always to find out which one.
 
 ```bash
 # Which layers answer, and from where?
-curl -sSI http://<alb-dns>/                          # expect 301 to https
-curl -sSI https://<frontend-host>/                    # expect 200
+ALB="$(terraform -chdir=platform output -raw alb_dns_name)"
+curl -sSI "http://$ALB/" | head -1                                  # expect 301 to https
+# Self-signed for the .local names (scripts/tls/generate-selfsigned.sh): -k,
+# and the Host header selects the Traefik route.
+curl -sSIk -H 'Host: boutique.local' "https://$ALB/" | head -1      # expect 200
 
 # The ALB's view of its targets. Unhealthy here = the problem is outside the cluster.
 aws elbv2 describe-target-health \
-  --target-group-arn "$(terraform -chdir=platform output -raw traefik_target_group_http_arn)"
+  --target-group-arn "$(terraform -chdir=platform output -raw traefik_target_group_arn)"
 
 # The cluster's view: does Traefik exist and is it Ready on every node?
 kubectl get daemonset -n traefik -o wide
@@ -49,12 +53,16 @@ every pod Running. The ALB console shows 0 healthy targets.
 ```bash
 # What does the target group actually check?
 aws elbv2 describe-target-groups \
-  --target-group-arns "$(terraform -chdir=platform output -raw traefik_target_group_http_arn)" \
+  --target-group-arns "$(terraform -chdir=platform output -raw traefik_target_group_arn)" \
   --query 'TargetGroups[0].{Path:HealthCheckPath,Port:HealthCheckPort,Matcher:Matcher,Interval:HealthCheckInterval,Timeout:HealthCheckTimeout,Unhealthy:UnhealthyThreshold}'
 
-# Is Traefik listening on the node? Run this ON a node through SSM, not ssh:
+# Is Traefik listening on the node? Open a shell ON a node through SSM, not ssh:
 aws ssm start-session --target "$(terraform -chdir=platform output -raw leader_instance_id)"
-#   then, inside the session:
+```
+
+Inside that session:
+
+```sh-node
 ss -tlnp | grep 32080
 curl -sSI http://localhost:32080/ping
 
@@ -116,7 +124,9 @@ other rule to unblock one.
 
 ```bash
 # What does the ALB actually serve, and when does it expire?
-echo | openssl s_client -connect <alb-dns>:443 2>/dev/null | openssl x509 -noout -subject -dates
+ALB="$(terraform -chdir=platform output -raw alb_dns_name)"
+echo | openssl s_client -connect "$ALB:443" -servername boutique.local 2>/dev/null \
+  | openssl x509 -noout -subject -dates
 
 # What is in ACM?
 aws acm describe-certificate --certificate-arn "$(terraform -chdir=platform output -raw edge_certificate_arn)" \
@@ -165,8 +175,13 @@ node IP is reachable from outside the VPC, that rule has stopped working.
 The edge is Terraform-managed, so rollback is the previous commit plus a plan:
 
 ```bash
-git revert <edge-commit>
+# The newest commit that touched the edge:
+EDGE_COMMIT="$(git log -1 --format=%H -- platform/edge.tf)"
+git revert --no-edit "$EDGE_COMMIT"
 ./scripts/check.sh
+# The join token is write-only, but plan still needs a value for it:
+export TF_VAR_k3s_token="$(aws ssm get-parameter --name /boutique-platform/k3s/token \
+  --with-decryption --query Parameter.Value --output text)"
 terraform -chdir=platform plan    # read the destroys and replaces line by line
 terraform -chdir=platform apply
 ```
