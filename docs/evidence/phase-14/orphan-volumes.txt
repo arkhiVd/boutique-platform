@@ -1,0 +1,13 @@
+# Orphaned CSI volumes from the 2026-10-14 cluster, unreferenced by any PV (checked first), deleted 2026-10-17T23:36:14Z
+$ aws ec2 delete-volume --volume-id vol-096fb7bca50ede213
+deleted vol-096fb7bca50ede213
+$ aws ec2 delete-volume --volume-id vol-09bb63ca768f575b4
+deleted vol-09bb63ca768f575b4
+$ aws ec2 delete-volume --volume-id vol-0fbbd8ff2e7885cac
+deleted vol-0fbbd8ff2e7885cac
+$ aws ec2 delete-volume --volume-id vol-06fad35261a9d4165
+deleted vol-06fad35261a9d4165
+$ aws ec2 delete-volume --volume-id vol-08eb99197e4c6cc2f
+deleted vol-08eb99197e4c6cc2f
+$ aws ec2 describe-volumes --filters Name=tag-key,Values=ebs.csi.aws.com/cluster Name=status,Values=available --query 'length(Volumes)'
+0
