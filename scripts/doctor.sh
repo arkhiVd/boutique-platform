@@ -27,6 +27,8 @@
 #   hpa       every HPA's target has enough ready replicas, or says it is at max
 #   pvc       every PersistentVolumeClaim Bound
 #   certs     the kubeconfig client cert and the apiserver serving cert, in days
+#   targets   every active Prometheus scrape target is up (a dark target is a blind alert)
+#   alerts    nothing at severity page/critical is firing; tickets and warnings WARN
 #   marker    (optional) the bootstrap-complete marker on every node, over SSM
 #
 # WHY SOME THINGS ARE ARITHMETIC RATHER THAN MEASURED, and which
@@ -65,6 +67,9 @@ NODE_LOG_INSTANCE="${NODE_LOG_INSTANCE:-}"
 # before `kubectl` stops working.
 CERT_FAIL_DAYS=30
 CERT_WARN_DAYS=90
+# Prometheus, reached through the apiserver's service proxy so the check needs
+# nothing but the kubeconfig. Overridable for a renamed release.
+PROM_PROXY="${PROM_PROXY:-/api/v1/namespaces/observability/services/kube-prometheus-stack-prometheus:9090/proxy}"
 
 PASS=0; FAIL=0; WARN=0
 FAILURES=()
@@ -293,6 +298,53 @@ check_pvc() {
 # kubeconfig stops the operator working, and the apiserver's serving cert stops
 # every client working. openssl is the only dependency and it is on every
 # workstation this repo targets.
+# Prometheus answers through the apiserver proxy, so an empty or non-JSON reply
+# is the same fail-closed case kjson() covers for kubectl.
+promjson() {
+  local out
+  out="$(kubectl get --raw "${PROM_PROXY}$1" 2>/dev/null)" || return 1
+  jq -e '.status == "success"' >/dev/null 2>&1 <<<"$out" || return 1
+  printf '%s' "$out"
+}
+
+# Added 2026-10-17. Every control-plane target had been failing its scrape for
+# days (sample limit exceeded) while this script said PASS 8 / FAIL 0, because
+# nothing here asked Prometheus whether it could see anything.
+check_targets() {
+  local json down
+  if ! json="$(promjson '/api/v1/targets?state=active')"; then
+    echo "    Prometheus did not answer at ${PROM_PROXY} -- metrics and alerting are blind"; return 1
+  fi
+  echo "    $(jq '.data.activeTargets | length' <<<"$json") active targets"
+  down="$(jq -r '[.data.activeTargets[] | select(.health != "up")] | length' <<<"$json")"
+  [ "$down" -eq 0 ] && return 0
+  jq -r '.data.activeTargets[] | select(.health != "up") |
+      "      DOWN \(.labels.job) \(.scrapeUrl)  \(.lastError[0:100])"' <<<"$json"
+  echo "    $down target(s) down: their alerts cannot fire and their dashboards are empty"
+  return 1
+}
+
+# Added 2026-10-17, with the same history: three critical alerts and an
+# Alertmanager that could not deliver anything had been firing for days under
+# a PASS verdict. Watchdog and InfoInhibitor are the two alerts that fire by
+# design, so they are excluded by name rather than by severity.
+check_alerts() {
+  local json firing
+  if ! json="$(promjson '/api/v1/alerts')"; then
+    echo "    Prometheus did not answer at ${PROM_PROXY} -- alert state is unknown"; return 1
+  fi
+  firing="$(jq -c '[.data.alerts[] | select(.state == "firing")
+      | select(.labels.alertname != "Watchdog" and .labels.alertname != "InfoInhibitor")]' <<<"$json")"
+  if [ "$(jq length <<<"$firing")" -eq 0 ]; then
+    echo "    no alerts firing (Watchdog excluded: it fires by design)"; return 0
+  fi
+  jq -r '.[] | "      \(.labels.severity // "none")  \(.labels.alertname)  \(.labels.namespace // "")"' <<<"$firing" | sort | uniq -c
+  if jq -e 'any(.[]; .labels.severity == "page" or .labels.severity == "critical")' >/dev/null <<<"$firing"; then
+    echo "    a page or critical alert is firing"; return 1
+  fi
+  echo "    only ticket/warning/info alerts are firing"; return 77
+}
+
 check_certs() {
   local pem end days
   pem="$(kubectl config view --raw -o jsonpath='{.users[0].user.client-certificate-data}' 2>/dev/null | base64 -d 2>/dev/null || true)"
@@ -382,6 +434,8 @@ run "disruption: PodDisruptionBudgets are satisfied" check_pdb
 run "autoscaling: HPAs are at or above minReplicas" check_hpa
 run "storage: every PVC is Bound" check_pvc
 run "certificates: client and serving, in days" check_certs
+run "scrape targets: every active Prometheus target is up" check_targets
+run "alerts: nothing at severity page or critical is firing" check_alerts
 if [ -n "$NODE_LOG_INSTANCE" ]; then
   run "node bootstrap log over SSM" check_node_marker
 fi
