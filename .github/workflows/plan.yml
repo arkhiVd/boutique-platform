@@ -24,13 +24,13 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # Full history: gitleaks scans the PR's commit range, base..head.
           fetch-depth: 0
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@1371ffca5405c3aff0215e23384577a3d7d60e73 # v2.0.4
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         # v2 refuses to scan a pull_request event without a token: it lists the
         # PR's commits through the API. Without this every PR failed the scan
         # before reading a single line (found on PR #3, 2026-10-17). Comments
@@ -52,14 +52,14 @@ jobs:
       id-token: write       # OIDC token for the read-only plan role
       pull-requests: write  # the plan and cost comment
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: cost estimate
         run: ./scripts/cost-estimate.sh
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.15.9"
           terraform_wrapper: false
@@ -80,7 +80,7 @@ jobs:
           terraform -chdir=platform validate
 
       - name: tflint
-        uses: terraform-linters/setup-tflint@19a52fbac37dacb22a09518e4ef6ee234f2d4987 # v4.0.0
+        uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
         with:
           tflint_version: v0.60.0
           cache: "true"
@@ -120,7 +120,7 @@ jobs:
       # human PR.
       - name: configure AWS credentials
         if: github.actor != 'dependabot[bot]'
-        uses: aws-actions/configure-aws-credentials@4fc4975a852c8cd99761e2de1f4ba73402e44dd9 # v4.0.3
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
           role-session-name: boutique-plan-${{ github.run_id }}
@@ -173,7 +173,7 @@ jobs:
 
       - name: checkov (IaC scan)
         if: github.actor != 'dependabot[bot]'
-        uses: bridgecrewio/checkov-action@c13aafd679d3814a25067d10fcaf98c4f7594931 # v12.3131.0
+        uses: bridgecrewio/checkov-action@6f26dc90000b74feb589a906cdfae540f5119895 # v12.3134.0
         continue-on-error: true
         with:
           directory: .
