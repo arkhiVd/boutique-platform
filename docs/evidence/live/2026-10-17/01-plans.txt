@@ -1,0 +1,12 @@
+# Phase 0/1/2: a second plan is empty after apply
+# 2026-10-17T23:12:59Z
+$ plan_empty bootstrap
+terraform -chdir=bootstrap plan -detailed-exitcode -> 0 (0 = no changes)
+exit=0
+
+# Phase 2-5: platform plan is empty after apply
+# 2026-10-17T23:13:19Z
+$ plan_empty platform
+terraform -chdir=platform plan -detailed-exitcode -> 0 (0 = no changes)
+exit=0
+

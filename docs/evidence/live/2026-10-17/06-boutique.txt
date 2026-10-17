@@ -1,0 +1,33 @@
+# Phase 6: every workload Available
+# 2026-10-17T23:15:26Z
+$ kubectl -n boutique get deploy
+NAME                    READY   UP-TO-DATE   AVAILABLE   AGE
+adservice               2/2     2            2           2d16h
+cartservice             2/2     2            2           2d16h
+checkoutservice         2/2     2            2           2d16h
+currencyservice         2/2     2            2           2d16h
+emailservice            2/2     2            2           2d16h
+frontend                2/2     2            2           2d16h
+loadgenerator           1/1     1            1           2d16h
+paymentservice          2/2     2            2           2d16h
+productcatalogservice   2/2     2            2           2d16h
+recommendationservice   2/2     2            2           2d16h
+redis-cart              1/1     1            1           2d16h
+shippingservice         2/2     2            2           2d16h
+exit=0
+
+# Phase 6: pods spread across AZs
+# 2026-10-17T23:15:29Z
+$ bash -c kubectl -n boutique get pods -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort | uniq -c
+      7 boutique-agent-i-00cd39226a36dbac3
+      4 boutique-follower-i-043323974c30b6b52
+      1 boutique-follower-i-08c5be6e48a9185d2
+     10 boutique-leader-i-01a7966000fabecf4
+exit=0
+
+# Phase 6: containers without readOnlyRootFilesystem or runAsNonRoot (expect none)
+# 2026-10-17T23:15:30Z
+$ bash -c kubectl -n boutique get pods -o json | jq -r '.items[] | .metadata.name as $p | .spec.securityContext as $ps | .spec.containers[] | select((.securityContext.readOnlyRootFilesystem != true) or ((.securityContext.runAsNonRoot // $ps.runAsNonRoot) != true)) | "\($p)/\(.name)"' | sort -u; echo checked
+checked
+exit=0
+

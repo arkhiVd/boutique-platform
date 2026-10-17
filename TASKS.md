@@ -1,14 +1,15 @@
 # boutique-platform — tasks
 
-## Current phase: 4 — cluster policy baseline (built on `feat/cluster`; Phase 3 blocks the apply)
+## Current phase: 14 — release readiness (2026-10-18)
 
-Phases 0, 1, 2, 3 and 4 are now built and planned but **still not applied**: the apply is
-Aravind's gate, and the state bucket the `platform/` stack stores state in does not exist until
-that one-time bootstrap apply runs. Phase 3's plan is the first one that creates anything, so it
-is the one to read before approving. Everything in this file is proven by `terraform plan`, `kustomize build`,
-`helm template`, `promtool`, `kubeconform`, `conftest` and `shellcheck`. Nothing is deployed, and
-no `kubectl apply` has been run anywhere. Cluster-dependent exit criteria are named in the
-blockers table rather than marked done.
+Phases 0–13 are applied and live; Phase 13 (runbooks, DR drills, evidence pack) is on
+`feat/phase-13-operations`. The open items are no longer here: each unproven exit
+criterion is listed, with its reason, in `docs/evidence/README.md`, and the dated
+results are in `PROGRESS.md`. What remains for Phase 14 is the release gate and the
+teardown to $0, which needs Aravind's approval in-session (ROADMAP "Approval gates").
+
+The sections below are the Phase 3–4 record, kept as history: their "not applied"
+statements describe 2026-10-09, before the first apply.
 
 ## What is proven, and by what
 

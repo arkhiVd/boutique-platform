@@ -1,0 +1,41 @@
+# Phase 9: request rate per service from span metrics (non-zero = traffic seen)
+# 2026-10-17T23:15:31Z
+$ promq sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[5m]))
+service_name=checkoutservice 0.5052631578947369
+service_name=emailservice 0.9017543859649122
+service_name=frontend 3.1227543632610937
+service_name=currencyservice 53.43859649122807
+service_name=paymentservice 0.5017543859649122
+service_name=productcatalogservice 15.287719298245612
+service_name=recommendationservice 2.7368421052631575
+exit=0
+
+# Phase 9: every scrape target up
+# 2026-10-17T23:15:32Z
+$ promq count by (health) (up == 1) or count(up == 0)
+ 40
+exit=0
+
+# Phase 9: alerts firing now
+# 2026-10-17T23:15:33Z
+$ bash -c kubectl get --raw '/api/v1/namespaces/observability/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/alerts' | jq -r '.data.alerts[] | select(.state=="firing") | "\(.labels.severity) \(.labels.alertname)"' | sort | uniq -c
+      2 none Watchdog
+      1 warning KubeMemoryOvercommit
+      1 warning KubeMemoryQuotaOvercommit
+exit=0
+
+# Phase 9: Alertmanager SNS notifications sent and failed (since its start)
+# 2026-10-17T23:15:34Z
+$ bash -c kubectl -n observability exec alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager -- wget -qO- localhost:9093/metrics | grep -E '^alertmanager_notifications(_failed)?_total\{integration="sns"' | grep -v ' 0$'
+alertmanager_notifications_total{integration="sns"} 6
+exit=0
+
+# Phase 9: the alert topic has a confirmed subscriber
+# 2026-10-17T23:15:41Z
+$ aws sns get-topic-attributes --topic-arn arn:aws:sns:us-east-1:348032171026:boutique-platform-alerts --query Attributes.{Confirmed:SubscriptionsConfirmed,Pending:SubscriptionsPending}
+{
+    "Confirmed": "1",
+    "Pending": "0"
+}
+exit=0
+

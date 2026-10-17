@@ -1,0 +1,35 @@
+# Phase 4: a privileged pod is REJECTED by Pod Security (restricted)
+# 2026-10-17T23:14:38Z
+$ privileged
+Error from server (Forbidden): pods "evidence-privileged" is forbidden: violates PodSecurity "restricted:latest": privileged (container "c" must not set securityContext.privileged=true), allowPrivilegeEscalation != false (container "c" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "c" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "c" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "c" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+exit=1
+
+# Phase 4: a pod over the LimitRange max is REJECTED
+# 2026-10-17T23:14:38Z
+$ oversized
+Error from server (Forbidden): pods "evidence-oversized" is forbidden: [maximum memory usage per Container is 1Gi, but limit is 4Gi, maximum memory usage per Pod is 2Gi, but limit is 4Gi]
+exit=1
+
+# Phase 4: a pod with no requests gets the LimitRange defaults (defaulted, not rejected)
+# 2026-10-17T23:14:39Z
+$ defaulted
+{"limits":{"cpu":"200m","memory":"128Mi"},"requests":{"cpu":"100m","memory":"64Mi"}}
+exit=0
+
+# Phase 4: etcd snapshots in S3
+# 2026-10-17T23:14:52Z
+$ aws s3 ls s3://boutique-platform-etcd-snapshots-348032171026/etcd-snapshots/
+2026-10-15 23:47:37    4804580 on-demand-boutique-leader-i-01a7966000fabecf4-1792088256.zip
+2026-10-16 03:16:36    4590527 on-demand-boutique-leader-i-01a7966000fabecf4-1792100795.zip
+2026-10-16 05:32:59    3306094 on-demand-boutique-leader-i-01a7966000fabecf4-1792108978.zip
+2026-10-16 11:31:19    3907705 on-demand-boutique-leader-i-01a7966000fabecf4-1792130478.zip
+2026-10-16 17:33:23    3897688 on-demand-boutique-leader-i-01a7966000fabecf4-1792152202.zip
+2026-10-16 23:34:08    3817948 on-demand-boutique-leader-i-01a7966000fabecf4-1792173847.zip
+2026-10-17 05:34:23    3864573 on-demand-boutique-leader-i-01a7966000fabecf4-1792195462.zip
+2026-10-17 11:30:23    3878329 on-demand-boutique-leader-i-01a7966000fabecf4-1792216822.zip
+2026-10-17 17:31:38    3870851 on-demand-boutique-leader-i-01a7966000fabecf4-1792238497.zip
+2026-10-17 23:33:42    7038375 on-demand-boutique-leader-i-01a7966000fabecf4-1792260221.zip
+2026-10-18 01:53:13    3162039 on-demand-boutique-leader-i-01a7966000fabecf4-1792268592.zip
+2026-10-18 02:00:08    3333891 on-demand-boutique-leader-i-01a7966000fabecf4-1792269007.zip
+exit=0
+

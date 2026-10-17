@@ -1,0 +1,13 @@
+# Phase 11: a checkout trace (it contains a payment Charge) and the services it spans
+# 2026-10-17T23:16:06Z
+$ bash -c id=$(kubectl get --raw '/api/v1/namespaces/observability/services/tempo:3200/proxy/api/search?q=%7B%20span.rpc.method%20%3D%20%22Charge%22%20%7D&limit=1&start=1792275366&end=1792278966' | jq -r '.traces[0].traceID');    echo trace $id; kubectl get --raw '/api/v1/namespaces/observability/services/tempo:3200/proxy/api/traces/'$id | jq -r '[.batches[].resource.attributes[] | select(.key=="service.name") | .value.stringValue] | unique | join(" -> ")'
+trace 41d778a228a661044f06f3917d555b5
+checkoutservice -> currencyservice -> emailservice -> frontend -> paymentservice -> productcatalogservice -> recommendationservice
+exit=0
+
+# Phase 11: span-metrics series in Prometheus
+# 2026-10-17T23:16:08Z
+$ promq count(traces_span_metrics_calls_total)
+ 53
+exit=0
+

@@ -1,0 +1,39 @@
+# Phase 3: nodes Ready across three AZs
+# 2026-10-17T23:14:15Z
+$ kubectl get nodes -o wide -L topology.kubernetes.io/zone,boutique.io/role
+NAME                                    STATUS   ROLES                AGE     VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                            CONTAINER-RUNTIME            ZONE         ROLE
+boutique-agent-i-00cd39226a36dbac3      Ready    <none>               2d16h   v1.36.5+k3s1   10.90.39.166   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36   us-east-1c   agent
+boutique-follower-i-043323974c30b6b52   Ready    control-plane,etcd   2d16h   v1.36.5+k3s1   10.90.22.241   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36   us-east-1b   follower
+boutique-follower-i-08c5be6e48a9185d2   Ready    control-plane,etcd   2d16h   v1.36.5+k3s1   10.90.45.136   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36   us-east-1c   follower
+boutique-leader-i-01a7966000fabecf4     Ready    control-plane,etcd   2d16h   v1.36.5+k3s1   10.90.4.64     <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36   us-east-1a   leader
+exit=0
+
+# Phase 3: no platform node has an EC2 key pair (access is SSM only)
+# 2026-10-17T23:14:22Z
+$ aws ec2 describe-instances --instance-ids i-01a7966000fabecf4 i-043323974c30b6b52 i-08c5be6e48a9185d2 i-00cd39226a36dbac3 --query Reservations[].Instances[].[InstanceId,KeyName] --output text
+i-01a7966000fabecf4	None
+i-043323974c30b6b52	None
+i-00cd39226a36dbac3	None
+i-08c5be6e48a9185d2	None
+exit=0
+
+# Phase 3: every node is SSM-managed and online
+# 2026-10-17T23:14:25Z
+$ aws ssm describe-instance-information --query InstanceInformationList[].[InstanceId,PingStatus,PlatformName] --output table
+---------------------------------------------------
+|           DescribeInstanceInformation           |
++----------------------+---------+----------------+
+|  i-00cd39226a36dbac3 |  Online |  Amazon Linux  |
+|  i-01a7966000fabecf4 |  Online |  Amazon Linux  |
+|  i-043323974c30b6b52 |  Online |  Amazon Linux  |
+|  i-08c5be6e48a9185d2 |  Online |  Amazon Linux  |
++----------------------+---------+----------------+
+exit=0
+
+# Phase 2: no security group opens 22/tcp or the API to the world
+# 2026-10-17T23:14:34Z
+$ aws ec2 describe-security-groups --filters Name=vpc-id,Values=vpc-0fc20434075a2142c --query SecurityGroups[].IpPermissions[?contains(IpRanges[].CidrIp, '0.0.0.0/0')][].[FromPort,ToPort] --output text
+80	80
+443	443
+exit=0
+

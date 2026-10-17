@@ -1,9 +1,46 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-17** · rendered browser view: `docs/progress.html`
+**Last updated: 2026-10-18** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
 ---
+
+## 2026-10-17/18 — Phase 13: drills that found five live faults (`feat/phase-13-operations`)
+
+Phase 13's drills were run against the live cluster, and each one broke something
+real. Everything below was fixed on the cluster, written into the repo so a new
+node or a reinstall comes up the same way, and re-measured.
+
+| drill | what it found | fix | after |
+|---|---|---|---|
+| drain the agent (`docs/evidence/phase-13/drain.txt`) | the leader's k3s **exited**: etcd writes slowed to 1.5s, the controller-manager missed its 5s lease, and `leaderelection lost` is fatal in k3s (4th such restart) | leases 60s/40s on every server (`config.yaml.d/50-leader-election.yaml`) | rolling restart, leases verified at 60s |
+| the same drain | pods never moved back; a 2 GB etcd follower reached **36 MiB available**, its kubelet and SSM agent went silent, the cluster ran on two etcd members | kubelet memory reservations + eviction at 200Mi on every node; Prometheus prefers the agent | follower rebooted (2.5 min), allocatable now honest |
+| etcd restore into a local k3s (`scripts/etcd-restore-local.sh`) | "bootstrap data encrypted with **different token**": every node had joined with the token's **KMS ciphertext** (bootstrap read the SecureString without `--with-decryption`), so the CMK protected nothing | `k3s token rotate` to the decrypted value, rolled to all four nodes; bootstrap decrypts | restore serves the shop: 21/21 pods, home + product 200, **555 s** |
+| runbook commands, executed (`scripts/check-runbooks.py`) | a wrong Terraform output, a dead kubeconfig, an undeployed backup CronJob, cluster-DNS URLs, placeholders, and **no gp3 volume could ever be resized** | runbooks fixed; `allowVolumeExpansion: true` | 12/12 runbooks pass live |
+| evidence capture (`scripts/evidence-capture.sh`) | **Grafana's host route answered 404** (IngressRoute named a Service that never existed); the leader thrashed (I/O stall 25%, load 4.6) because Jenkins and Grafana under-requested memory and the scheduler kept packing the node they are pinned to | backend name fixed; requests set to measured working sets | leader: 892 MiB available, load 0.9, I/O stall 0.7% |
+
+Smaller: Fluent Bit's readiness probe stayed failed for 90 minutes after Loki
+recovered and pulled its own metrics out of Prometheus (readiness now `/`);
+`doctor.sh` passed with pods at 0/1 (it now fails on unready containers) and gained
+an edge check through the ALB. redis-cart's single-replica PDB blocks a drain by
+design; `node-loss.md` now handles it explicitly.
+
+**Correction to "The join token is nowhere" (Wave B, below):** the token was in
+neither state nor git, but until 2026-10-17T20:23Z every node used the
+parameter's ciphertext as the token. Snapshots older than that restore only with
+the ciphertext (`docs/runbooks/etcd-restore.md`).
+
+```
+scripts/doctor.sh          PASS 9 / WARN 4 / FAIL 0
+scripts/check.sh           PASS 154 / FAIL 0 / MISSING 0
+scripts/check-runbooks.py  12 runbooks, live
+terraform plan             bootstrap and platform: no changes
+```
+
+What is still **not** proven is listed per criterion in `docs/evidence/README.md`:
+the pipeline runs (Phase 7–8), the SLO fault-injection tests (Phase 12), the
+zero-loss drain (Phase 6), and a 403 from the Web ACL, which is deliberately in
+count mode.
 
 ## 2026-10-17 — alerting told the truth for the first time (`fix/alerting-truth`)
 

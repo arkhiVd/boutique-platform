@@ -127,7 +127,8 @@ check_prereq() {
     echo "    a kubeconfig-looking file is tracked in git -- remove it"
     return 1
   fi
-  echo "    KUBECONFIG=$KUBECONFIG (mode $(stat -c %a "$KUBECONFIG_PATH"))"
+  # ~ for $HOME: this line is pasted into docs/evidence/, which names no home.
+  echo "    KUBECONFIG=${KUBECONFIG/#$HOME/\~} (mode $(stat -c %a "$KUBECONFIG_PATH"))"
   kubectl version --short 2>/dev/null | sed 's/^/    /' || true
 }
 

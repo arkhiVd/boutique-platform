@@ -1,0 +1,15 @@
+$ scripts/check-runbooks.py   # 2026-10-17T23:08:21Z, live
+runbook check, live (reads run, writes dry-run)
+  PASS  docs/runbooks/alert-delivery.md                  verified 2026-10-17  6 ok, 0 failed
+  PASS  docs/runbooks/cert-expiry.md                     verified 2026-10-17  7 ok, 0 failed
+  PASS  docs/runbooks/ci.md                              verified 2026-10-17  26 ok, 0 failed
+  PASS  docs/runbooks/cost-spike.md                      verified 2026-10-17  14 ok, 0 failed
+  PASS  docs/runbooks/edge.md                            verified 2026-10-17  25 ok, 0 failed
+  PASS  docs/runbooks/etcd-restore.md                    verified 2026-10-17  11 ok, 0 failed
+  PASS  docs/runbooks/find-the-failing-checkout.md       verified 2026-10-17  5 ok, 0 failed
+  PASS  docs/runbooks/loki-full.md                       verified 2026-10-17  9 ok, 0 failed
+  PASS  docs/runbooks/node-loss.md                       verified 2026-10-17  36 ok, 0 failed
+  PASS  docs/runbooks/prometheus-restart.md              verified 2026-10-17  14 ok, 0 failed
+  PASS  docs/runbooks/rollback.md                        verified 2026-10-17  15 ok, 0 failed
+  PASS  docs/runbooks/traces.md                          verified 2026-10-17  22 ok, 0 failed
+exit=0

@@ -1,7 +1,7 @@
 $ scripts/doctor.sh   # 2026-10-17T19:07:25Z, agent node drained
 
 == prerequisite: kubectl, kubeconfig, and the kubeconfig is not in git
-    KUBECONFIG=/home/yoink/.kube/boutique-prod-ssm.yaml (mode 600)
+    KUBECONFIG=~/.kube/boutique-prod-ssm.yaml (mode 600)
   PASS
 
 == nodes: 4 present, 4 Ready, none tainted, none cordoned
