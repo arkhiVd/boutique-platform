@@ -19,7 +19,7 @@
 #        which becomes PVC storage-tempo-0 for a release named `tempo`.
 #
 # TracesSpanmetricsMissing is deliberately NOT in this file. It alerts on the
-# spanmetrics CONNECTOR's series (`traces_spanmetrics_calls_total`), which is
+# spanmetrics CONNECTOR's series (`traces_span_metrics_calls_total`), which is
 # the OTel Collector's output, not Tempo's — it lives with the rest of the
 # spanmetrics rules in observability/rules/spanmetrics.yaml. One definition,
 # one alert in Alertmanager, and the file that owns the metric owns the alert.

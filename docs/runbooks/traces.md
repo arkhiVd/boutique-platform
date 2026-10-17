@@ -13,7 +13,7 @@ part:
 | Symptom | The part | Section |
 |---|---|---|
 | A trace that should exist is not in Tempo | collector → Tempo path, or Tempo itself | 1 |
-| `traces_spanmetrics_*` series stop appearing | the collector's spanmetrics pipeline | 2 |
+| `traces_span_metrics_*` series stop appearing | the collector's spanmetrics pipeline | 2 |
 | Tempo's disk fills up | the local (gp3) trace store | 3 |
 
 ## The pipeline, in one diagram
@@ -55,7 +55,7 @@ promtool query instant http://localhost:9090 'up{job="opentelemetrycollector"}'
 ```
 
 The rule: `up{job="opentelemetrycollector"}` says whether the collector is
-scrapeable; `absent(traces_spanmetrics_calls_total{service_name="frontend"})`
+scrapeable; `absent(traces_span_metrics_calls_total{service_name="frontend"})`
 says whether it is producing; `curl :3200/ready` says whether Tempo can accept.
 Those three answers pick the section below.
 
@@ -155,7 +155,7 @@ is specifically the metrics half.
 ```bash
 # (a) The alert's own expression. Empty result = the condition is true.
 promtool query instant http://localhost:9090 \
-  'absent(traces_spanmetrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})'
+  'absent(traces_span_metrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})'
 
 # (b) Are the scrape targets alive? Two per collector pod: telemetry + metrics.
 promtool query instant http://localhost:9090 'up{job="opentelemetrycollector"}'

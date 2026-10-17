@@ -10,8 +10,8 @@
 #                     named it, so none of these series were scrapeable and a
 #                     failing exporter was indistinguishable from a healthy one
 #                     from Prometheus' side.
-#   metrics (9464)    the prometheus exporter — traces_spanmetrics_calls_total
-#                     and traces_spanmetrics_duration_seconds, produced by the
+#   metrics (9464)    the prometheus exporter — traces_span_metrics_calls_total
+#                     and traces_span_metrics_duration_seconds, produced by the
 #                     spanmetrics connector. These are the series
 #                     observability/rules/spanmetrics.yaml records into
 #                     span:request_rate:ratio / span:error_ratio:ratio /
