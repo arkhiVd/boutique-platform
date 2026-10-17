@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Every check_* function is invoked by name from the run list at the bottom,
+# which shellcheck before 0.11 cannot see, so it reports each body as
+# unreachable (SC2317). That is a false positive for the whole file.
+# shellcheck disable=SC2317
 # ===========================================================================
 # doctor.sh -- one command, one verdict: is this cluster healthy, and if not,
 # exactly which thing is wrong.

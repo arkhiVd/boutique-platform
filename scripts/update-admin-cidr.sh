@@ -39,8 +39,9 @@ cd "$(dirname "$0")/.." || exit 1
 SG_ID="$(aws ec2 describe-security-groups --filters \
   'Name=tag:Name,Values=boutique-node-api' \
   --query 'SecurityGroups[0].GroupId' --output text)"
-[ -n "$SG_ID" ] && [ "$SG_ID" != "None" ] || {
-  echo "cannot resolve the boutique-node-api SG" >&2; exit 1; }
+if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ]; then
+  echo "cannot resolve the boutique-node-api SG" >&2; exit 1
+fi
 
 PUBLIC_IP="$(curl -s --max-time 15 https://checkip.amazonaws.com | tr -d '[:space:]')"
 [[ "$PUBLIC_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || {
