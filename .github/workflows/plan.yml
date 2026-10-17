@@ -161,6 +161,11 @@ jobs:
           TF_VAR_bootstrap_state_bucket: ${{ secrets.TF_VAR_BOOTSTRAP_STATE_BUCKET }}
           TF_VAR_admin_cidr: ${{ secrets.TF_VAR_ADMIN_CIDR }}
           TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
+          # The imported edge certificate. Without it the plan proposes a NEW
+          # self-signed certificate and a listener change that nobody wants
+          # (seen on PR #5): every local tfvars value that differs from its
+          # default has to reach CI, or the gate plans a different platform.
+          TF_VAR_acm_certificate_arn: ${{ secrets.TF_VAR_ACM_CERTIFICATE_ARN }}
         # -lock=false: the role is read-only by design and cannot write the S3
         # lock object. A plan that never applies has nothing to protect.
         #
