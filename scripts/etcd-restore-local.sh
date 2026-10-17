@@ -70,7 +70,7 @@ KEY="$(aws s3api list-objects-v2 --region "$REGION" --bucket "$BUCKET" --prefix 
   --query 'sort_by(Contents,&LastModified)[-1].[Key,LastModified,Size]' --output text)" \
   || die "cannot list the snapshot bucket"
 read -r SNAP_KEY SNAP_TIME SNAP_SIZE <<<"$KEY"
-[ -n "$SNAP_KEY" ] && [ "$SNAP_KEY" != None ] || die "no snapshot under $PREFIX"
+if [ -z "$SNAP_KEY" ] || [ "$SNAP_KEY" = None ]; then die "no snapshot under $PREFIX"; fi
 echo "    $SNAP_KEY  ($SNAP_SIZE bytes, written $SNAP_TIME)"
 # Its own directory, mounted read-write: k3s decompresses the .zip NEXT TO
 # it ("open /drill/<name>: read-only file system" otherwise). The token file
