@@ -13,8 +13,10 @@ updates:
       actions:
         patterns: ["*"]
 
+  # The two Terraform roots. The repository top level has no .tf files, so
+  # "/" watched nothing (the same root-directory mistake the plan job had).
   - package-ecosystem: terraform
-    directory: "/"
+    directories: ["/bootstrap", "/platform"]
     schedule:
       interval: weekly
     commit-message:
@@ -22,8 +24,6 @@ updates:
       include: scope
     labels: ["dependencies", "terraform"]
 
-  - package-ecosystem: docker
-    directory: "/"
-    schedule:
-      interval: weekly
-    labels: ["dependencies", "docker"]
+# No docker entry: the repository builds no image (no Dockerfile anywhere), and
+# the entry that pointed at "/" failed on every run. Workload images are pinned
+# by tag and digest in the manifests and charts, and are bumped there.
