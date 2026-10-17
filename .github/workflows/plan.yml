@@ -198,7 +198,7 @@ jobs:
             echo '```'
             echo "### Plan — creates / changes / destroys / replaces"
             echo '```'
-            grep -E '^Plan:|^  # ' plan.txt | head -200
+            grep -E '^Plan:|^  # |^No changes' plan.txt | head -200
             echo '```'
             echo "### Residual risk"
             echo "Counted above are the exact creates, changes, destroys and replaces. A"
