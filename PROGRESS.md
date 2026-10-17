@@ -1,9 +1,40 @@
 # boutique-platform — live progress
 
-**Last updated: 2026-10-15** · rendered browser view: `docs/progress.html`
+**Last updated: 2026-10-17** · rendered browser view: `docs/progress.html`
 (regenerate with `python3 scripts/render-progress.py`)
 
 ---
+
+## 2026-10-17 — alerting told the truth for the first time (`fix/alerting-truth`)
+
+A live audit found the platform looked healthy only because it could not see or say otherwise.
+Every item below was measured on the cluster, fixed in the repo, applied, and re-measured.
+
+| found (measured) | fix | after |
+|---|---|---|
+| Alertmanager → SNS: **403 on every notification since deploy** (node role had no `sns:Publish`; the `-page`/`-ticket` topics never existed) | both receivers → `boutique-platform-alerts`; `AlertPublish` statement on the node role | 403s stop; `alertmanager_notifications_total{integration="sns"}` moves |
+| next failure: SNS **400 `Invalid parameter: Subject`** (stock subject appends every label) | short `boutique.sns.subject` template; labels, summary, runbook in the body | delivery succeeds |
+| apiserver + kubelet targets **DOWN**: ~36k samples vs a 10k limit (k3s serves the whole registry from one process, twice) | sampleLimit 20000 + drops of duplicated families | all up |
+| Prometheus self-scrape **DOWN**: `rule_group` label 241 chars vs a 200 limit | per-monitor `labelValueLengthLimit: 512` | up |
+| **3 critical false positives**: KubeScheduler/ControllerManager/Proxy Down (not separate on k3s) | monitors and their rules disabled | gone |
+| spanmetrics **dark**: wrong metric name (`traces_span_metrics_*`), NetworkPolicy blocked :9464, ServiceMonitor never applied | rename in rules/dashboards/runbooks, netpol rule, apply | series present, `TracesSpanmetricsMissing` resolved |
+| 5 ServiceMonitors **never applied** (otel collector, loki, fluent-bit, blackbox, jenkins) | applied | scraped |
+| fluent-bit **404** on `/metrics` | path `/api/v2/metrics/prometheus` | 4/4 up |
+| HPA ceilings needed **6470m** CPU vs a **3000m** quota — most HPAs could never scale | ceilings sized to an N-1 budget, quota 3600m; Rego rule `deny_hpa_ceiling_exceeds_quota` + fixture | 99% of quota at max, gate enforced |
+| `doctor.sh` passed while Prometheus was blind | fails on any DOWN target or firing page/critical | honest verdict |
+
+```
+scripts/doctor.sh   PASS 8 / WARN 4 / FAIL 0   (40 active targets, all up; no page/critical firing)
+scripts/check.sh    PASS 149 / FAIL 0 / MISSING 0
+```
+
+**Still open:** the `boutique-platform-alerts` topic has **0 confirmed subscriptions** — the
+bootstrap `alert_email` is a GitHub noreply address that cannot receive the confirmation mail, so
+Budget alerts and cluster alerts publish successfully and reach nobody. Fix: set a real inbox in
+`bootstrap/terraform.tfvars`, `terraform -chdir=bootstrap apply`, click the link. Known warnings:
+memory limits overcommitted 121–188% per node (`KubeMemoryOvercommit`), four single-replica PDBs
+block a drain, launch-template AMI drift on a full platform plan, CI's plan-only token default is
+under the 32-character minimum.
 
 ## ▶ Where we are
 
