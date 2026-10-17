@@ -5,6 +5,24 @@
 
 ---
 
+## 2026-10-18 — Phase 14: release gate passed; teardown awaits its approval
+
+| gate (ROADMAP Phase 14) | state |
+|---|---|
+| CI green on the latest commit | yes: secret scan + terraform plan, on PRs #3, #4, #5 and `main` |
+| the CI plan is empty after apply | yes: "No changes" (it needed the imported certificate ARN, PR #5) |
+| security scans clean | gitleaks clean; Dependabot alerts enabled, 0 open |
+| Dependabot current | Actions bumps merged (#2, every SHA checked against its tag); Terraform roots now watched |
+| SPEC/ROADMAP/TASKS/README match what was built | SPEC shape and cost, README status and teardown, TASKS current phase: updated |
+| real-environment test documented | `docs/evidence/` (index: `docs/evidence/README.md`) |
+| rollback path known | `docs/runbooks/rollback.md`, checked live |
+| teardown path tested | `scripts/teardown.sh` inventory run; bucket emptying tested on a scratch versioned bucket |
+| teardown executed, $0 the following week | **not yet**: ROADMAP approval gate 3 |
+
+Found and fixed on the way: five orphaned EBS volumes (31 GiB, from the 2026-10-14
+cluster) that a `terraform destroy` would never have removed, and `cost-estimate.sh`
+reporting the cluster as 6 GiB instead of 10.
+
 ## 2026-10-17/18 — Phase 13: drills that found five live faults (`feat/phase-13-operations`)
 
 Phase 13's drills were run against the live cluster, and each one broke something
