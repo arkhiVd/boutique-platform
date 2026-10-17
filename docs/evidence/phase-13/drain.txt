@@ -1,0 +1,40 @@
+$ kubectl drain boutique-agent-i-00cd39226a36dbac3 --ignore-daemonsets --delete-emptydir-data --timeout=300s   # 2026-10-17T19:04:37Z
+node/boutique-agent-i-00cd39226a36dbac3 cordoned
+I1018 00:34:46.157785  126727 request.go:752] "Waited before sending request" delay="1.109725285s" reason="client-side throttling, not priority and fairness" verb="GET" URL="https://127.0.0.1:16443/api/v1/namespaces/observability/pods/opentelemetrycollector-7ccdbb68c8-567n4"
+pod/ebs-csi-controller-7957bffdbd-gb8wl eviction failed
+pod/shippingservice-85f89f87b8-cxxqn eviction failed
+pod/opentelemetrycollector-7ccdbb68c8-567n4 eviction failed
+pod/frontend-5c6b87dcc-7wcmv eviction failed
+pod/currencyservice-84668599f6-bkggl eviction failed
+pod/paymentservice-565579866d-rqzv2 eviction failed
+pod/kube-prometheus-stack-operator-5845957c59-zldmt eviction failed
+pod/blackbox-prometheus-blackbox-exporter-cbdd996c4-vnxkm eviction failed
+pod/recommendationservice-64c484d8d9-jkx9r eviction failed
+pod/productcatalogservice-6b6cf7696-9xrkb eviction failed
+pod/cartservice-6454d555d4-hvdvb eviction failed
+Following errors occurred while getting the list of pods to delete:
+apiserver not readyerror: unable to drain node "boutique-agent-i-00cd39226a36dbac3" due to error: [error when waiting for pod "ebs-csi-controller-7957bffdbd-gb8wl" in namespace "kube-system" to terminate: apiserver not ready, error when waiting for pod "shippingservice-85f89f87b8-cxxqn" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "opentelemetrycollector-7ccdbb68c8-567n4" in namespace "observability" to terminate: apiserver not ready, error when waiting for pod "frontend-5c6b87dcc-7wcmv" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "currencyservice-84668599f6-bkggl" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "paymentservice-565579866d-rqzv2" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "kube-prometheus-stack-operator-5845957c59-zldmt" in namespace "observability" to terminate: apiserver not ready, error when waiting for pod "blackbox-prometheus-blackbox-exporter-cbdd996c4-vnxkm" in namespace "observability" to terminate: apiserver not ready, error when waiting for pod "recommendationservice-64c484d8d9-jkx9r" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "productcatalogservice-6b6cf7696-9xrkb" in namespace "boutique" to terminate: apiserver not ready, error when waiting for pod "cartservice-6454d555d4-hvdvb" in namespace "boutique" to terminate: apiserver not ready], continuing command...
+There are pending nodes to be drained:
+ boutique-agent-i-00cd39226a36dbac3
+error when waiting for pod "ebs-csi-controller-7957bffdbd-gb8wl" in namespace "kube-system" to terminate: apiserver not ready
+error when waiting for pod "shippingservice-85f89f87b8-cxxqn" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "opentelemetrycollector-7ccdbb68c8-567n4" in namespace "observability" to terminate: apiserver not ready
+error when waiting for pod "frontend-5c6b87dcc-7wcmv" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "currencyservice-84668599f6-bkggl" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "paymentservice-565579866d-rqzv2" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "kube-prometheus-stack-operator-5845957c59-zldmt" in namespace "observability" to terminate: apiserver not ready
+error when waiting for pod "blackbox-prometheus-blackbox-exporter-cbdd996c4-vnxkm" in namespace "observability" to terminate: apiserver not ready
+error when waiting for pod "recommendationservice-64c484d8d9-jkx9r" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "productcatalogservice-6b6cf7696-9xrkb" in namespace "boutique" to terminate: apiserver not ready
+error when waiting for pod "cartservice-6454d555d4-hvdvb" in namespace "boutique" to terminate: apiserver not ready
+
+real	0m33.159s
+user	0m0.504s
+sys	0m0.326s
+exit=1
+$ kubectl drain boutique-agent-i-00cd39226a36dbac3 --ignore-daemonsets --delete-emptydir-data --timeout=300s   # retry, 2026-10-17T19:07:20Z
+node/boutique-agent-i-00cd39226a36dbac3 already cordoned
+node/boutique-agent-i-00cd39226a36dbac3 drained
+exit=0
+$ kubectl uncordon boutique-agent-i-00cd39226a36dbac3   # 2026-10-17T19:07:49Z
+node/boutique-agent-i-00cd39226a36dbac3 uncordoned

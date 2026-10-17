@@ -1,0 +1,117 @@
+$ scripts/doctor.sh   # 2026-10-17T19:07:52Z, after uncordon
+
+== prerequisite: kubectl, kubeconfig, and the kubeconfig is not in git
+    KUBECONFIG=/home/yoink/.kube/boutique-prod-ssm.yaml (mode 600)
+  PASS
+
+== nodes: 4 present, 4 Ready, none tainted, none cordoned
+    4 of 4 nodes Ready (expected 4)
+      NAME                                    STATUS   ROLES                AGE     VERSION        INTERNAL-IP    EXTERNAL-IP   OS-IMAGE                        KERNEL-VERSION                            CONTAINER-RUNTIME
+      boutique-agent-i-00cd39226a36dbac3      Ready    <none>               2d12h   v1.36.5+k3s1   10.90.39.166   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36
+      boutique-follower-i-043323974c30b6b52   Ready    control-plane,etcd   2d12h   v1.36.5+k3s1   10.90.22.241   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36
+      boutique-follower-i-08c5be6e48a9185d2   Ready    control-plane,etcd   2d12h   v1.36.5+k3s1   10.90.45.136   <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36
+      boutique-leader-i-01a7966000fabecf4     Ready    control-plane,etcd   2d12h   v1.36.5+k3s1   10.90.4.64     <none>        Amazon Linux 2023.12.20261013   6.18.54-121.166.amzn2023.x86_64 (amd64)   containerd://2.3.4-k3s1.36
+    nodes with a node-role taint: 0   cordoned: 0
+  PASS
+
+== spread: one node in each of the us-east-1a us-east-1b us-east-1c
+    nodes per availability zone:
+      us-east-1a  boutique-leader-i-01a7966000fabecf4
+      us-east-1b  boutique-follower-i-043323974c30b6b52
+      us-east-1c  boutique-agent-i-00cd39226a36dbac3
+      us-east-1c  boutique-follower-i-08c5be6e48a9185d2
+  PASS
+
+== apiserver: GET /healthz
+    GET /healthz -> ok
+  PASS
+
+== etcd: reachable, and quorum is intact
+    GET /healthz/etcd -> ok
+    control-plane nodes Ready: 3 of 3 (quorum is 2)
+    k3s etcd snapshots visible as Kubernetes objects:
+      s3-on-demand-boutique-leader-i-01a7966000fabecf4-1792173847.zip-1f4c97  3817948
+      s3-on-demand-boutique-leader-i-01a7966000fabecf4-1792195462.zip-994d6a  3864573
+      s3-on-demand-boutique-leader-i-01a7966000fabecf4-1792216822.zip-b58831  3878329
+      s3-on-demand-boutique-leader-i-01a7966000fabecf4-1792238497.zip-1cfdf3  3870851
+      s3-on-demand-boutique-leader-i-01a7966000fabecf4-1792260221.zip-f76f43  7038375
+  PASS
+
+== pods: non-kube-system all Running, no crashloop
+    every pod outside kube-system is Running or Succeeded
+          5 restarts  observability/fluent-bit-fzz6s
+      7 restarts  observability/kube-prometheus-stack-prometheus-node-exporter-zqtl5
+      7 restarts  traefik/traefik-kfpmp
+  WARN
+  WARN
+
+== disruption: PodDisruptionBudgets are satisfied
+    18 PodDisruptionBudgets
+      boutique/adservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/cartservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/checkoutservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/currencyservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/emailservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/frontend  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/loadgenerator  desiredHealthy=0  currentHealthy=1  disruptionsAllowed=1
+      boutique/paymentservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/productcatalogservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/recommendationservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      boutique/redis-cart  desiredHealthy=1  currentHealthy=1  disruptionsAllowed=0
+      boutique/shippingservice  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      kube-system/coredns  desiredHealthy=1  currentHealthy=1  disruptionsAllowed=0
+      kube-system/ebs-csi-controller  desiredHealthy=0  currentHealthy=1  disruptionsAllowed=1
+      kube-system/local-path-provisioner  desiredHealthy=1  currentHealthy=1  disruptionsAllowed=0
+      kube-system/metrics-server  desiredHealthy=1  currentHealthy=1  disruptionsAllowed=0
+      observability/opentelemetrycollector  desiredHealthy=1  currentHealthy=2  disruptionsAllowed=1
+      traefik/traefik  desiredHealthy=1  currentHealthy=4  disruptionsAllowed=3
+    4 PDB(s) allow no voluntary disruption: a drain of those nodes is blocked until replicas come back
+  WARN
+
+== autoscaling: HPAs are at or above minReplicas
+    10 HorizontalPodAutoscalers
+      boutique/adservice  target=null/null  2/2 (min 2, max 2)
+      boutique/cartservice  target=null/null  2/2 (min 2, max 3)
+      boutique/checkoutservice  target=null/null  2/2 (min 2, max 3)
+      boutique/currencyservice  target=null/null  2/2 (min 2, max 3)
+      boutique/emailservice  target=null/null  2/2 (min 2, max 2)
+      boutique/frontend  target=null/null  2/2 (min 2, max 5)
+      boutique/paymentservice  target=null/null  2/2 (min 2, max 2)
+      boutique/productcatalogservice  target=null/null  2/2 (min 2, max 3)
+      boutique/recommendationservice  target=null/null  2/2 (min 2, max 2)
+      boutique/shippingservice  target=null/null  2/2 (min 2, max 2)
+    5 HPA(s) at maxReplicas: headroom exhausted, scaling further needs a change
+  WARN
+
+== storage: every PVC is Bound
+    6 PVCs, 0 not Bound
+      ci/ci  Bound  pvc-2d1cf44d-329a-455b-a63d-e44921e91597
+      observability/alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0  Bound  pvc-09943c6b-e867-4de2-b087-4a9c5f01eafe
+      observability/kube-prometheus-stack-grafana  Bound  pvc-a66edabe-e7e8-49d2-9ba9-9dcb4608e7ee
+      observability/prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0  Bound  pvc-b1007b42-de3e-4abb-a8d7-bd18ec734255
+      observability/storage-loki-0  Bound  pvc-75aa8498-04c1-4a61-b415-e9651c5310b6
+      observability/storage-tempo-0  Bound  pvc-3355bb99-bc4d-41ad-88b9-1ec82619ecf5
+  PASS
+
+== certificates: client and serving, in days
+    kubeconfig client certificate: expires Oct 15 05:40:40 2027 GMT (362 days)
+    apiserver serving certificate: expires Oct 15 05:42:13 2027 GMT (362 days)
+  PASS
+
+== scrape targets: every active Prometheus target is up
+    40 active targets
+  PASS
+
+== alerts: nothing at severity page or critical is firing
+      1       warning  KubeMemoryOvercommit  
+      1       warning  KubeMemoryQuotaOvercommit  
+    only ticket/warning/info alerts are firing
+  WARN
+
+===============================================
+  PASS: 8   WARN: 4   FAIL: 0
+===============================================
+
+VERDICT: PASS -- 8 checks green, 4 warning(s), cluster healthy
+         (the warnings above are advisory: none of them blocks traffic)
+exit=0
