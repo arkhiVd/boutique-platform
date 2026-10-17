@@ -283,6 +283,19 @@ if need conftest conftest && [[ -d policy ]]; then
       ' _ "$f"
     done < <(find policy/tests/should-fail -name '*.yaml' | sort)
   fi
+  # Cross-document rules (an HPA against its quota, a Deployment against its
+  # HPA) only evaluate under --combine, so their fixtures are run that way. A
+  # fixture here passes in single-document mode by construction.
+  if [[ -d policy/tests/should-fail-combined ]]; then
+    while IFS= read -r f; do
+      # shellcheck disable=SC2016
+      check_show "conftest --combine rejects $f" -- bash -c '
+        out="$(conftest test "$1" -p policy/ --combine 2>&1)"; rc=$?
+        printf "%s\n" "$out"
+        [[ $rc -eq 1 ]]
+      ' _ "$f"
+    done < <(find policy/tests/should-fail-combined -name '*.yaml' | sort)
+  fi
 fi
 
 cyan "== helm =="

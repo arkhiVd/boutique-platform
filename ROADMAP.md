@@ -364,7 +364,7 @@ tail latency — bounded explicitly.
 - [ ] A checkout request produces a trace spanning `frontend → checkoutservice → paymentservice`
       in Tempo, retrievable by trace ID — proven by a pasted Tempo API query
 - [ ] The Tempo service graph renders dependencies — screenshot
-- [ ] Red metrics (`traces_spanmetrics_*`) appear in Prometheus from the collector's
+- [ ] Red metrics (`traces_span_metrics_*`) appear in Prometheus from the collector's
       spanmetrics connector, and error spans are counted — pasted `promtool query instant`
 - [ ] An injected `EXTRA_LATENCY=3s` span appears as an outlier in the trace waterfall — screenshot
 - [ ] `adservice` spans exist (upstream has none) — proven by a trace query filtered to

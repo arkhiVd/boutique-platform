@@ -164,7 +164,10 @@ spec:
   # ADDED. cartservice fronts redis-cart on every page render and every cart
   # mutation; upstream gives it 200m CPU, three times what the Go services
   # request, so the wider band tracks that weight.
-  maxReplicas: 6
+  # Bounded by the boutique ResourceQuota, not by taste: the HPA budget table in
+  # apps/boutique/quota.yaml sums every maxReplicas against the quota, and
+  # policy rule deny_hpa_ceiling_exceeds_quota fails the gate if they stop fitting.
+  maxReplicas: 3
   metrics:
   # ADDED, and not decoration: autoscaling/v2 removed
   # spec.targetCPUUtilizationPercentage. The API server still accepts it as a

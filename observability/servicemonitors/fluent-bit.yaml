@@ -15,8 +15,8 @@
 # platform's answer to "are the Boutique logs being delivered" is silence — the
 # loudest possible failure of a log pipeline to report itself.
 #
-# Metrics Fluent Bit exposes at 2020/metrics (from its own Prometheus endpoint,
-# https://docs.fluentbit.io/manual/monitoring/metrics):
+# Metrics Fluent Bit exposes at 2020/api/v2/metrics/prometheus (its own
+# Prometheus endpoint, https://docs.fluentbit.io/manual/monitoring/metrics):
 #
 #   fluentbit_input_records_total            {name, tag}
 #   fluentbit_filter_drop_records_total      {name, plugin_id}
@@ -87,6 +87,10 @@ spec:
     # monitor survive both. `http` is 2020 today because `metricsPort: 2020`
     # in observability/fluent-bit/values.yaml.
     - port: http
-      path: /metrics
+      # Fluent Bit has no /metrics: it answers 404 there, which left all four
+      # targets DOWN from the day this monitor was first applied (2026-10-17).
+      # v2 is the cmetrics endpoint; v1 is the legacy one and adds explicit
+      # sample timestamps, which Prometheus would then honour over scrape time.
+      path: /api/v2/metrics/prometheus
       interval: 60s
       scrapeTimeout: 20s

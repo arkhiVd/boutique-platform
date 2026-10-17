@@ -178,7 +178,11 @@ spec:
   # ADDED. shippingservice computes a shipping quote and tracks shipments; it is
   # called on every page render that shows a delivery estimate, so it gets a
   # narrower band than the frontend but the same floor.
-  maxReplicas: 4
+  # Bounded by the boutique ResourceQuota, not by taste: the HPA budget table in
+  # apps/boutique/quota.yaml sums every maxReplicas against the quota, and
+  # policy rule deny_hpa_ceiling_exceeds_quota fails the gate if they stop fitting.
+  # Pinned at min: the quota's scale-out headroom goes to the request path first.
+  maxReplicas: 2
   metrics:
   # ADDED, and not decoration: autoscaling/v2 removed
   # spec.targetCPUUtilizationPercentage. The API server still accepts it as a

@@ -29,6 +29,24 @@ spec:
       protocol: TCP
     - port: 4318
       protocol: TCP
+  # From Prometheus only, on the two metrics listeners: 9464 serves the
+  # spanmetrics connector's traces_span_metrics_* and 8888 the collector's own
+  # otelcol_* counters. Without this rule the ServiceMonitor's scrapes were
+  # dropped here, so the span-derived signals and TracesSpanmetricsMissing
+  # could never resolve (found 2026-10-17: the apiserver proxy got a 502 dialing
+  # :9464 while a port-forward read 44 call series off the same port).
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: observability
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    ports:
+    - port: 9464
+      protocol: TCP
+    - port: 8888
+      protocol: TCP
   egress:
   # DNS, for the collector's own name resolution.
   - to:

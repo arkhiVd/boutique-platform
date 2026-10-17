@@ -25,7 +25,7 @@
 #
 # SPANMETRICS LIVES IN THE COLLECTOR, NOT HERE — the one duplication decision,
 # stated once so it cannot drift:
-#   - `traces_spanmetrics_*` (RED metrics per service) are produced by the
+#   - `traces_span_metrics_*` (RED metrics per service) are produced by the
 #     spanmetrics CONNECTOR in apps/boutique/observability/, fed from a
 #     pre-sampling pipeline so the rates are true rates. That file owns it.
 #   - Tempo's metrics generator below runs ONLY the `service-graphs` processor:
