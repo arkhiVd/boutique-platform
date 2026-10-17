@@ -20,12 +20,24 @@ jobs:
   security:
     name: secret scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # Full history: gitleaks scans the PR's commit range, base..head.
+          fetch-depth: 0
       - name: gitleaks
         uses: gitleaks/gitleaks-action@1371ffca5405c3aff0215e23384577a3d7d60e73 # v2.0.4
+        # v2 refuses to scan a pull_request event without a token: it lists the
+        # PR's commits through the API. Without this every PR failed the scan
+        # before reading a single line (found on PR #3, 2026-10-17). Comments
+        # are off so the read-only job token is all the action ever needs.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
   terraform:
     name: terraform plan
