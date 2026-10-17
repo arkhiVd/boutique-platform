@@ -10,6 +10,13 @@ locals {
   node_role_name        = "boutique-platform-node"
   node_instance_profile = "boutique-platform-node"
   github_repository     = "arkhiVd/boutique-platform"
+  # The repository opted into GitHub's immutable OIDC subject, which names the
+  # owner and repo by id as well as by name. A trust policy written only for
+  # the legacy `repo:owner/name:` form matches no token at all, and that is why
+  # the plan gate could never assume its role (found 2026-10-17 from
+  # GET /repos/{repo}/actions/oidc/customization/sub). Both forms are trusted:
+  # the ids pin this exact repository even across a rename.
+  github_repository_immutable = "arkhiVd@95763443/boutique-platform@1410757654"
 
   github_oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github_actions[0].arn : var.existing_oidc_provider_arn
 }
@@ -142,7 +149,10 @@ data "aws_iam_policy_document" "github_actions_assume" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.github_repository}:environment:*"]
+      values = [
+        "repo:${local.github_repository}:environment:*",
+        "repo:${local.github_repository_immutable}:environment:*",
+      ]
     }
   }
 }
@@ -210,10 +220,97 @@ data "aws_iam_policy_document" "plan_readonly" {
     actions = [
       "iam:GetRole",
       "iam:GetRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+      "iam:GetInstanceProfile",
+      "iam:ListInstanceProfilesForRole",
     ]
     # The plan gate diffs the platform stack, whose only role is the node role.
     # Scoped rather than `*` so the role cannot read the account's other roles.
-    resources = ["arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/boutique-platform-*"]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/boutique-platform-*",
+      "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:instance-profile/boutique-platform-*",
+    ]
+  }
+
+  # Everything below is what a refresh of platform/ reads, resource type by
+  # resource type as `terraform state list` shows them on 2026-10-17. Before
+  # this the policy covered EC2, ELB and two IAM reads only, so a plan would
+  # have stopped at the first S3 bucket even once the role could be assumed.
+  #
+  # kms:Decrypt is deliberately absent. The k3s join token is a SecureString
+  # written with value_wo, so a refresh needs its metadata, never its value,
+  # and without Decrypt this role cannot read it even by asking.
+  statement {
+    sid    = "PlanReadsProjectBuckets"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucket*",
+      "s3:GetAccelerateConfiguration",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:ListBucket",
+    ]
+    # Bucket-level configuration only: no s3:GetObject, so ALB logs and etcd
+    # snapshots stay unreadable to the plan gate.
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::boutique-platform-*"]
+  }
+
+  statement {
+    sid    = "PlanReadsProjectParameters"
+    effect = "Allow"
+    actions = [
+      "ssm:GetParameter",
+      "ssm:GetParameters",
+      "ssm:ListTagsForResource",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/boutique-platform/*",
+      # The AL2023 AMI id the launch template resolves through a public parameter.
+      "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}::parameter/aws/service/*",
+    ]
+  }
+
+  statement {
+    sid    = "PlanReadsEdgeAndKeys"
+    effect = "Allow"
+    actions = [
+      "ssm:DescribeParameters",
+      "kms:DescribeKey",
+      "kms:GetKeyPolicy",
+      "kms:GetKeyRotationStatus",
+      "kms:ListAliases",
+      "kms:ListResourceTags",
+      "wafv2:GetWebACL",
+      "wafv2:GetWebACLForResource",
+      "wafv2:GetLoggingConfiguration",
+      "wafv2:ListResourcesForWebACL",
+      "wafv2:ListTagsForResource",
+      "logs:DescribeLogGroups",
+      "logs:DescribeResourcePolicies",
+      "logs:ListTagsForResource",
+      "logs:ListTagsLogGroup",
+    ]
+    # checkov:skip=CKV_AWS_356:DescribeParameters, ListAliases and
+    # DescribeResourcePolicies accept no resource ARN, and the KMS, WAF and log
+    # reads are metadata only. Pinned to the account's one region below.
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
+
+  # The node role's one managed attachment is AmazonSSMManagedInstanceCore, and
+  # a refresh reads its default version. AWS-managed policies only.
+  statement {
+    sid       = "PlanReadsManagedPolicies"
+    effect    = "Allow"
+    actions   = ["iam:GetPolicy", "iam:GetPolicyVersion"]
+    resources = ["arn:${data.aws_partition.current.partition}:iam::aws:policy/*"]
   }
 
   statement {
