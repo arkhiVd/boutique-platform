@@ -72,6 +72,9 @@ node_ram()  {
   case "$1" in
     t2.micro|t3.micro) printf '1' ;; t2.small|t3.small) printf '2' ;;
     t3.medium) printf '4' ;; t3.large) printf '8' ;;
+    # Missing until 2026-10-18, so the running shape printed as 6 GiB and the
+    # leader as 0 GiB. DescribeInstanceTypes: 4096 MiB and 8192 MiB.
+    c7i-flex.large) printf '4' ;; m7i-flex.large) printf '8' ;;
   esac
 }
 

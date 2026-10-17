@@ -99,7 +99,7 @@ Gathered before any design decision, from the account itself (`348032171026`, `u
 ```
                  ┌───────────────────────── AWS (us-east-1) ──────────────────────────┐
                  │                                                                   │
-  operator ──SSM─┤─► k3s server a (t3.small) ─┐                                        │
+  operator ──SSM─┤─► k3s server a (c7i-flex.large) ─┐                                 │
                  │   k3s server b (t3.small) ─┼─► etcd quorum of 3, one per AZ (HA)   │
                  │   k3s server c (t3.small) ─┘                                        │
                  │                                                                   │
@@ -220,14 +220,18 @@ Budget: the remaining Free-plan window (43 days) must stay inside the $200 credi
 
 | Design line | Monthly | Remaining window (≈1.42 mo) |
 |---|---|---|
-| 4 × `t3.small` nodes, 3 servers + 1 worker (2920 h × $0.0208, 750 pooled free) | $45.14 | $64.25 |
-| 4 × 16 GiB `gp3` (64 − 30 free) | $2.72 | $3.88 |
-| ALB + ~2 LCU | $28.11 | $40.00 |
-| Logs / snapshots / egress | $6.60 | $9.40 |
-| **Total** | **≈$82.56** | **≈$117** (58% of the $200 credit) |
-| Without the ALB | ≈$54.45 | ≈$77 (39%) |
+| 1 × `c7i-flex.large` leader (730 h, no free hours) | $61.90 | $87.56 |
+| 3 × `t3.small`, 2 followers + 1 agent (2190 h, 750 pooled free) | $29.95 | $42.37 |
+| 4 × 16 GiB `gp3` (64 − 30 free) | $2.72 | $3.85 |
+| ALB + ~2 LCU | $28.11 | $39.76 |
+| Logs / snapshots / egress | $6.60 | $9.34 |
+| **Total** | **≈$129.27** | **≈$183** (91% of the $200 credit) |
 
-Recomputed 2026-10-14 for the shape that actually launched. The original table read
+Recomputed 2026-10-18 by `scripts/cost-estimate.sh` for the running shape: 8 vCPU (the
+whole quota) and 10 GiB. On 2026-10-15 the leader moved from `t3.small` to
+`c7i-flex.large` (user-approved): it is the bootstrap node and the first etcd member,
+and as a burstable 2 GB node it wedged under sustained load. Before that, the table
+read four `t3.small` at ≈$82.56. The original table read
 `3 × t3.small + 1 × t3.medium` = $97.74; that shape cannot launch here (see decision 1), and
 four equal `t3.small` is $15.18/month cheaper as well as legal.
 

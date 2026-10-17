@@ -66,9 +66,16 @@ account returns to $0.
 scripts/cost-estimate.sh
 ```
 
-Every destructive and cost-bearing action has a tested rollback path, and `destroy.yml` requires
-a typed confirmation plus a GitHub environment approval.
+Teardown is `scripts/teardown.sh`: with no arguments it only inventories what would be
+destroyed; it destroys only with `--confirm "destroy boutique-platform"`. It deletes the PVCs
+while the cluster can still reclaim their EBS volumes (Terraform does not know about them),
+empties every bucket version, destroys `platform/` and then `bootstrap/`, and lists anything
+still tagged `Project=boutique-platform`. It is a script and not a workflow on purpose: the CI
+roles create and update; a destroy needs deletes on KMS, WAF, IAM and every bucket.
 
 ## Status
 
-Wave A, Phase 0. See [`PROGRESS.md`](PROGRESS.md).
+Phases 0–13 applied and verified live; Phase 14 (release gate and teardown) in progress.
+Results in [`PROGRESS.md`](PROGRESS.md), proof per exit criterion in
+[`docs/evidence/README.md`](docs/evidence/README.md), operations in
+[`docs/runbooks/`](docs/runbooks/README.md), and `scripts/doctor.sh` for the current verdict.
