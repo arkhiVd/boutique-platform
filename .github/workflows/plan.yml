@@ -163,7 +163,13 @@ jobs:
           TF_VAR_alert_email: ${{ secrets.TF_VAR_ALERT_EMAIL }}
         # -lock=false: the role is read-only by design and cannot write the S3
         # lock object. A plan that never applies has nothing to protect.
-        run: terraform plan -input=false -no-color -lock=false -out=tfplan
+        #
+        # -refresh=false: refreshing the k3s token parameter makes the provider
+        # decrypt it, and the PR gate must not hold a key that reads the cluster
+        # join token. The plan still diffs every config change against state and
+        # still reads every data source (the AMI drift shows here); live drift
+        # outside Terraform is what doctor.sh and a local refresh are for.
+        run: terraform plan -input=false -no-color -lock=false -refresh=false -out=tfplan
 
       - name: checkov (IaC scan)
         if: github.actor != 'dependabot[bot]'
