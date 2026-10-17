@@ -722,6 +722,14 @@ resource "aws_instance" "k3s_server" {
       # bootstrap edit reaching a RUNNING node is a documented `-replace`,
       # never an in-place stop.
       user_data,
+      # The AMI comes from AWS's floating AL2023 parameter, so every new image
+      # AWS publishes made the next plan ForceNew all four nodes AT ONCE --
+      # every etcd member in one apply (measured 2026-10-17: 12 add / 12
+      # destroy for an AMI bump nobody asked for). The launch templates still
+      # track the parameter, so a node replaced on purpose, one at a time with
+      # `terraform apply -replace`, boots the current image. Rotation is a
+      # drain-and-replace procedure, never a side effect of an unrelated apply.
+      ami,
       tags["node.kubernetes.io/instance-type"],
       tags["kubernetes.io/cluster/boutique-platform"],
       tags_all,
@@ -826,6 +834,8 @@ resource "aws_instance" "k3s_worker" {
       # it is state noise whose "fix" is a needless stop/start. See the
       # matching comment on the server instances.
       user_data,
+      # Floating AL2023 AMI: see the matching comment on the server instances.
+      ami,
     ]
   }
 
