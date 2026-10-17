@@ -177,10 +177,12 @@ spec:
         # load instead of the kubelet killing the pod — which is the control that
         # makes the number survivable rather than optimistic. CPU stays at 100m:
         # the added work is aggregation and a second batcher, both amortised.
+        # Request 128Mi (was 192Mi): working set 81Mi (measured 2026-10-17 with the shop under its load generator).
+        # The memory_limiter keys off the 384Mi LIMIT, which is unchanged.
         resources:
           requests:
             cpu: 100m
-            memory: 192Mi
+            memory: 128Mi
           limits:
             cpu: 100m
             memory: 384Mi

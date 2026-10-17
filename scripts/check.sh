@@ -483,7 +483,7 @@ if need python3 python3 && [[ -d observability ]]; then
       python3 scripts/resource-budget.py --node-count 1 \
       --config-reloader 10m/16Mi \
       --accept-over-commit 250 \
-      --extra ci:jenkins-controller:120m:576Mi \
+      --extra ci:jenkins-controller:120m:1088Mi \
       "$TMP_RENDER"/*.yaml
   else
 

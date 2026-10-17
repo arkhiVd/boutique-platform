@@ -122,12 +122,14 @@ than quoted from the chart default:
 ```bash
 helm template ci ci/jenkins -n ci        # the pod has four containers
 #   init                 cpu=50m   mem=256Mi   (installing-plugins)
-#   jenkins              cpu=50m   mem=256Mi
+#   jenkins              cpu=50m   mem=768Mi   (measured working set, 2026-10-17)
 #   config-reload        cpu=10m   mem=32Mi    (JCasC hot reload)
 #   config-reload-init   cpu=10m   mem=32Mi
 ```
 
-= **120m / 576 MiB of requests** → `--extra ci:jenkins-controller:120m:576Mi`.
+= **120m / 1088 MiB of requests** → `--extra ci:jenkins-controller:120m:1088Mi`.
+(576 MiB until 2026-10-17, when the jenkins container's 256 MiB request was
+raised to the 698 MiB an idle controller actually holds; see ci/jenkins/values.yaml.)
 
 Both numbers differ from the upstream default (100m / 512 MiB — `jenkins` and
 `init` carry requests there, the chart's two config-reload containers carry

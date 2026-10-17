@@ -109,21 +109,27 @@ jenkins:
     # 4Gi memory limit on a node with 3741Mi schedulable is a container that can
     # evict the observability tier by being busy for a minute.
     #
+    # The jenkins MEMORY request is the measured working set, not the chart's
+    # 256Mi: an idle controller holds 698Mi (2026-10-17). Requesting 256Mi told
+    # the scheduler the leader -- the only node its local-path volume allows --
+    # had 440Mi it did not have, so it kept packing the leader until its page
+    # cache thrashed (I/O pressure "full" at 25%) and pods failed their probes.
+    #
     #   container          request        limit
-    #   jenkins            50m / 256Mi    750m / 1024Mi
+    #   jenkins            50m / 768Mi    750m / 1024Mi
     #   init               50m / 256Mi    250m / 512Mi
     #   config-reload-init 10m / 32Mi     50m / 64Mi
     #   config-reload      10m / 32Mi     50m / 64Mi
     #   ------------------------------------------------
-    #   controller pod    120m / 576Mi   1100m / 1664Mi
+    #   controller pod    120m / 1088Mi  1100m / 1664Mi
     #
-    # 120m/576Mi is the number scripts/check.sh passes as
-    # `--extra ci:jenkins-controller:120m:576Mi` and the number
+    # 120m/1088Mi is the number scripts/check.sh passes as
+    # `--extra ci:jenkins-controller:120m:1088Mi` and the number
     # docs/resource-budget.md §4 renders.
     resources:
       requests:
         cpu: "50m"
-        memory: "256Mi"
+        memory: "768Mi"
       limits:
         cpu: "750m"
         memory: "1024Mi"

@@ -122,9 +122,12 @@ spec:
             # CHANGED (upstream limits 200m→100m): see base/frontend.yaml.
             # recommendationservice is upstream's memory outlier by design
             # (220Mi request / 450Mi limit) because it keeps a recommendation
-            # cache in-process; both memory numbers are upstream's and untouched.
+            # cache in-process. CHANGED: request 220Mi -> 96Mi, the working set
+            # being 35Mi (measured 2026-10-17 with the shop under its load generator); the cluster's memory
+            # requests were full while its memory was not. The 450Mi limit is
+            # upstream's and untouched, so the cache keeps its ceiling.
             cpu: 100m
-            memory: 220Mi
+            memory: 96Mi
           limits:
             cpu: 100m
             memory: 450Mi

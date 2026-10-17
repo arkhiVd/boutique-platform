@@ -586,10 +586,14 @@ kube-prometheus-stack:
     ## measured boot RSS, which is the smallest number that leaves headroom for
     ## the startup spike rather than for steady state. The 300m CPU limit is
     ## unchanged, so a dashboard that needs 200m still gets it when idle.
+    ## Request = the measured working set (about 300Mi, 2026-10-17), not the
+    ## boot RSS: Grafana's volume pins it to the leader, and an understated
+    ## request is how the leader got packed until it thrashed (ci/jenkins/values.yaml
+    ## has the measurement).
     resources:
       requests:
         cpu: 25m
-        memory: 128Mi
+        memory: 320Mi
       limits:
         cpu: 300m
         memory: 512Mi
