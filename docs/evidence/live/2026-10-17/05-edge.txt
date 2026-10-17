@@ -1,0 +1,43 @@
+# Phase 5: http redirects to https
+# 2026-10-17T23:15:00Z
+$ curl -s -o /dev/null -w %{http_code} -> %{redirect_url}\n http://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/
+301 -> https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com:443/
+exit=0
+
+# Phase 5: the shop through the ALB
+# 2026-10-17T23:15:01Z
+$ code https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/ boutique.local
+200 https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/
+exit=0
+
+# Phase 5: Grafana host route, same ALB
+# 2026-10-17T23:15:03Z
+$ code https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/login grafana.boutique.local
+200 https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/login
+exit=0
+
+# Phase 5: Jenkins host route, same ALB
+# 2026-10-17T23:15:04Z
+$ code https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/login jenkins.boutique.local
+200 https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/login
+exit=0
+
+# Phase 5: SQL injection probe (Web ACL is in COUNT mode: 200 expected, the match is logged)
+# 2026-10-17T23:15:05Z
+$ code https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/?id=1'%20OR%20'1'='1 boutique.local
+200 https://boutique-platform-edge-1943772568.us-east-1.elb.amazonaws.com/?id=1'%20OR%20'1'='1
+exit=0
+
+# Phase 5: Web ACL action
+# 2026-10-17T23:15:07Z
+$ terraform -chdir=platform output -raw waf_action
+countexit=0
+
+# Phase 5: ALB access log objects written in the last hour
+# 2026-10-17T23:15:19Z
+$ bash -c aws s3 ls --recursive "s3://$(aws elbv2 describe-load-balancer-attributes --load-balancer-arn arn:aws:elasticloadbalancing:us-east-1:348032171026:loadbalancer/app/boutique-platform-edge/ab35efc1c38a9a3c --query "Attributes[?Key=='access_logs.s3.bucket'].Value" --output text)/" | awk -v t="$(date -u -d '-1 hour' '+%F %T')" '$1" "$2 >= t' | tail -3
+2026-10-18 04:45:05        463 AWSLogs/348032171026/elasticloadbalancing/us-east-1/2026/10/17/348032171026_elasticloadbalancing_us-east-1_app.boutique-platform-edge.ab35efc1c38a9a3c_20261017T2315Z_100.56.64.197_407l1wgb.log.gz
+2026-10-18 04:45:11       2223 AWSLogs/348032171026/elasticloadbalancing/us-east-1/2026/10/17/348032171026_elasticloadbalancing_us-east-1_app.boutique-platform-edge.ab35efc1c38a9a3c_20261017T2315Z_44.218.177.207_10ymil4f.log.gz
+2026-10-18 04:45:03       1196 AWSLogs/348032171026/elasticloadbalancing/us-east-1/2026/10/17/348032171026_elasticloadbalancing_us-east-1_app.boutique-platform-edge.ab35efc1c38a9a3c_20261017T2315Z_98.94.137.30_7gqz339a.log.gz
+exit=0
+

@@ -1,6 +1,10 @@
 # Runbook — the traces layer (Phase 11)
 
-**Last verified: 2026-10-14** — verified against the sources and the rendered
+**Last verified: 2026-10-17** — every fenced command below was executed by
+`scripts/check-runbooks.py` against the live cluster: reads run for real, writes as
+server-side dry-runs, `terraform apply` recognised and never run (output in
+`docs/evidence/phase-13/runbook-check.txt`).
+Before that (2026-10-14) it was verified against the sources and the rendered
 manifests (grafana/tempo@v2.9.0 for metric names and API paths,
 otelcol-contrib v0.160.0 for the connector's config schema), not against a
 live cluster: Phase 11 is manifest-and-config work, and the apply is still
@@ -31,7 +35,8 @@ Grafana: Tempo datasource (uid `tempo`), serviceMap -> Prometheus (uid `promethe
 ## Diagnostic entry point
 
 ```bash
-export KUBECONFIG=~/.kube/boutique-prod.yaml
+# KUBECONFIG is the SSM-tunnelled one (platform/README.md): the API is not
+# reachable from outside the VPC any other way.
 
 # Is every part of the path present, and Ready?
 kubectl get pods -n observability -o wide | grep -E 'tempo|opentelemetrycollector'
@@ -84,6 +89,11 @@ nothing.
 **Diagnose — work down the path, one hop at a time:**
 
 ```bash
+# The two forwards this section reads through (skip a line if the
+# entry-point forward above is still running in this shell).
+kubectl -n observability port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+kubectl -n observability port-forward svc/tempo 3200:3200 &
+
 # (a) Is the collector accepting spans at all? If this is flat, the problem is
 # upstream of the traces layer (the app's OTLP wiring), not in Tempo.
 promtool query instant http://localhost:9090 \
@@ -119,7 +129,9 @@ curl -sG http://localhost:3200/api/search \
   --data-urlencode 'limit=5' | python3 -m json.tool
 
 # Take a trace ID from the search result and fetch the full trace:
-TRACE_ID='<one from the search result>'
+TRACE_ID="$(curl -sG http://localhost:3200/api/search \
+  --data-urlencode 'q={ resource.service.name = "checkoutservice" }' \
+  --data-urlencode 'limit=1' | jq -r '.traces[0].traceID')"
 curl -s "http://localhost:3200/api/traces/${TRACE_ID}" \
   | python3 -m json.tool | head -60
 ```
@@ -153,6 +165,9 @@ is specifically the metrics half.
 **Diagnose:**
 
 ```bash
+# Prometheus through a port-forward (skip if one is already running here):
+kubectl -n observability port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+
 # (a) The alert's own expression. Empty result = the condition is true.
 promtool query instant http://localhost:9090 \
   'absent(traces_span_metrics_calls_total{service_name="frontend", span_kind="SPAN_KIND_SERVER"})'
@@ -186,9 +201,11 @@ kubectl -n observability logs deploy/opentelemetrycollector -c otel-gateway --ta
 | (c) non-zero, (a) still absent | Prometheus is not ingesting the scrape | check the ServiceMonitor's `release: kube-prometheus-stack` label — without it the operator's selector drops it silently |
 | collector CrashLoop on start | the connector config was rejected by the binary | `kubectl -n observability logs` shows the field path; validate locally before re-applying: `otelcol-contrib validate --config apps/boutique/observability/opentelemetrycollector.yaml` after extracting the ConfigMap's `collector-gateway-config.yaml` key |
 
-**Known-good local check (no cluster):**
+**Known-good local check (no cluster):** a 110 MB download, so
+`scripts/check-runbooks.py` syntax-checks this block (`bash manual`) and proves
+the release URL exists rather than fetching it on every run.
 
-```bash
+```bash manual
 kubectl -n observability get configmap collector-gateway-config \
   -o jsonpath='{.data.collector-gateway-config\.yaml}' > /tmp/collector.yaml
 # on the operator machine, with the pinned binary:
@@ -213,6 +230,9 @@ grew or compaction stopped.
 **Diagnose:**
 
 ```bash
+# Prometheus through a port-forward (skip if one is already running here):
+kubectl -n observability port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
+
 # (a) How full is it, exactly? (the alert's own expression)
 promtool query instant http://localhost:9090 \
   'kubelet_volume_stats_used_bytes{persistentvolumeclaim=~"storage-tempo-.*"}
@@ -262,7 +282,9 @@ reversible without restoring from a snapshot; take one before step 2:
 ```bash
 # on a node, via SSM, or from the operator machine with the cluster's volume
 # snapshot class configured (Phase 13 owns the snapshot runbook)
-aws ec2 create-snapshot --volume-id <vol-...> --description "tempo pre-expansion $(date -u +%F)"
+PV="$(kubectl -n observability get pvc storage-tempo-0 -o jsonpath='{.spec.volumeName}')"
+VOLUME_ID="$(kubectl get pv "$PV" -o jsonpath='{.spec.csi.volumeHandle}')"
+aws ec2 create-snapshot --volume-id "$VOLUME_ID" --description "tempo pre-expansion $(date -u +%F)"
 ```
 
 ---

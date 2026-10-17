@@ -1,7 +1,10 @@
 # Runbook: find the failing checkout
 
-**Last verified: 2026-10-09** — verified against the *sources*, not against a
-cluster. Every log format and every field name below was read from the vendored
+**Last verified: 2026-10-17** — every fenced command below was executed by
+`scripts/check-runbooks.py` against the live cluster: reads run for real, writes as
+server-side dry-runs, `terraform apply` recognised and never run (output in
+`docs/evidence/phase-13/runbook-check.txt`).
+The log formats were first (2026-10-09) verified against the *sources*. Every log format and every field name below was read from the vendored
 upstream Online Boutique `v0.10.7` source and confirmed by running the formatters
 (see `observability/fluent-bit/boutique-parsers.yaml` for the evidence). The
 queries have NOT been executed against a live Loki instance, because no cluster
@@ -185,8 +188,9 @@ does not produce spans at all.
 ## The queries to run against a live Loki
 
 ```bash
-# From the Phase 5 edge host or through the grafana host route's Explore:
-export LOKI=http://loki.observability.svc.cluster.local:3100
+# Loki's API through a port-forward (the Service is cluster-internal):
+kubectl -n observability port-forward svc/loki 3100:3100 &
+export LOKI=http://localhost:3100
 
 # Every ERROR line in the boutique namespace, last hour:
 curl -sG "$LOKI/loki/api/v1/query_range" \
@@ -194,9 +198,13 @@ curl -sG "$LOKI/loki/api/v1/query_range" \
   --data-urlencode 'limit=100' \
   --data-urlencode 'since=1h' | jq '.data.result[].values'
 
-# The three critical services, by request ID:
+# The three critical services, by request ID (from step 1 above):
+REQUEST_ID="$(curl -sG "$LOKI/loki/api/v1/query_range" \
+  --data-urlencode 'query={namespace="boutique", app="frontend"} | json | request_id!=""' \
+  --data-urlencode 'limit=1' --data-urlencode 'since=1h' \
+  | jq -r '.data.result[0].stream.request_id // empty')"
 curl -sG "$LOKI/loki/api/v1/query_range" \
-  --data-urlencode 'query={namespace="boutique", app=~"frontend|checkoutservice|paymentservice"} | json | message=~".*<REQUEST_ID>.*"' \
+  --data-urlencode 'query={namespace="boutique", app=~"frontend|checkoutservice|paymentservice"} | json | message=~".*'"$REQUEST_ID"'.*"' \
   --data-urlencode 'limit=100' \
   --data-urlencode 'since=1h' | jq -r '.data.result[].values[]'
 

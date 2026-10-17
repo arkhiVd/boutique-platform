@@ -1,0 +1,31 @@
+# Phase 10: productcatalogservice lines retrievable from Loki (last 24h; it logs only at startup)
+# 2026-10-17T23:15:43Z
+$ lokiq {namespace="boutique", app="productcatalogservice"} 3 24h
+productcatalogservice {"time":"2026-10-17T19:24:54.332263626Z","message":"successfully parsed product catalog json","stream":"stdout","_p":"F","severity":"info","timestamp":"2026-10-
+productcatalogservice {"time":"2026-10-17T19:24:54.295319475Z","message":"loading catalog from local products.json file...","stream":"stdout","_p":"F","severity":"info","timestamp":"
+productcatalogservice {"time":"2026-10-17T19:24:54.269253886Z","message":"starting grpc server at :3550","stream":"stdout","_p":"F","severity":"info","timestamp":"2026-10-17T19:24:54
+exit=0
+
+# Phase 10: lines per app over 24h (every service ships)
+# 2026-10-17T23:15:44Z
+$ bash -c kubectl get --raw '/api/v1/namespaces/observability/services/loki:3100/proxy/loki/api/v1/query?query=sum%20by%20%28app%29%20%28count_over_time%28%7Bnamespace%3D%22boutique%22%7D%5B24h%5D%29%29' | jq -r '.data.result[] | "\(.metric.app) \(.value[1])"'
+adservice 114689
+cartservice 227387
+checkoutservice 21817
+currencyservice 607963
+emailservice 7273
+frontend 718936
+loadgenerator 717557
+paymentservice 15079
+productcatalogservice 8
+recommendationservice 143681
+redis-cart 1578
+shippingservice 115316
+exit=0
+
+# Phase 10: Loki label cardinality (series per label name)
+# 2026-10-17T23:16:05Z
+$ bash -c kubectl get --raw '/api/v1/namespaces/observability/services/loki:3100/proxy/loki/api/v1/labels' | jq -r '.data | length' | sed 's/^/label names: /'
+label names: 4
+exit=0
+

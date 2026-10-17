@@ -1,0 +1,32 @@
+$ scripts/etcd-restore-local.sh   # 2026-10-17T20:36:17Z
+== 1. newest snapshot in s3://boutique-platform-etcd-snapshots-348032171026/etcd-snapshots/
+    etcd-snapshots/on-demand-boutique-leader-i-01a7966000fabecf4-1792269007.zip  (3333891 bytes, written 2026-10-17T20:30:08+00:00)
+== 2. cluster token from SSM /boutique-platform/k3s/token (written 0600, never shown)
+    ok
+== 3. k3s --cluster-reset from the snapshot
+    k3s: Pre-restore etcd database moved to /var/lib/rancher/k3s/server/db/etcd-old-1792269393
+    k3s: Starting etcd for new cluster, cluster-reset=true
+    k3s: Shutdown request received: \
+== 4. k3s on the restored data (tainted: nothing schedules yet)
+    apiserver ready; restored objects:
+      boutique       deployments=12  statefulsets=0   services=11  configmaps=1
+      ci             deployments=0   statefulsets=1   services=2   configmaps=6
+      observability  deployments=5   statefulsets=4   services=15  configmaps=40
+      traefik        deployments=0   statefulsets=0   services=1   configmaps=1
+    nodes in the snapshot: boutique-agent-i-00cd39226a36dbac3 boutique-follower-i-043323974c30b6b52 boutique-follower-i-08c5be6e48a9185d2 boutique-leader-i-01a7966000fabecf4 
+== 5. remove what must not run off-cluster, and the dead nodes
+== 6. every boutique pod Ready on the restored node
+    21 of 21 boutique pods Ready on restore-drill
+== 7. the shop answers through the restored frontend
+    GET /            -> 200  (36 product cards)
+    GET /product/OLJCESPC7Z -> 200
+== timings (seconds)
+    download snapshot        8
+    cluster-reset           11
+    apiserver ready         12
+    off-cluster cleanup     48
+    boutique available     448
+    shop serving            28
+    TOTAL (RTO measured)   555
+PASS: snapshot etcd-snapshots/on-demand-boutique-leader-i-01a7966000fabecf4-1792269007.zip restored and served the shop in 555s
+exit=0

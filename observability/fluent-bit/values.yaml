@@ -466,6 +466,20 @@ fluent-bit:
   ## Flush every 5s. A 1s flush would produce six flushes a second of one batch
   #  each, and at 60 lines/s that is a Loki POST every second per node.
   flush: 5
+
+  ## Readiness on `/`, not the chart's `/api/v2/health`. The health endpoint
+  ## turns 500 once outputs have failed and STAYED 500 for 90 minutes after Loki
+  ## came back, while the pods were shipping logs again (2026-10-17: Loki's node
+  ## rebooted at 20:14). For a DaemonSet that no Service routes traffic to,
+  ## NotReady buys nothing and costs two things: a KubePodNotReady and a
+  ## KubeDaemonSetRolloutStuck that page about nothing, and -- worse -- the pod
+  ## drops out of the Service's endpoints, so Prometheus stops scraping it and
+  ## fluentbit_output_errors_total, the signal LokiRequestErrors is built on,
+  ## goes dark exactly when it matters. Output failure is the alert's job.
+  readinessProbe:
+    httpGet:
+      path: /
+      port: http
   logLevel: info
   metricsPort: 2020
 

@@ -1,9 +1,11 @@
 # Runbook — Jenkins (Phase 7 and 8)
 
-**Last verified: not yet — this phase has no cluster.** Every command below is one
-that will be run and its output pasted into `docs/evidence/` on the first deploy.
-Until then the commands are correct and untested; that state is the honest one.
-What *is* verified is everything that does not need a cluster: `helm lint
+**Last verified: 2026-10-17** — every fenced command below was executed by
+`scripts/check-runbooks.py` against the live cluster: reads run for real, writes as
+server-side dry-runs, `terraform apply` recognised and never run (output in
+`docs/evidence/phase-13/runbook-check.txt`).
+The Jenkins backup (`ci/backup/`) is not deployed yet (TASKS.md), so its commands
+are guarded and print nothing until it is. Also verified is everything that does not need a cluster: `helm lint
 --strict`, `helm template`, `kubeconform`, `conftest`, `shellcheck`, `actionlint`,
 `gitleaks` and `trivy config` all pass on this phase, and the Jenkinsfile's gates
 run those same commands in pinned containers.
@@ -24,14 +26,18 @@ kubectl -n ci get events --sort-by=.lastTimestamp | tail -30
 
 # Does the edge reach it? A 502 here with the pod Running means the route,
 # the port or the URL, not the controller.
-curl -sSI https://<jenkinsHost>/
+# The edge certificate is self-signed for the .local names
+# (scripts/tls/generate-selfsigned.sh), hence -k; the Host header picks the route.
+ALB="$(terraform -chdir=platform output -raw alb_dns_name)"
+curl -sSIk -H 'Host: jenkins.boutique.local' "https://$ALB/login" | head -1
 
 # Are agent pods appearing at all? (they are named agent-*)
 kubectl -n ci get pods | grep -c '^agent-'
 
 # The backup job's last attempt.
 kubectl -n ci get jobs,cronjob
-kubectl -n ci logs job/$(kubectl -n ci get jobs -o name | tail -1) 2>/dev/null
+LAST_JOB="$(kubectl -n ci get jobs -o name --ignore-not-found | tail -1)"
+[ -z "$LAST_JOB" ] || kubectl -n ci logs "$LAST_JOB" --tail=50
 ```
 
 ---
@@ -56,7 +62,9 @@ kubectl -n ci logs job/$(kubectl -n ci get jobs -o name | tail -1) 2>/dev/null
 
 ```bash
 kubectl -n ci describe pod -l app.kubernetes.io/component=jenkins-controller | tail -30
-kubectl -n ci get secret jenkins-admin jenkins-pipeline-credentials jenkins-backup-credentials
+kubectl -n ci get secret jenkins-admin jenkins-pipeline-credentials
+# Only once ci/backup/ is deployed (TASKS.md): empty output means "not yet".
+kubectl -n ci get secret jenkins-backup-credentials --ignore-not-found
 kubectl get storageclass
 ```
 
@@ -134,8 +142,11 @@ for exactly this reason), or `DOCKER_TLS_CERTDIR` came back non-empty, in which
 case dockerd listens on 2376 and `DOCKER_HOST` still points at 2375.
 
 ```bash
-kubectl -n ci get pod agent-xxxx -o yaml | grep -A2 DOCKER_
-kubectl -n ci exec agent-xxxx -c dind -- docker version --format '{{.Server.Version}}'
+AGENT="$(kubectl -n ci get pods -o name | grep '/agent-' | head -1)"
+if [ -n "$AGENT" ]; then
+  kubectl -n ci get "$AGENT" -o yaml | grep -A2 DOCKER_
+  kubectl -n ci exec "$AGENT" -c dind -- docker version --format '{{.Server.Version}}'
+fi
 ```
 
 `values.yaml` pins `DOCKER_TLS_CERTDIR` to an empty string; a `helm upgrade`
@@ -173,8 +184,14 @@ a backup that silently does nothing is indistinguishable from a backup that
 works until the day it does not.
 
 ```bash
-kubectl -n ci create job --from=cronjob/jenkins-backup manual-1   # run it now
-kubectl -n ci logs job/manual-1
+# Empty until ci/backup/ is deployed (TASKS.md).
+CRON="$(kubectl -n ci get cronjob jenkins-backup -o name --ignore-not-found)"
+if [ -n "$CRON" ]; then
+  JOB="manual-$(date +%s)"
+  kubectl -n ci create job --from="$CRON" "$JOB"   # run it now
+  kubectl -n ci wait --for=condition=complete "job/$JOB" --timeout=600s
+  kubectl -n ci logs "job/$JOB"
+fi
 ```
 
 ---
@@ -197,7 +214,9 @@ reports a release it did not perform.
 
 ```bash
 helm history ci -n ci
-helm rollback ci <revision> -n ci
+# The last release that was healthy before the current one:
+REV="$(helm history ci -n ci -o json | jq -r '[.[] | select(.status=="superseded")][-1].revision')"
+helm rollback ci "$REV" -n ci
 kubectl -n ci rollout status sts/ci
 ```
 

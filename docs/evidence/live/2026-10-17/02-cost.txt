@@ -1,0 +1,43 @@
+# Phase 1: the Budget and its thresholds
+# 2026-10-17T23:14:12Z
+$ aws budgets describe-budgets --account-id 348032171026 --query Budgets[].{Name:BudgetName,Limit:BudgetLimit.Amount,Unit:BudgetLimit.Unit} --output table
+------------------------------------------------
+|                DescribeBudgets               |
++-------+-----------------------------+--------+
+| Limit |            Name             | Unit   |
++-------+-----------------------------+--------+
+|  30.0 |  boutique-platform-monthly  |  USD   |
++-------+-----------------------------+--------+
+exit=0
+
+# Phase 1: the estimate for the running shape
+# 2026-10-17T23:14:15Z
+$ scripts/cost-estimate.sh
+Shape: 1xc7i-flex.large+3xt3.small
+instance type            count   vCPU      GiB free-h/bill   EC2 $/mo
+t3.small                     3      6        6     750/1440      29.95
+c7i-flex.large               1      2        0       0/730      61.90
+
+                                                                   
+EBS gp3 volumes         4 x 16GiB =   64GiB | 30GiB free |  34GiB x $0.0800 = $2.72
+ALB                   1 x 730h x $0.0225 = $16.43
+ALB LCU               1 x 2 x 730h x $0.0080 = $11.68
+Snapshots / evidence  4GiB x $0.0500 = $0.20
+Data out              60GiB x $0.0900 = $5.40 (first 100GiB free)
+Logs / ECR            2GiB x $0.5000 = $1.00
+
+TOTAL / month                                            = $129.27  (priced 2026-10-15)
+Remaining 43-day window                                  = $182.85  of a $200 credit (91%)
+Nodes fully inside the pooled 750 free hours: 1.03
+vCPU: 8 of the 8 quota    RAM: 6 GiB
+
+t3 CPU-credit model (t3 is burstable at a 20% baseline, so the cluster
+  sustains 1600m sustained, not the 8000m the instances advertise):
+  platform requests      3850m  (admission guarantee only)
+  expected sustained     1280m  = 80% of baseline -> $0.00/mo surcharge risk
+  worst case sustained   3850m  = requests fully used -> $82.12/mo surcharge risk
+  committed total        $129.27/month   $182.85 over 43 days (guarded)
+  total incl. expected   $129.27/month   $182.85 over 43 days
+  !! total incl. worst case $211.40/month  $299.02 over 43 days - OVER the $200 credit
+exit=0
+

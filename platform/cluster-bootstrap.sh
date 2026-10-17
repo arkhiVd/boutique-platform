@@ -157,7 +157,15 @@ imds_public_ipv4() {
 
 ssm_wait() {
   local name="$1" deadline="$2" waited=0 value
-  until value="$(aws ssm get-parameter --region "$AWS_REGION" --name "$name" \
+  # --with-decryption, always. Without it a SecureString comes back as its KMS
+  # ciphertext ("AQICAH..."), the call still succeeds, and every node joined
+  # the cluster using that ciphertext AS the token: the CMK protected nothing,
+  # since any GetParameter without kms:Decrypt returned the working join token,
+  # and an etcd restore with the real token failed with "bootstrap data ...
+  # encrypted with different token" (found by the 2026-10-17 restore drill;
+  # the live cluster was rotated to the decrypted value with `k3s token
+  # rotate`). The flag is a no-op on the String parameters.
+  until value="$(aws ssm get-parameter --region "$AWS_REGION" --name "$name" --with-decryption \
                  --query 'Parameter.Value' --output text 2>/dev/null)" && [ -n "$value" ]; do
     if [ "$waited" -ge "$deadline" ]; then
       return 1
@@ -319,6 +327,54 @@ else
   K3S_ENV_FILE=/etc/systemd/system/k3s-agent.service.env
 fi
 log "installing: k3s ${K3S_EXEC_COMMAND}"
+
+# Leader-election leases long enough to survive an etcd stall. k3s runs the
+# controller-manager, scheduler and its cloud controller in the SAME process as
+# etcd and the apiserver, and "leaderelection lost" is fatal: the whole server
+# exits. With the upstream 15s lease / 10s renew deadline, a drain that briefly
+# pushed etcd writes past 1.5s killed the leader outright (2026-10-17 19:04:59,
+# its 4th such restart). 60s / 40s rides out that stall; the cost is a slower
+# hand-over of those controllers when a server really dies, which etcd quorum,
+# not these leases, protects. The same file is rolled onto running servers by
+# docs/runbooks/node-loss.md, so a new server and an old one agree.
+if [ "$K3S_NODE_ROLE" = "server" ]; then
+  install -d -m 0755 /etc/rancher/k3s/config.yaml.d
+  cat >/etc/rancher/k3s/config.yaml.d/50-leader-election.yaml <<'LEASES'
+kube-controller-manager-arg+:
+  - leader-elect-lease-duration=60s
+  - leader-elect-renew-deadline=40s
+  - leader-elect-retry-period=10s
+kube-scheduler-arg+:
+  - leader-elect-lease-duration=60s
+  - leader-elect-renew-deadline=40s
+  - leader-elect-retry-period=10s
+kube-cloud-controller-manager-arg+:
+  - leader-elect-lease-duration=60s
+  - leader-elect-renew-deadline=40s
+  - leader-elect-retry-period=10s
+LEASES
+fi
+
+# Memory the kubelet may never hand to pods, and the line at which it evicts
+# them instead. Without this, allocatable was the whole node, and after a drain
+# the scheduler packed the two 2 GB etcd followers until one had 36 MiB
+# available: etcd's pages went to disk, the cluster lost its etcd leader, and
+# the apiserver dropped out repeatedly (2026-10-17). Memory only: CPU is
+# compressible, and reserving it would shrink the HPA CPU budget that
+# apps/boutique/quota.yaml is sized against. A server reserves more because the
+# same k3s process carries etcd and the apiserver.
+install -d -m 0755 /etc/rancher/k3s/config.yaml.d
+if [ "$K3S_NODE_ROLE" = "server" ]; then
+  KUBE_RESERVED_MEM=400Mi
+else
+  KUBE_RESERVED_MEM=200Mi
+fi
+cat >/etc/rancher/k3s/config.yaml.d/60-kubelet-reserved.yaml <<RESERVED
+kubelet-arg+:
+  - kube-reserved=memory=${KUBE_RESERVED_MEM}
+  - system-reserved=memory=150Mi
+  - eviction-hard=memory.available<200Mi,nodefs.available<10%,imagefs.available<15%
+RESERVED
 
 curl -sfL https://get.k3s.io -o /var/tmp/k3s-install.sh \
   || die "could not download the k3s install script"

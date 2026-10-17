@@ -127,7 +127,8 @@ check_prereq() {
     echo "    a kubeconfig-looking file is tracked in git -- remove it"
     return 1
   fi
-  echo "    KUBECONFIG=$KUBECONFIG (mode $(stat -c %a "$KUBECONFIG_PATH"))"
+  # ~ for $HOME: this line is pasted into docs/evidence/, which names no home.
+  echo "    KUBECONFIG=${KUBECONFIG/#$HOME/\~} (mode $(stat -c %a "$KUBECONFIG_PATH"))"
   kubectl version --short 2>/dev/null | sed 's/^/    /' || true
 }
 
@@ -215,6 +216,25 @@ check_pods() {
     return 1
   fi
   echo "    every pod outside kube-system is Running or Succeeded"
+
+  # Running is not Ready. Two fluent-bit pods sat Running at 0/1 for 90 minutes
+  # on 2026-10-17 while this check passed, and a NotReady pod drops out of its
+  # Service's endpoints -- for fluent-bit that silenced its own metrics. Grace of
+  # five minutes so a pod that is merely starting is not a failure.
+  local unready
+  unready="$(printf '%s' "$json" | jq -r --arg now "$(date -u +%s)" '
+      [.items[]
+       | select((.metadata.namespace | test("^kube-(system|public|node-lease)$")) | not)
+       | select(.status.phase == "Running")
+       | select(.metadata.deletionTimestamp == null)
+       | select(((.status.startTime // "1970-01-01T00:00:00Z") | fromdateiso8601) < (($now | tonumber) - 300))
+       | select([.status.containerStatuses[]?.ready] | all | not)
+       | "\(.metadata.namespace)/\(.metadata.name) \([.status.containerStatuses[]? | select(.ready | not) | .name] | join(",")) not ready"] | .[]')"
+  if [ -n "$unready" ]; then
+    echo "    pods Running for 5+ minutes with a container that is not Ready:"
+    printf '      %s\n' "$unready"
+    return 1
+  fi
 
   # A restart count is not a failure by itself -- k3s restarts a pod after a
   # node replacement -- but a double-digit count in a namespace that has not been
@@ -309,6 +329,27 @@ promjson() {
   out="$(kubectl get --raw "${PROM_PROXY}$1" 2>/dev/null)" || return 1
   jq -e '.status == "success"' >/dev/null 2>&1 <<<"$out" || return 1
   printf '%s' "$out"
+}
+
+# The edge, as a user reaches it: through the ALB, one request per host route.
+# Each route is a Traefik IngressRoute naming a backend Service, and a wrong
+# name fails closed into a 404 that nothing in the cluster reports -- the
+# Grafana route pointed at a Service that never existed until 2026-10-17.
+# -k: the edge certificate is self-signed for the .local names.
+check_edge() {
+  local alb rc=0 host path code
+  alb="$(aws elbv2 describe-load-balancers --names boutique-platform-edge \
+           --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null)"
+  if [ -z "$alb" ] || [ "$alb" = None ]; then
+    echo "    cannot resolve the boutique-platform-edge ALB (AWS credentials?)"; return 77
+  fi
+  for route in boutique.local:/ grafana.boutique.local:/api/health jenkins.boutique.local:/login; do
+    host="${route%%:*}" path="${route#*:}"
+    code="$(curl -sk -o /dev/null -m 15 -w '%{http_code}' -H "Host: $host" "https://$alb$path")"
+    printf '    %-26s %-12s -> %s\n' "$host" "$path" "$code"
+    case "$code" in 2??|3??) ;; *) rc=1 ;; esac
+  done
+  return "$rc"
 }
 
 # Added 2026-10-17. Every control-plane target had been failing its scrape for
@@ -433,11 +474,12 @@ run "nodes: $EXPECTED_NODES present, $EXPECTED_NODES Ready, none tainted, none c
 run "spread: one node in each of the ${AZS[*]}" check_spread
 run "apiserver: GET /healthz" check_apiserver
 run "etcd: reachable, and quorum is intact" check_etcd
-run "pods: non-kube-system all Running, no crashloop" check_pods
+run "pods: non-kube-system all Running and Ready, no crashloop" check_pods
 run "disruption: PodDisruptionBudgets are satisfied" check_pdb
 run "autoscaling: HPAs are at or above minReplicas" check_hpa
 run "storage: every PVC is Bound" check_pvc
 run "certificates: client and serving, in days" check_certs
+run "edge: every host route answers through the ALB" check_edge
 run "scrape targets: every active Prometheus target is up" check_targets
 run "alerts: nothing at severity page or critical is firing" check_alerts
 if [ -n "$NODE_LOG_INSTANCE" ]; then

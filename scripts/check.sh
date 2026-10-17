@@ -483,7 +483,7 @@ if need python3 python3 && [[ -d observability ]]; then
       python3 scripts/resource-budget.py --node-count 1 \
       --config-reloader 10m/16Mi \
       --accept-over-commit 250 \
-      --extra ci:jenkins-controller:120m:576Mi \
+      --extra ci:jenkins-controller:120m:1088Mi \
       "$TMP_RENDER"/*.yaml
   else
 
@@ -515,6 +515,16 @@ fi
 cyan "== python =="
 if need python3 python3 && [[ -d scripts ]]; then
   check "python3 -m compileall scripts" -- python3 -m compileall -q scripts
+fi
+
+# Runbooks: every fenced command parses, none is a <placeholder>, and every
+# runbook carries a Last verified date. The live half -- reads run, writes as
+# server-side dry-runs -- needs the cluster, so it is run by hand and its output
+# kept in docs/evidence/phase-13/runbook-check.txt (docs/runbooks/README.md).
+cyan "== runbooks =="
+if need python3 python3; then
+  check "runbooks parse, have no placeholders, carry Last verified" -- \
+    env OFFLINE=1 python3 scripts/check-runbooks.py
 fi
 
 echo
