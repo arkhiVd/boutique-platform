@@ -28,10 +28,11 @@ scripts/doctor.sh   PASS 8 / WARN 4 / FAIL 0   (40 active targets, all up; no pa
 scripts/check.sh    PASS 149 / FAIL 0 / MISSING 0
 ```
 
-**Still open:** the `boutique-platform-alerts` topic has **0 confirmed subscriptions** — the
-bootstrap `alert_email` is a GitHub noreply address that cannot receive the confirmation mail, so
-Budget alerts and cluster alerts publish successfully and reach nobody. Fix: set a real inbox in
-`bootstrap/terraform.tfvars`, `terraform -chdir=bootstrap apply`, click the link. Known warnings:
+**Alert delivery closed the same day:** the bootstrap `alert_email` had been a GitHub noreply
+address that could never confirm, so the topic had 0 subscribers. It now points at a real inbox
+(local tfvars only), `terraform -chdir=bootstrap apply` added the subscription, the inbox confirmed
+it, and both a direct SNS publish and an `amtool`-injected alert went out with no new
+`alertmanager_notifications_failed_total`. Known warnings:
 memory limits overcommitted 121–188% per node (`KubeMemoryOvercommit`), four single-replica PDBs
 block a drain, launch-template AMI drift on a full platform plan, CI's plan-only token default is
 under the 32-character minimum.
