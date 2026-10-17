@@ -26,6 +26,8 @@ frontendHost: boutique.local
 # Fix before the Grafana and Jenkins stages by adding `*.boutique.local` to
 # HOSTS, regenerating, and re-importing to ACM; imported certificates are free.
 grafanaHost: grafana.boutique.local
+# kube-prometheus-stack names its Grafana Service <release>-grafana.
+grafanaService: kube-prometheus-stack-grafana
 jenkinsHost: jenkins.boutique.local
 
 traefik:

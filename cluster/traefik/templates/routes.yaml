@@ -133,7 +133,11 @@ spec:
     - match: Host(`{{ .Values.grafanaHost }}`) && PathPrefix(`/`)
       kind: Rule
       services:
-        - name: grafana
+        # The Service kube-prometheus-stack creates is <release>-grafana. A bare
+        # `grafana` matched nothing: Traefik logged "kubernetes service not
+        # found: observability/grafana" and the host answered 404 on every path
+        # (found by scripts/evidence-capture.sh, 2026-10-17).
+        - name: {{ .Values.grafanaService }}
           namespace: observability
           port: 80
       middlewares:

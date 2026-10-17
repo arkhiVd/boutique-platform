@@ -330,6 +330,27 @@ promjson() {
   printf '%s' "$out"
 }
 
+# The edge, as a user reaches it: through the ALB, one request per host route.
+# Each route is a Traefik IngressRoute naming a backend Service, and a wrong
+# name fails closed into a 404 that nothing in the cluster reports -- the
+# Grafana route pointed at a Service that never existed until 2026-10-17.
+# -k: the edge certificate is self-signed for the .local names.
+check_edge() {
+  local alb rc=0 host path code
+  alb="$(aws elbv2 describe-load-balancers --names boutique-platform-edge \
+           --query 'LoadBalancers[0].DNSName' --output text 2>/dev/null)"
+  if [ -z "$alb" ] || [ "$alb" = None ]; then
+    echo "    cannot resolve the boutique-platform-edge ALB (AWS credentials?)"; return 77
+  fi
+  for route in boutique.local:/ grafana.boutique.local:/api/health jenkins.boutique.local:/login; do
+    host="${route%%:*}" path="${route#*:}"
+    code="$(curl -sk -o /dev/null -m 15 -w '%{http_code}' -H "Host: $host" "https://$alb$path")"
+    printf '    %-26s %-12s -> %s\n' "$host" "$path" "$code"
+    case "$code" in 2??|3??) ;; *) rc=1 ;; esac
+  done
+  return "$rc"
+}
+
 # Added 2026-10-17. Every control-plane target had been failing its scrape for
 # days (sample limit exceeded) while this script said PASS 8 / FAIL 0, because
 # nothing here asked Prometheus whether it could see anything.
@@ -457,6 +478,7 @@ run "disruption: PodDisruptionBudgets are satisfied" check_pdb
 run "autoscaling: HPAs are at or above minReplicas" check_hpa
 run "storage: every PVC is Bound" check_pvc
 run "certificates: client and serving, in days" check_certs
+run "edge: every host route answers through the ALB" check_edge
 run "scrape targets: every active Prometheus target is up" check_targets
 run "alerts: nothing at severity page or critical is firing" check_alerts
 if [ -n "$NODE_LOG_INSTANCE" ]; then
