@@ -77,6 +77,12 @@ aws-ebs-csi-driver:
       # ephemeral by design. A PVC that wants durability opts in with
       # `storageClassName: gp3` and pays for it.
       volumeBindingMode: WaitForFirstConsumer
+      # Expandable. Without it every claim on this class is frozen at its first
+      # size: the apiserver refuses the resize ("only dynamically provisioned
+      # pvc can be resized and the storageclass that provisions the pvc must
+      # support resize"), which the runbook check found on 2026-10-17 against
+      # storage-loki-0. gp3 grows online; it never shrinks.
+      allowVolumeExpansion: true
       # Delete, not Retain: SPEC budgets these volumes as ephemeral observability
       # state with a documented restore path (etcd snapshots, Phase 4), and a
       # Retain class would leave every 16 GiB volume behind on every uninstall

@@ -216,6 +216,25 @@ check_pods() {
   fi
   echo "    every pod outside kube-system is Running or Succeeded"
 
+  # Running is not Ready. Two fluent-bit pods sat Running at 0/1 for 90 minutes
+  # on 2026-10-17 while this check passed, and a NotReady pod drops out of its
+  # Service's endpoints -- for fluent-bit that silenced its own metrics. Grace of
+  # five minutes so a pod that is merely starting is not a failure.
+  local unready
+  unready="$(printf '%s' "$json" | jq -r --arg now "$(date -u +%s)" '
+      [.items[]
+       | select((.metadata.namespace | test("^kube-(system|public|node-lease)$")) | not)
+       | select(.status.phase == "Running")
+       | select(.metadata.deletionTimestamp == null)
+       | select(((.status.startTime // "1970-01-01T00:00:00Z") | fromdateiso8601) < (($now | tonumber) - 300))
+       | select([.status.containerStatuses[]?.ready] | all | not)
+       | "\(.metadata.namespace)/\(.metadata.name) \([.status.containerStatuses[]? | select(.ready | not) | .name] | join(",")) not ready"] | .[]')"
+  if [ -n "$unready" ]; then
+    echo "    pods Running for 5+ minutes with a container that is not Ready:"
+    printf '      %s\n' "$unready"
+    return 1
+  fi
+
   # A restart count is not a failure by itself -- k3s restarts a pod after a
   # node replacement -- but a double-digit count in a namespace that has not been
   # drained is the signature of a crashloop, so it is named here rather than left
@@ -433,7 +452,7 @@ run "nodes: $EXPECTED_NODES present, $EXPECTED_NODES Ready, none tainted, none c
 run "spread: one node in each of the ${AZS[*]}" check_spread
 run "apiserver: GET /healthz" check_apiserver
 run "etcd: reachable, and quorum is intact" check_etcd
-run "pods: non-kube-system all Running, no crashloop" check_pods
+run "pods: non-kube-system all Running and Ready, no crashloop" check_pods
 run "disruption: PodDisruptionBudgets are satisfied" check_pdb
 run "autoscaling: HPAs are at or above minReplicas" check_hpa
 run "storage: every PVC is Bound" check_pvc
