@@ -203,15 +203,24 @@ kc() {
   # CRD-bearing files do one uncached round trip per run. On 2026-10-14 that
   # round trip stalled twice out of five within a single gate run, while the
   # identical kind in an adjacent file passed.
-  local rc=0
-  timeout 60 kubeconform -strict -summary \
+  #
+  # The same retry, for the same reason, when kubeconform exits non-zero and
+  # its output names a schema DOWNLOAD failure rather than a validation one:
+  # on 2026-10-18 two consecutive gate runs each failed one different,
+  # unchanged file this way and both passed alone. A real violation is printed
+  # as "is invalid" and fails the retry identically, so this cannot turn red
+  # green either.
+  local rc=0 out
+  out="$(timeout 60 kubeconform -strict -summary \
     -kubernetes-version "$K8S_VERSION" \
     -cache "$SCHEMA_CACHE" \
     -schema-location "$API_SCHEMAS" \
-    -schema-location "$CRD_SCHEMAS" "$@" && return 0
+    -schema-location "$CRD_SCHEMAS" "$@" 2>&1)" && { printf '%s\n' "$out"; return 0; }
   rc=$?
-  if [[ $rc -eq 124 ]]; then
-    printf 'kubeconform timed out once, retrying\n' >&2
+  printf '%s\n' "$out"
+  if [[ $rc -eq 124 ]] || { ! grep -q 'is invalid' <<<"$out" \
+      && grep -qiE 'error while (downloading|fetching)|could not find schema|connection (reset|refused)|EOF|no such host|TLS handshake|i/o timeout' <<<"$out"; }; then
+    printf 'kubeconform could not fetch a schema (exit %s), retrying once\n' "$rc" >&2
     timeout 60 kubeconform -strict -summary \
       -kubernetes-version "$K8S_VERSION" \
       -cache "$SCHEMA_CACHE" \
