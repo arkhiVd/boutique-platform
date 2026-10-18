@@ -334,7 +334,7 @@ data:
                 "uid": "tempo"
               },
               "queryType": "traceql",
-              "query": "{ resource.service.name = \"checkoutservice\" && status = ok }",
+              "query": "{ resource.service.name = \"checkoutservice\" && kind = server }",
               "limit": 20,
               "refId": "A"
             }
@@ -395,7 +395,7 @@ data:
           },
           "targets": [
             {
-              "expr": "absent(traces_span_metrics_calls_total{service_name=\"frontend\", span_kind=\"SPAN_KIND_SERVER\"})",
+              "expr": "absent(traces_span_metrics_calls_total{service_name=\"frontend\", span_kind=\"SPAN_KIND_SERVER\"}) or vector(0)",
               "instant": true,
               "refId": "A"
             }
@@ -445,7 +445,7 @@ data:
         {
           "type": "stat",
           "title": "Collector targets up",
-          "description": "up{job=\"opentelemetrycollector\"} \u2014 both scrape endpoints (telemetry :8888 self-metrics, metrics :9464 spanmetrics). A 1 here with the panel above red means the collector is alive but the spanmetrics pipeline is not: check the collector's otelcol_processor_* / otelcol_exporter_* metrics two rows over.",
+          "description": "min(up{job=\"opentelemetrycollector\"}) over every collector replica's two scrape endpoints, so 1 = all up (telemetry :8888 self-metrics, metrics :9464 spanmetrics). A 1 here with the panel above red means the collector is alive but the spanmetrics pipeline is not: check the collector's otelcol_processor_* / otelcol_exporter_* metrics two rows over.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -458,7 +458,7 @@ data:
           },
           "targets": [
             {
-              "expr": "count(up{job=\"opentelemetrycollector\"} == 1)",
+              "expr": "min(up{job=\"opentelemetrycollector\"})",
               "instant": true,
               "refId": "A"
             }
@@ -469,10 +469,15 @@ data:
                 {
                   "type": "value",
                   "options": {
-                    "2": {
-                      "text": "both up",
+                    "1": {
+                      "text": "all up",
                       "color": "green",
                       "index": 0
+                    },
+                    "0": {
+                      "text": "a target is DOWN",
+                      "color": "red",
+                      "index": 1
                     }
                   }
                 }
@@ -486,7 +491,7 @@ data:
                   },
                   {
                     "color": "green",
-                    "value": 2
+                    "value": 1
                   }
                 ]
               }

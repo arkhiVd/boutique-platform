@@ -29,8 +29,8 @@ instrumentation exists in any `src/`).
 | | |
 |---|---|
 | **Definition** | the fraction of HTTP requests to a Boutique service that complete with a status other than 5xx |
-| **Numerator** | `sum by (job) (rate(traefik_service_requests_total{code!~"5..", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m]))` |
-| **Denominator** | `sum by (job) (rate(traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m]))` |
+| **Numerator** | `sum by (job) (rate(traefik_service_requests_total{code!~"5..", service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}[5m]))` |
+| **Denominator** | `sum by (job) (rate(traefik_service_requests_total{service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}[5m]))` |
 | **Window** | 5m (the recording interval); 1h, 6h and 3d for the burn-rate alerts |
 | **Target** | 99.9% over 30 days |
 | **Error budget** | 0.1% over 30 days = 43m 12s of total outage |
@@ -43,11 +43,15 @@ The same definition is used by `job:error_ratio:ratio` in the golden-signal
 rules — two error definitions in one platform is how an SLO stops being
 trusted.
 
-**Why `job` and not `service` or `pod`.** The Traefik `service` label is
-`<namespace>-<service-name>-<port>@kubernetes` (verified in Traefik v3.7.13,
-`pkg/provider/kubernetes/ingress/kubernetes.go`). The recording rules extract
-the logical service name with `label_replace` into `job`, so an SLI is a
-statement about a *service*, not about a scrape target or a pod.
+**Why `job` and not `service` or `pod`.** The edge routes with IngressRoute CRDs,
+so the Traefik `service` label is `<route-ns>-<route>-<hash>@kubernetescrd` (for
+the shop: `traefik-frontend-<hash>@kubernetescrd`, measured 2026-10-18). The Traefik
+ServiceMonitor sets `job` from the route name, so an SLI is a statement about a
+*service*, not about a scrape target or a pod. The edge fronts one Boutique
+service, so these SLIs are the frontend's: the user-facing request is the one an
+SLO should be about. (Until 2026-10-18 the rules selected the Ingress provider's
+`<ns>-<svc>-<port>@kubernetes` names, which this edge never emits, and every
+SLI was empty.)
 
 ### SLI 2 — latency
 
@@ -55,8 +59,8 @@ statement about a *service*, not about a scrape target or a pod.
 |---|---|
 | **Definition** | the fraction of HTTP requests to a Boutique service that complete in less than the latency objective |
 | **Objective** | **1.2 seconds** |
-| **Numerator** | `sum by (job, le) (rate(traefik_service_request_duration_seconds_bucket{le="1.2", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m]))` |
-| **Denominator** | `sum by (job) (rate(traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m]))` |
+| **Numerator** | `sum by (job, le) (rate(traefik_service_request_duration_seconds_bucket{le="1.2", service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}[5m]))` |
+| **Denominator** | `sum by (job) (rate(traefik_service_requests_total{service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}[5m]))` |
 | **Window** | 5m recording; 1h, 6h, 3d for the burn-rate alerts |
 | **Target** | 99% of requests under 1.2s, over 30 days |
 | **Error budget** | 1% over 30 days = 7h 12m |

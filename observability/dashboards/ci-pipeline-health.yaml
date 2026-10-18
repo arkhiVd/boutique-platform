@@ -9,7 +9,7 @@
 #
 #   default_jenkins_builds_last_build_result_ordinal
 #        0=SUCCESS, 1=UNSTABLE, 2=FAILURE, 3=NOT_BUILT, 4=ABORTED
-#   default_jenkins_builds_failed_build_count, _total_build_count (counters)
+#   default_jenkins_builds_failed_build_count_total, _total_build_count (counters)
 #   default_jenkins_builds_running_build_duration_milliseconds (gauge)
 #   default_jenkins_executors_queue_length, _defined, _online (gauges)
 #   default_jenkins_nodes_online (gauge)
@@ -132,19 +132,19 @@ data:
           "gridPos": { "h": 8, "w": 24, "x": 0, "y": 10 },
           "targets": [
             {
-              "expr": "sum by (job_name) (increase(default_jenkins_builds_success_build_count[1h]))",
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_success_build_count_total[1h]))",
               "legendFormat": "{{job_name}} success"
             },
             {
-              "expr": "sum by (job_name) (increase(default_jenkins_builds_failed_build_count[1h]))",
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_failed_build_count_total[1h]))",
               "legendFormat": "{{job_name}} failed"
             },
             {
-              "expr": "sum by (job_name) (increase(default_jenkins_builds_unstable_build_count[1h]))",
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_unstable_build_count_total[1h]))",
               "legendFormat": "{{job_name}} unstable"
             },
             {
-              "expr": "sum by (job_name) (increase(default_jenkins_builds_aborted_build_count[1h]))",
+              "expr": "sum by (job_name) (increase(default_jenkins_builds_aborted_build_count_total[1h]))",
               "legendFormat": "{{job_name}} aborted"
             }
           ],
@@ -215,7 +215,7 @@ data:
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
           "targets": [
-            { "expr": "max(default_jenkins_nodes_online)", "legendFormat": "nodes online" }
+            { "expr": "max(jenkins_node_online_value)", "legendFormat": "nodes online" }
           ],
           "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
         }

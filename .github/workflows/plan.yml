@@ -118,8 +118,13 @@ jobs:
       # Dependabot PRs cannot see secrets, so the real plan is skipped for them —
       # a green no-secrets run is still a useful signal, and the plan runs on every
       # human PR.
+      # vars.PLATFORM_DEPLOYED is set to 'false' by the Phase 14 teardown: with
+      # the account back at $0 there is no plan role, no state bucket and
+      # nothing to plan, so the AWS steps are skipped rather than failing every
+      # PR. Every check that needs no account (fmt, validate, tflint, lint,
+      # kubeconform, policy, checkov) still runs.
       - name: configure AWS credentials
-        if: github.actor != 'dependabot[bot]'
+        if: github.actor != 'dependabot[bot]' && vars.PLATFORM_DEPLOYED != 'false'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
@@ -148,14 +153,14 @@ jobs:
         run: echo "TF_VAR_k3s_token=${K3S_TOKEN_PLAN_ONLY:-ci-plan-only-not-a-credential-0000000000000000}" >> "$GITHUB_ENV"
 
       - name: terraform init (backend)
-        if: github.actor != 'dependabot[bot]'
+        if: github.actor != 'dependabot[bot]' && vars.PLATFORM_DEPLOYED != 'false'
         working-directory: platform
         env:
           TF_VAR_bootstrap_state_bucket: ${{ secrets.TF_VAR_BOOTSTRAP_STATE_BUCKET }}
         run: terraform init -input=false -reconfigure -backend-config="bucket=${TF_VAR_bootstrap_state_bucket}"
 
       - name: terraform plan
-        if: github.actor != 'dependabot[bot]'
+        if: github.actor != 'dependabot[bot]' && vars.PLATFORM_DEPLOYED != 'false'
         working-directory: platform
         env:
           TF_VAR_bootstrap_state_bucket: ${{ secrets.TF_VAR_BOOTSTRAP_STATE_BUCKET }}
@@ -186,7 +191,7 @@ jobs:
           quiet: true
 
       - name: post plan and cost on the PR
-        if: github.actor != 'dependabot[bot]' && github.event_name == 'pull_request'
+        if: github.actor != 'dependabot[bot]' && vars.PLATFORM_DEPLOYED != 'false' && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

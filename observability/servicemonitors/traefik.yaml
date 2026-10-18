@@ -71,6 +71,29 @@ spec:
       path: /metrics
       interval: 30s
       scrapeTimeout: 10s
+      # Found 2026-10-18 when the project dashboards were first applied: every
+      # edge panel and every SLO recording rule was empty. Two reasons.
+      #   1. Prometheus attaches `service="traefik"` from the scrape target, so
+      #      Traefik's own `service` label arrives renamed to `exported_service`.
+      #   2. This edge routes with IngressRoute CRDs, whose backend names are
+      #      `<route-ns>-<route>-<hash>@kubernetescrd`, not the Ingress-provider
+      #      `<ns>-<svc>-<port>@kubernetes` the rules were written against.
+      # So: put Traefik's service name back in `service`, and derive `job` from
+      # the route name, once, here -- frontend, grafana, jenkins. Every rule
+      # then selects `service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"`.
+      metricRelabelings:
+        - sourceLabels: [exported_service]
+          regex: "(.+)"
+          targetLabel: service
+          replacement: "$1"
+          action: replace
+        - regex: exported_service
+          action: labeldrop
+        - sourceLabels: [service]
+          regex: "traefik-(.+)-[0-9a-f]+@kubernetescrd"
+          targetLabel: job
+          replacement: "$1"
+          action: replace
       # Traefik's metrics endpoint serves the full registry on one connection;
       # honorLabels would let a relabelled series through unmerged. Left off
       # (the default) so two series with the same name and labels are merged

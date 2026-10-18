@@ -524,14 +524,14 @@ kube-prometheus-stack:
       limits:
         cpu: 50m
         memory: 32Mi
-    ## The subchart already creates a ServiceMonitor for its own /metrics
-    ## endpoint. A second one would scrape the same exporter twice and double
-    ## every node sample in the TSDB, so it stays disabled — the ServiceMonitor
-    ## rendered by the parent chart (`<release>-prometheus-node-exporter`) is the
-    ## single target.
+    ## The node-exporter ServiceMonitor IS this subchart's `prometheus.monitor`:
+    ## kube-prometheus-stack renders no second one. It was disabled on the
+    ## belief that the parent chart scraped the exporter already, so no node
+    ## metric reached Prometheus at all -- node_cpu_seconds_total, memory, disk,
+    ## the USE dashboards, NodeFilesystem* alerts -- until 2026-10-18.
     prometheus:
       monitor:
-        enabled: false
+        enabled: true
 
   ## ---------------------------------------------------------------------------
   ## Grafana

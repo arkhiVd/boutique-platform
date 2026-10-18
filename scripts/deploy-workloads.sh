@@ -88,6 +88,17 @@ step "jenkins secrets" \
 step "kube-prometheus-stack" \
   helm upgrade --install kube-prometheus-stack observability/kube-prometheus-stack -n observability
 
+# Two directories of plain manifests that no chart owns, and that this script
+# did not apply until 2026-10-18: the ServiceMonitors (so the collector, Loki,
+# Fluent Bit, blackbox and Jenkins went unscraped for three days) and the five
+# project dashboards (Grafana showed only the stock ones). Both come after the
+# chart, which installs the ServiceMonitor CRD and the dashboard sidecar.
+step "service monitors" \
+  kubectl apply -f observability/servicemonitors/
+
+step "grafana dashboards" \
+  kubectl apply -f observability/dashboards/
+
 step "loki" \
   helm upgrade --install loki observability/loki -n observability
 

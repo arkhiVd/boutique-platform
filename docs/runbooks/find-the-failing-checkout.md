@@ -36,7 +36,7 @@ carries the response status:
 topk(5,
   sum by (service) (
     rate(traefik_service_requests_total{
-      service=~"boutique-[a-z0-9-]+-[0-9]+@kubernetes", code=~"5.."
+      service=~"traefik-frontend-[0-9a-f]+@kubernetescrd", code=~"5.."
     }[10m])
   )
 )
