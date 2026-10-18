@@ -45,15 +45,21 @@ csi_volumes() { aws ec2 describe-volumes --region "$REGION" --filters Name=tag-k
   --query 'Volumes[].[VolumeId,State,Size,Tags[?Key==`kubernetes.io/created-for/pvc/name`]|[0].Value]' --output text; }
 project_buckets() { aws s3api list-buckets --query "Buckets[?starts_with(Name, 'boutique-platform-')].Name" --output text | tr '\t' '\n'; }
 empty_bucket() { # every object version and delete marker, 1000 per delete call
-  local b="$1" page
+  # The batch goes to delete-objects as a file: 1000 ALB-log keys inline
+  # exceeded the kernel's argument limit ("Argument list too long") on the
+  # first real teardown, 2026-10-18.
+  local b="$1" page batch
+  batch="$(mktemp)"
   while :; do
     # jq, not a JMESPath projection: a bucket with no delete markers (or no
     # versions) makes the projection emit null, and delete-objects rejects it.
     page="$(aws s3api list-object-versions --bucket "$b" --max-items 1000 --output json \
       | jq -c '{Objects: [((.Versions // []) + (.DeleteMarkers // []))[] | {Key, VersionId}], Quiet: true}')"
     [ "$(printf '%s' "$page" | jq '.Objects | length')" -gt 0 ] || break
-    aws s3api delete-objects --bucket "$b" --delete "$page" >/dev/null || return 1
+    printf '%s' "$page" >"$batch"
+    aws s3api delete-objects --bucket "$b" --delete "file://$batch" >/dev/null || { rm -f "$batch"; return 1; }
   done
+  rm -f "$batch"
 }
 versions() { aws s3api list-object-versions --bucket "$1" --output json 2>/dev/null \
   | jq '((.Versions // []) + (.DeleteMarkers // [])) | length'; }
@@ -93,8 +99,17 @@ for b in $(project_buckets); do
 done
 
 cyan "== 3. terraform destroy platform/"
-terraform -chdir=platform destroy -auto-approve -input=false -no-color | tail -3
-[ "${PIPESTATUS[0]}" -eq 0 ] || die "platform destroy failed; state is intact, re-run after fixing"
+# The ALB writes access logs until Terraform deletes it, which is after step 2
+# emptied its bucket and before Terraform reaches the bucket, so the first
+# destroy can stop at "BucketNotEmpty" (seen 2026-10-18). By then the ALB is
+# gone: empty the buckets again and destroy once more.
+if ! terraform -chdir=platform destroy -auto-approve -input=false -no-color | tail -3; then :; fi
+if [ -n "$(terraform -chdir=platform state list 2>/dev/null)" ]; then
+  echo "  resources remain (a log bucket refilled while the ALB was alive); emptying again and retrying"
+  for b in $(project_buckets); do case "$b" in *tfstate*) ;; *) empty_bucket "$b" || die "could not empty $b" ;; esac; done
+  terraform -chdir=platform destroy -auto-approve -input=false -no-color | tail -3
+  [ -z "$(terraform -chdir=platform state list 2>/dev/null)" ] || die "platform destroy failed twice; state is intact, re-run after fixing"
+fi
 
 cyan "== 4. anything the CSI driver left behind"
 csi_volumes | while read -r v state _; do

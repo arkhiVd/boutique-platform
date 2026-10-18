@@ -1,0 +1,30 @@
+$ scripts/teardown.sh --confirm "destroy boutique-platform"   # 2026-10-18T16:59:13Z, rerun after the argument-length fix
+== inventory, account 348032171026
+  terraform state: bootstrap 21 resources, platform 114 resources
+  CSI volumes (not in Terraform state):
+  project buckets and object versions:
+    boutique-platform-alb-logs-audit-7b220c43000292672193b06f60  0
+    boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b        1443
+    boutique-platform-etcd-snapshots-348032171026                19
+    boutique-platform-tfstate-348032171026-us-east-1             346
+  running instances:
+    i-01a7966000fabecf4	c7i-flex.large
+    i-043323974c30b6b52	t3.small
+    i-00cd39226a36dbac3	t3.small
+    i-08c5be6e48a9185d2	t3.small
+== 1. delete the PVCs while the cluster can still reclaim their volumes
+Error from server (NotFound): namespaces "observability" not found
+Error from server (NotFound): namespaces "ci" not found
+== 2. empty the platform buckets (every version)
+  boutique-platform-alb-logs-audit-7b220c43000292672193b06f60
+  boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b
+  boutique-platform-etcd-snapshots-348032171026
+== 3. terraform destroy platform/
+
+Error: deleting S3 Bucket (boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b): operation error S3: DeleteBucket, https response error StatusCode: 409, RequestID: F160ED3HTY0C1F7E, HostID: Cl7hsmRR0pbfqPG2vG5hP9yHEstlwKZJIs+/9LX9mTIBHZYI7f3MU+mhxTf42hglNCyQWJYFssybXteezrCy75rdvUY9rTms, api error BucketNotEmpty: The bucket you tried to delete is not empty. You must delete all versions in the bucket.
+
+aws_vpc.boutique: Destruction complete after 1s
+aws_iam_role.boutique_node: Destruction complete after 1s
+Releasing state lock. This may take a few moments...
+FATAL platform destroy failed; state is intact, re-run after fixing
+exit=1

@@ -1,0 +1,29 @@
+$ scripts/teardown.sh --confirm "destroy boutique-platform"   # 2026-10-18T16:56:41Z
+== inventory, account 348032171026
+  terraform state: bootstrap 21 resources, platform 114 resources
+  CSI volumes (not in Terraform state):
+    vol-02528ebedd34bcf6d	in-use	10	ci
+    vol-08d57b5a53633837e	in-use	10	storage-loki-0
+    vol-082fc1a3e3c7e2ccb	in-use	2	kube-prometheus-stack-grafana
+    vol-01d6e48f171e94c86	in-use	8	prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0
+    vol-05b759fe04fafd6a0	in-use	1	alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0
+    vol-07665d29620003a6a	in-use	10	storage-tempo-0
+  project buckets and object versions:
+    boutique-platform-alb-logs-audit-7b220c43000292672193b06f60  0
+    boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b        1443
+    boutique-platform-etcd-snapshots-348032171026                19
+    boutique-platform-tfstate-348032171026-us-east-1             346
+  running instances:
+    i-01a7966000fabecf4	c7i-flex.large
+    i-043323974c30b6b52	t3.small
+    i-00cd39226a36dbac3	t3.small
+    i-08c5be6e48a9185d2	t3.small
+== 1. delete the PVCs while the cluster can still reclaim their volumes
+namespace "observability" deleted
+namespace "ci" deleted
+== 2. empty the platform buckets (every version)
+  boutique-platform-alb-logs-audit-7b220c43000292672193b06f60
+  boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b
+./scripts/teardown.sh: line 55: /usr/bin/aws: Argument list too long
+FATAL could not empty boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b
+exit=1

@@ -1,4 +1,4 @@
-# Final state, captured before teardown (2026-10-18)
+# Final state, captured before and after teardown (2026-10-18)
 
 Screenshots of the running platform, taken headless just before the Phase 14
 teardown returned the account to $0. Every terminal shot is a real command run
@@ -30,6 +30,9 @@ Alertmanager through port-forwards.
 | `terminal/15-trace.png` | one checkout trace in Tempo and the seven services it touched |
 | `terminal/16-logs.png` | log lines per service shipped to Loki over 24 h |
 | `terminal/17-metrics.png` | every scrape target up, node-exporter 4/4, edge SLO series live |
+| `terminal/18-teardown-inventory.png` | the teardown's inventory: 135 Terraform resources, 6 CSI volumes, 4 buckets, 4 nodes |
+| `terminal/19-teardown-run.png` | the final teardown run: platform and bootstrap destroyed, CI told |
+| `terminal/20-account-empty.png` | afterwards: no instance, bucket, load balancer, volume, IP, VPC, role or OIDC provider left |
 
 ## Browser
 

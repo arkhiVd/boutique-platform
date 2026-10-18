@@ -86,3 +86,11 @@ Status: **proven** (the file shows it), **partial** (shows part of it), **open**
 | a timed etcd restore that serves the app | proven | `phase-13/etcd-restore-local.txt` |
 | every runbook has Last verified and its commands run | proven | `phase-13/runbook-check.txt` (`scripts/check-runbooks.py`, live) |
 | this index | proven | this file |
+
+## Phase 14 — release and teardown
+
+| criterion | status | proof |
+|---|---|---|
+| CI green, plan empty, Dependabot current, docs match | proven | PRs #2–#10; PROGRESS "Phase 14" |
+| teardown executed | proven | `phase-14/teardown-*.txt`, `final/terminal/18–20` |
+| `aws ce get-cost-and-usage` shows $0.00 for the following week | open until 2026-10-26 | the bill settles a week after teardown; the command is at the end of `phase-14/teardown-4-rerun.txt` |
