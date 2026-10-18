@@ -1,6 +1,6 @@
 # boutique-platform — tasks
 
-## Current phase: 14 — release readiness (2026-10-18)
+## Current phase: none — all fourteen phases complete, platform torn down (2026-10-18)
 
 Phases 0–13 are applied and live; Phase 13 (runbooks, DR drills, evidence pack) is on
 `feat/phase-13-operations`. The open items are no longer here: each unproven exit

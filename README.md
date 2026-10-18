@@ -75,7 +75,8 @@ roles create and update; a destroy needs deletes on KMS, WAF, IAM and every buck
 
 ## Status
 
-Phases 0–13 applied and verified live; Phase 14 (release gate and teardown) in progress.
+All fourteen phases complete. The platform ran live from 2026-10-14 and was torn down to $0 on
+2026-10-18; screenshots of it running are in [`docs/evidence/final/`](docs/evidence/final/README.md).
 Results in [`PROGRESS.md`](PROGRESS.md), proof per exit criterion in
 [`docs/evidence/README.md`](docs/evidence/README.md), operations in
 [`docs/runbooks/`](docs/runbooks/README.md), and `scripts/doctor.sh` for the current verdict.

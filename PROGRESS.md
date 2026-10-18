@@ -5,6 +5,37 @@
 
 ---
 
+## 2026-10-18 — Phase 14 closed: the account is back to $0
+
+Final screenshots of the running platform (`docs/evidence/final/`: 20 terminal, 12
+browser) were captured, then `scripts/teardown.sh --confirm "destroy boutique-platform"`
+removed everything. It took three runs, and each failure is in the record
+(`docs/evidence/phase-14/teardown-2-run.txt`, `-3-rerun.txt`, `-4-rerun.txt`):
+
+1. Emptying the ALB-log bucket passed 1000 keys inline: "Argument list too long".
+   The batch now goes to `delete-objects` as a file. Step 1 had already deleted the
+   PVCs, and their six EBS volumes were reclaimed before the nodes went.
+2. The ALB kept writing access logs after its bucket was emptied, so the first
+   destroy stopped at `BucketNotEmpty`. The script now re-empties and destroys once
+   more when resources remain.
+
+Afterwards (`final/terminal/20-account-empty.png`): no running instance, no project
+bucket, load balancer, unattached volume, elastic IP, non-default VPC, project IAM
+role or OIDC provider, and both Terraform states empty. Two KMS keys are in
+PendingDeletion until 2026-11-14 and 2026-11-17, the only way AWS removes a key.
+`PLATFORM_DEPLOYED=false` makes the PR plan job skip its AWS steps from here on.
+
+Still open: confirm the following week's bill reads $0.00 (2026-10-26):
+
+```
+aws ce get-cost-and-usage --time-period Start=2026-10-19,End=2026-10-26 \
+  --granularity DAILY --metrics UnblendedCost \
+  --query 'ResultsByTime[].[TimePeriod.Start,Total.UnblendedCost.Amount]'
+```
+
+Before the teardown, the dashboards were applied for the first time and exposed
+silently empty SLO rules, node metrics and panels; those fixes are PR #9.
+
 ## 2026-10-18 — Phase 14: release gate passed; teardown awaits its approval
 
 | gate (ROADMAP Phase 14) | state |

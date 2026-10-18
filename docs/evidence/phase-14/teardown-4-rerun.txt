@@ -1,0 +1,42 @@
+$ scripts/teardown.sh --confirm "destroy boutique-platform"   # 2026-10-18T17:08:15Z, rerun after the log-bucket race fix
+== inventory, account 348032171026
+  terraform state: bootstrap 21 resources, platform 1 resources
+  CSI volumes (not in Terraform state):
+  project buckets and object versions:
+    boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b        1
+    boutique-platform-tfstate-348032171026-us-east-1             354
+  running instances:
+== 1. delete the PVCs while the cluster can still reclaim their volumes
+  the cluster is unreachable; stranded volumes are deleted in step 4
+== 2. empty the platform buckets (every version)
+  boutique-platform-alb-logs-b5bf8884fcca594f2d068c939b
+== 3. terraform destroy platform/
+Releasing state lock. This may take a few moments...
+
+Destroy complete! Resources: 1 destroyed.
+== 4. anything the CSI driver left behind
+== 5. empty the state bucket, then terraform destroy bootstrap/
+  boutique-platform-tfstate-348032171026-us-east-1
+aws_s3_bucket.tfstate: Destruction complete after 0s
+
+Destroy complete! Resources: 14 destroyed.
+== 6. tell CI there is nothing left to plan
+  repository variable PLATFORM_DEPLOYED=false
+== 7. what is left, by the Project tag
+  arn:aws:ec2:us-east-1:348032171026:security-group/sg-0358461a72a12d571
+  arn:aws:ec2:us-east-1:348032171026:instance/i-043323974c30b6b52
+  arn:aws:kms:us-east-1:348032171026:key/09abffc1-f3e6-4fe2-a324-95c8bb3444d8
+  arn:aws:ec2:us-east-1:348032171026:instance/i-08c5be6e48a9185d2
+  arn:aws:ec2:us-east-1:348032171026:volume/vol-0b906f2b151a43ac2
+  arn:aws:ec2:us-east-1:348032171026:instance/i-00cd39226a36dbac3
+  arn:aws:ec2:us-east-1:348032171026:volume/vol-09e1f8bd4963bfd41
+  arn:aws:ec2:us-east-1:348032171026:volume/vol-09a23ed735b994431
+  arn:aws:ec2:us-east-1:348032171026:instance/i-01a7966000fabecf4
+  arn:aws:kms:us-east-1:348032171026:key/ee1768a5-cdba-498e-ba1a-efb6d2944afe
+  arn:aws:ec2:us-east-1:348032171026:volume/vol-09c3b451479cb2f13
+  took 75s
+
+The bill needs a week to settle. Check it with:
+  aws ce get-cost-and-usage --time-period Start=2026-10-19,End=2026-10-26 \
+    --granularity DAILY --metrics UnblendedCost --query 'ResultsByTime[].[TimePeriod.Start,Total.UnblendedCost.Amount]'
+exit=0
