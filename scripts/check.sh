@@ -189,6 +189,10 @@ kc() {
   # like a broken schema source. Created here so a fresh clone behaves the same
   # as a warm one.
   mkdir -p "$SCHEMA_CACHE"
+  # 120s per attempt, not 60: on 2026-10-18 a single CRD schema fetch from
+  # raw.githubusercontent.com stalled past 60s twice in a row, so both the
+  # attempt and its retry timed out, while the next five runs took seconds.
+  #
   # ONE RETRY, AND ONLY ON exit 124.
   #
   # 124 is `timeout`'s own status: it means the run was killed before it could
@@ -211,7 +215,7 @@ kc() {
   # as "is invalid" and fails the retry identically, so this cannot turn red
   # green either.
   local rc=0 out
-  out="$(timeout 60 kubeconform -strict -summary \
+  out="$(timeout 120 kubeconform -strict -summary \
     -kubernetes-version "$K8S_VERSION" \
     -cache "$SCHEMA_CACHE" \
     -schema-location "$API_SCHEMAS" \
@@ -221,7 +225,7 @@ kc() {
   if [[ $rc -eq 124 ]] || { ! grep -q 'is invalid' <<<"$out" \
       && grep -qiE 'error while (downloading|fetching)|could not find schema|connection (reset|refused)|EOF|no such host|TLS handshake|i/o timeout' <<<"$out"; }; then
     printf 'kubeconform could not fetch a schema (exit %s), retrying once\n' "$rc" >&2
-    timeout 60 kubeconform -strict -summary \
+    timeout 120 kubeconform -strict -summary \
       -kubernetes-version "$K8S_VERSION" \
       -cache "$SCHEMA_CACHE" \
       -schema-location "$API_SCHEMAS" \
