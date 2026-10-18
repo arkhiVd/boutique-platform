@@ -79,4 +79,4 @@ All fourteen phases complete. The platform ran live from 2026-10-14 and was torn
 2026-10-18; screenshots of it running are in [`docs/evidence/final/`](docs/evidence/final/README.md).
 Results in [`PROGRESS.md`](PROGRESS.md), proof per exit criterion in
 [`docs/evidence/README.md`](docs/evidence/README.md), operations in
-[`docs/runbooks/`](docs/runbooks/README.md), and `scripts/doctor.sh` for the current verdict.
+[`docs/runbooks/`](docs/runbooks/README.md), and `scripts/doctor.sh` to verify a redeployed cluster.
