@@ -15,13 +15,14 @@
 #
 #   1. Traefik's ingress metrics — `traefik_service_requests_total` and
 #      `traefik_service_request_duration_seconds`, both labelled with the
-#      Traefik service name. Traefik v3.7.13 (the image k3s v1.36.5+k3s1 ships,
-#      `rancher/mirrored-library-traefik:3.7.13` from the k3s HelmChart manifest)
-#      names that label `<namespace>-<service-name>-<port>@kubernetes` —
-#      confirmed in pkg/provider/kubernetes/ingress/kubernetes.go:
-#          serviceName := provider.Normalize(ingress.Namespace + "-" +
-#              pa.Backend.Service.Name + "-" + portString(pa.Backend.Service.Port))
-#      so for the frontend it is `boutique-frontend-80@kubernetes`.
+#      Traefik service name. This platform does NOT use k3s's bundled Traefik
+#      (it is disabled; cluster/traefik/ installs its own) and routes with
+#      IngressRoute CRDs, so the label is `<route-ns>-<route>-<hash>@kubernetescrd`
+#      -- for the shop, `traefik-frontend-<hash>@kubernetescrd`, measured on the
+#      live edge 2026-10-18. (The rules were first written for the Ingress
+#      provider's `<ns>-<svc>-<port>@kubernetes`, which this edge never emits,
+#      and every edge SLI was empty until then.) The edge fronts one Boutique
+#      service, the frontend, so the edge SLIs are the frontend's.
 #
 #   2. The OTel Collector's spanmetrics connector (Phase 11) — server-side
 #      spans, `traces_span_metrics_calls_total` and
@@ -51,23 +52,22 @@ groups:
       # downstream uses `job`, so a change in Traefik's naming convention is a
       # change to exactly one expression.
       #
-      # The `@kubernetes` suffix is the Ingress provider name
-      # (pkg/provider/kubernetes/ingress/kubernetes.go: `ProviderName = "kubernetes"`,
-      # joined by the aggregator with `@`). It is fixed for this deployment
-      # because k3s enables `providers.kubernetesIngress` and nothing else
-      # (k3s v1.36.5+k3s1 manifests/traefik.yaml).
+      # The `@kubernetescrd` suffix is the IngressRoute provider's name. The
+      # Traefik ServiceMonitor (observability/servicemonitors/traefik.yaml)
+      # already sets `job` from the route name for every series; this record
+      # keeps the derivation visible next to the rules that depend on it.
       - record: boutique:traefik_service
         expr: |
           label_replace(
-            traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"},
-            "job", "$1", "service", "^boutique-(.+)-[0-9]+@kubernetes$"
+            traefik_service_requests_total{service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"},
+            "job", "$1", "service", "^traefik-(.+)-[0-9a-f]+@kubernetescrd$"
           )
 
       # --- request rate ---------------------------------------------------
       - record: job:request_rate:ratio
         expr: |
           sum by (job) (
-            rate(traefik_service_requests_total{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}[5m])
+            rate(traefik_service_requests_total{service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}[5m])
           )
         # Per-second, dimensionless. Labelled only `job`: adding `code` here
         # would multiply the series by the number of HTTP status classes the
@@ -79,17 +79,29 @@ groups:
       # so 4xx is deliberately NOT counted — a 404 on /cart is a client
       # mistake, and counting it would let a broken loadgenerator script
       # consume the availability budget without a single user noticing.
+      # `or 0 * total`: with no 5xx at all the numerator has no series, and a
+      # ratio of nothing is nothing -- the panel said "No data" exactly when the
+      # service was perfectly healthy (2026-10-18). The fallback makes it 0, and
+      # unlike `1 - good/total` it stays right when every request is a 5xx.
       - record: job:error_ratio:ratio
         expr: |
-          sum by (job) (
-            rate(traefik_service_requests_total{
-              code=~"5..", service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
-            }[5m])
+          (
+            sum by (job) (
+              rate(traefik_service_requests_total{
+                code=~"5..", service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"
+              }[5m])
+            )
+            or
+            0 * sum by (job) (
+              rate(traefik_service_requests_total{
+                service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"
+              }[5m])
+            )
           )
           /
           sum by (job) (
             rate(traefik_service_requests_total{
-              service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+              service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"
             }[5m])
           )
 
@@ -105,7 +117,7 @@ groups:
             0.95,
             sum by (job, le) (
               rate(traefik_service_request_duration_seconds_bucket{
-                service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+                service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"
               }[5m])
             )
           )
@@ -115,7 +127,7 @@ groups:
             0.99,
             sum by (job, le) (
               rate(traefik_service_request_duration_seconds_bucket{
-                service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"
+                service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"
               }[5m])
             )
           )
@@ -132,5 +144,5 @@ groups:
       # rather than hidden in a dashboard title.
       - record: boutique:latency_bucket_resolution_seconds
         expr: |
-          count(count by (le) (traefik_service_request_duration_seconds_bucket{service=~"^boutique-[a-z0-9-]+-[0-9]+@kubernetes$"}))
+          count(count by (le) (traefik_service_request_duration_seconds_bucket{service=~"^traefik-frontend-[0-9a-f]+@kubernetescrd$"}))
         # == 4 means the default buckets are in force.
