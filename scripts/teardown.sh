@@ -106,7 +106,16 @@ for b in $(project_buckets); do case "$b" in *tfstate*) echo "  $b"; empty_bucke
 terraform -chdir=bootstrap destroy -auto-approve -input=false -no-color | tail -3
 [ "${PIPESTATUS[0]}" -eq 0 ] || die "bootstrap destroy failed"
 
-cyan "== 6. what is left, by the Project tag"
+cyan "== 6. tell CI there is nothing left to plan"
+# The PR plan job skips its AWS steps when this repository variable is
+# 'false' (.github/workflows/plan.yml); the plan role it would assume is gone.
+if command -v gh >/dev/null && gh variable set PLATFORM_DEPLOYED --body false >/dev/null 2>&1; then
+  echo "  repository variable PLATFORM_DEPLOYED=false"
+else
+  echo "  set the repository variable PLATFORM_DEPLOYED=false by hand (gh unavailable)"
+fi
+
+cyan "== 7. what is left, by the Project tag"
 aws resourcegroupstaggingapi get-resources --region "$REGION" --tag-filters Key=Project,Values=boutique-platform \
   --query 'ResourceTagMappingList[].ResourceARN' --output text | tr '\t' '\n' | sed 's/^/  /'
 csi_volumes | sed 's/^/  volume /'
