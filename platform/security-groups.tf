@@ -156,6 +156,21 @@ resource "aws_security_group_rule" "node_internal_ingress_kubelet" {
   security_group_id        = aws_security_group.boutique_node_internal.id
 }
 
+# node-exporter runs on the host network (it reads the host's /proc and /sys),
+# so Prometheus -- a pod on one node -- scrapes it at <node-ip>:9100 and this SG
+# decides. Without the rule only the node Prometheus happened to run on was
+# reachable: 3 of 4 node-exporter targets timed out (found 2026-10-18 when the
+# node-exporter ServiceMonitor was first enabled).
+resource "aws_security_group_rule" "node_internal_ingress_node_exporter" {
+  type                     = "ingress"
+  description              = "node-exporter metrics on the host network, scraped by Prometheus"
+  from_port                = 9100
+  to_port                  = 9100
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.boutique_node_internal.id
+  security_group_id        = aws_security_group.boutique_node_internal.id
+}
+
 resource "aws_security_group_rule" "node_internal_ingress_etcd" {
   type                     = "ingress"
   description              = "etcd client and peer ports, for the HA quorum across three AZs"
